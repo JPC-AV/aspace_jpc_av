@@ -1,10 +1,21 @@
-# JPC_AV_ASpace
+# Pull a ref_id from ASpace
 
-More to come, but for now:
+This is script will pull a ref_id from ASpace and append it to folder. The script works off of an identifier that is the filename of the digitized video. Each digitized video is in turn in a directory with the same identifier. Addtionally this identifier is physically attached AV objects in the JPC archive. Each AV object has a corresponding archival object record in ASpace. The barcode on the tape matches the barcode in the the corresponding ASpace archival object in the Child Indicator field of the Instances section. When the script finds an archival object in ASpace that has the same idenitifier as a directory, the script pulls the ref_id for that archival object from ASpace and appends it to the directory name. The video file name remains unchaged.
 
-Add an ASpace API URL, username, and password to the creds_template.py file, AND then rename that file locally as `creds.py` (since that's how the credentials are currently imported by the `authenticate.py` file).
+To the run the script you must first enter credentials for the ASpace API you wish to query.
 
-Run `python aspace-rename-directory.py` from the context of the directory that has the group of directories in need of renaming. 
+- open the `creds_template.py` in your favorite editor. 
+- fill in the three needed fields: baseURL, user, password
+    -   baseURL=""https://api-aspace.best-archive-ever.org" "
+    -   user="prince"
+    -   password="rosebud"
+- save this files as `creds.py` in the same directory as creds_template.py - the `authenticate.py` looks for a file called `creds.py` to import credentials from.
+
+Now you script is ready to run. To run it:
+
+- change directories into the directory containing the directories you want to query the API for append the ASpace ref_id to.
+
+Run `python3 aspace-rename-directory.py` from the context of the directory that has the group of directories in need of renaming. 
 
 Example input:
 JPC_AV_04501
