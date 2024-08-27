@@ -1,6 +1,6 @@
 # Append an ASpace Reference ID to Directory Names
 
-This script appends a reference ID (ref_id) from ArchivesSpace (ASpace) to the names of folders that contain digitized video files. It identifies folders by matching a unique identifier, which is both the folder name and the filename of the digitized content, with an archival object record in ASpace. This identifier is also physically marked on the corresponding audiovisual (AV) object in the JPC archive.
+This script appends a reference ID (ref_id) from ArchivesSpace (ASpace) to the names of folders that contain digitized video files. It identifies folders by matching a unique identifier, which is both the folder name and the filename of the digitized content, with an archival object record in ASpace. This identifier is also physically marked on the tape and the case of the corresponding audiovisual (AV) object in the JPC archive.
 
 In detail, each AV object is linked to an archival object record in ASpace, where the identifier in the directory name matches the identifier in the corresponding archival object record within ASpace. The script performs a keyword search in ASpace; when it finds an archival object with an identifier matching that of a directory, it retrieves the ref_id for that archival object and appends it to the directory name. The contents of the directory, including the video file and any other files, remain unchanged.
 
