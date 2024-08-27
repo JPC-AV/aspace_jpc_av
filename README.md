@@ -33,7 +33,7 @@ Before running the script, you must provide your ASpace API credentials:
 
 1. open the `creds_template.py` in your favorite text editor. 
 1. fill in the three needed fields: "baseURL", "user", and "password" as shown below:
-    -   baseURL=""https://api-aspace.best-archive-ever.org" "
+    -   baseURL="https://api-aspace.best-archive-ever.org"
     -   user="prince"
     -   password="rosebud"
 1. Save this file as `creds.py` in the same directory as `creds_template.py`. The `authenticate.py` script will look for the `creds.py` file to import the credentials.
