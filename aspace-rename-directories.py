@@ -82,9 +82,26 @@ def get_refid(q):
     ref_id = search["results"][0]["ref_id"]
 
     if len(search["results"]) > 1:
-        print("uh oh. multiple results.")
+        print("Warning: Multiple results found for query.")
     else:
         return ref_id
+
+
+def fetch_archival_object(repository_id, object_id, headers):
+    """
+    Fetch the existing archival object data from ArchivesSpace.
+    """
+    try:
+        url = f"{baseURL}/repositories/{repository_id}/archival_objects/{object_id}"
+        response = requests.get(url, headers=headers)
+        if response.status_code == 200:
+            return response.json()
+        else:
+            print(f"Failed to fetch archival object: {response.status_code}")
+            return None
+    except Exception as e:
+        print(f"Error fetching archival object: {e}")
+        return None
 
 
 def update_archival_object(repository_id, object_id, updated_data, headers):
@@ -118,6 +135,10 @@ def process_directory(directory):
 
         # Fetch reference ID for the directory
         refid = get_refid(directory)
+        if not refid:
+            print(f"Reference ID not found for directory {directory}. Skipping.\n")
+            return
+
         print(f"Reference ID: {refid}")
 
         # Find the .mkv file
@@ -129,10 +150,15 @@ def process_directory(directory):
         # Use the first .mkv file for duration extraction
         mkv_path = os.path.join(directory, mkv_files[0])
         video_duration = get_video_duration(mkv_path)
-        print(f"Extracted duration: {video_duration}")
+        print(f"Extracted duration: {video_duration} for file: {mkv_path}")
 
-        # Update the archival object in ArchivesSpace
-        archival_object_data = {"extents": []}  # Replace with actual API-fetch logic if needed
+        # Fetch existing archival object
+        archival_object_data = fetch_archival_object(repository.strip("/repositories/"), refid, headers)
+        if not archival_object_data:
+            print(f"Failed to fetch archival object for {refid}. Skipping.\n")
+            return
+
+        # Update the extents field with the video duration
         updated_data = modify_extents_field(archival_object_data, video_duration)
         update_archival_object(repository.strip("/repositories/"), refid, updated_data, headers)
 
