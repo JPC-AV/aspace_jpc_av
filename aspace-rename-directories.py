@@ -154,13 +154,13 @@ def process_directory(directory):
     try:
         print(f"Processing directory: {directory}")
 
-        # Fetch reference ID for the directory
-        refid = get_refid(directory)
-        if not refid:
-            print(f"Reference ID not found for directory {directory}. Skipping.\n")
+        # Fetch the archival_object_id for the directory
+        archival_object_id = get_refid(directory)
+        if not archival_object_id:
+            print(f"Archival object ID not found for directory {directory}. Skipping.\n")
             return
 
-        print(f"Reference ID: {refid}")
+        print(f"Archival Object ID: {archival_object_id}")
 
         # Find the .mkv file
         mkv_files = [f for f in os.listdir(directory) if f.endswith(".mkv")]
@@ -174,17 +174,17 @@ def process_directory(directory):
         print(f"Extracted duration: {video_duration} for file: {mkv_path}")
 
         # Fetch existing archival object
-        archival_object_data = fetch_archival_object(repository.strip("/repositories/"), refid, headers)
+        archival_object_data = fetch_archival_object(repository.strip("/repositories/"), archival_object_id, headers)
         if not archival_object_data:
-            print(f"Failed to fetch archival object for {refid}. Skipping.\n")
+            print(f"Failed to fetch archival object for {archival_object_id}. Skipping.\n")
             return
 
         # Update the extents field with the video duration
         updated_data = modify_extents_field(archival_object_data, video_duration)
-        update_archival_object(repository.strip("/repositories/"), refid, updated_data, headers)
+        update_archival_object(repository.strip("/repositories/"), archival_object_id, updated_data, headers)
 
-        # Rename directory to include reference ID
-        newname = f"{directory}_refid_{refid}"
+        # Rename directory to include the archival_object_id
+        newname = f"{directory}_refid_{archival_object_id}"
         print(f"Renaming directory to: {newname}")
         os.rename(directory, newname)
         print("Directory renamed.\n")
