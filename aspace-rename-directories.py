@@ -76,7 +76,7 @@ def modify_extents_field(data, new_dimensions):
 
 def get_refid(q):
     """
-    Get the archival_object_id (integer) for a directory from ArchivesSpace.
+    Get the archival_object_id (integer) and refid (string) for a directory from ArchivesSpace.
     """
     resource_value = str(repository + resource)
     filter = json.dumps(
@@ -96,14 +96,16 @@ def get_refid(q):
     search = requests.get(baseURL + query, headers=headers).json()
 
     if search.get("results"):
-        # Extract the integer part of the `id` field (archival_object_id)
-        archival_object_id = search["results"][0]["id"].split("/")[-1]
+        # Fetch the `id` field (archival_object_id) and `refid` field
+        result = search["results"][0]
+        archival_object_id = result["id"].split("/")[-1]
+        refid = result.get("ref_id", "")
         if len(search["results"]) > 1:
             print("Warning: Multiple results found for query.")
-        return archival_object_id
+        return archival_object_id, refid
     else:
         print(f"No results found for query: {q}")
-        return None
+        return None, None
 
 
 def fetch_archival_object(repository_id, object_id, headers):
