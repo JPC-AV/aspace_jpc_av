@@ -131,6 +131,8 @@ def update_archival_object(repository_id, object_id, updated_data, headers):
     """
     try:
         url = f"{baseURL}/repositories/{repository_id}/archival_objects/{object_id}"
+        print(f"Updating archival object at URL: {url}")
+        print(f"Payload being sent: {json.dumps(updated_data, indent=2)}")
         response = requests.put(url, headers=headers, data=json.dumps(updated_data))
         if response.status_code == 200:
             print("Archival object updated successfully!")
