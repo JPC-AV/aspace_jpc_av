@@ -96,8 +96,8 @@ def get_refid(q):
     search = requests.get(baseURL + query, headers=headers).json()
 
     if search.get("results"):
-        # Fetch the `id` field (integer archival_object_id)
-        archival_object_id = search["results"][0]["id"]
+        # Extract the integer part of the `id` field (archival_object_id)
+        archival_object_id = search["results"][0]["id"].split("/")[-1]
         if len(search["results"]) > 1:
             print("Warning: Multiple results found for query.")
         return archival_object_id
