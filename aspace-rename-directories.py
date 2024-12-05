@@ -26,8 +26,10 @@ def get_video_duration(file_path):
         media_info = MediaInfo.parse(file_path)
         for track in media_info.tracks:
             if track.track_type == "Video":
-                duration_ms = track.duration
+                duration_ms = track.duration  # MediaInfo duration in milliseconds
                 if duration_ms:
+                    # Ensure duration is converted to an integer
+                    duration_ms = int(duration_ms)
                     hours, remainder = divmod(duration_ms // 1000, 3600)
                     minutes, seconds = divmod(remainder, 60)
                     return f"{int(hours):02}:{int(minutes):02}:{int(seconds):02}"
@@ -35,7 +37,7 @@ def get_video_duration(file_path):
     except Exception as e:
         print(f"Error extracting duration: {e}")
         return "00:00:00"
-
+        
 
 def modify_extents_field(data, new_dimensions):
     """
