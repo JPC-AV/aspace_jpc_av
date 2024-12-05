@@ -17,26 +17,40 @@ directory_list = [entry for entry in os.listdir(current_dir) if os.path.isdir(en
 print(f"The following directories have been found: {directory_list}\n")
 
 
+import subprocess
+import re
+
 def get_video_duration(file_path):
     """
-    Extract the duration of a video file using MediaInfo.
-    Returns the duration in hh:mm:ss format.
+    Extract the duration of a video file using MediaInfo CLI in the desired hh:mm:ss format.
     """
     try:
-        media_info = MediaInfo.parse(file_path)
-        for track in media_info.tracks:
-            if track.track_type == "Video":
-                duration_ms = track.duration  # MediaInfo duration in milliseconds
-                if duration_ms:
-                    # Ensure duration is converted to an integer
-                    duration_ms = int(duration_ms)
-                    hours, remainder = divmod(duration_ms // 1000, 3600)
-                    minutes, seconds = divmod(remainder, 60)
-                    return f"{int(hours):02}:{int(minutes):02}:{int(seconds):02}"
+        # Run MediaInfo with verbose output (-f) on the file
+        result = subprocess.run(
+            ["mediainfo", "-f", file_path],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+
+        # Ensure mediainfo executed successfully
+        if result.returncode != 0:
+            print(f"Error running mediainfo: {result.stderr}")
+            return "00:00:00"
+
+        # Parse the output for the duration in hh:mm:ss format
+        for line in result.stdout.splitlines():
+            # Look for the "Duration" field with the hh:mm:ss format
+            match = re.search(r"Duration\s+:\s+(\d{2}:\d{2}:\d{2})", line)
+            if match:
+                return match.group(1)
+
+        # Default if no match found
         return "00:00:00"
     except Exception as e:
         print(f"Error extracting duration: {e}")
         return "00:00:00"
+
         
 
 def modify_extents_field(data, new_dimensions):
