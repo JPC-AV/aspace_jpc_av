@@ -95,11 +95,13 @@ def fetch_archival_object(repository_id, object_id, headers):
     """
     try:
         url = f"{baseURL}/repositories/{repository_id}/archival_objects/{object_id}"
+        print(f"Fetching archival object from URL: {url}")
         response = requests.get(url, headers=headers)
         if response.status_code == 200:
             return response.json()
         else:
             print(f"Failed to fetch archival object: {response.status_code}")
+            print(f"Response content: {response.text}")
             return None
     except Exception as e:
         print(f"Error fetching archival object: {e}")
