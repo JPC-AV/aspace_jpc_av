@@ -87,11 +87,17 @@ def get_refid(q):
 
 
 def fetch_archival_object(repository_id, object_id, headers):
+    """
+    Fetch the existing archival object data from ArchivesSpace.
+    """
     try:
         url = f"{baseURL}/repositories/{repository_id}/archival_objects/{object_id}"
+        print(f"Fetching archival object from URL: {url}")
         response = requests.get(url, headers=headers, timeout=10)
         if response.status_code == 200:
-            return response.json()
+            data = response.json()
+            print(f"Fetched lock_version: {data.get('lock_version')}")
+            return data
         else:
             print(f"Failed to fetch archival object: {response.status_code}")
             print(f"Response content: {response.text}")
@@ -106,9 +112,13 @@ def update_archival_object(repository_id, object_id, updated_data, headers):
     Update an archival object in ArchivesSpace with validation and a minimal payload.
     """
     try:
-        # Ensure the payload has the correct URI
         if "uri" not in updated_data or not updated_data["uri"].endswith(f"/{object_id}"):
             print("Error: URI in payload does not match the target object ID.")
+            return None
+
+        # Ensure lock_version is included
+        if "lock_version" not in updated_data or updated_data["lock_version"] is None:
+            print("Error: lock_version is missing or null in the payload.")
             return None
 
         # Prepare the minimal update payload
@@ -117,15 +127,13 @@ def update_archival_object(repository_id, object_id, updated_data, headers):
             "ref_id": updated_data["ref_id"],
             "extents": updated_data["extents"],
             "jsonmodel_type": "archival_object",
-            "lock_version": updated_data.get("lock_version")
+            "lock_version": updated_data["lock_version"]
         }
 
-        # Construct the API endpoint URL
         url = f"{baseURL}/repositories/{repository_id}/archival_objects/{object_id}"
-        print(f"API Endpoint: {url}")  # Log the API endpoint for debugging
+        print(f"API Endpoint: {url}")
         print(f"Payload being sent: {json.dumps(minimal_payload, indent=2)}")
 
-        # Retry mechanism
         attempts = 0
         while attempts < 3:
             response = requests.put(url, headers=headers, data=json.dumps(minimal_payload), timeout=10)
