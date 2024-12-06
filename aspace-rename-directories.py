@@ -124,7 +124,7 @@ def update_archival_object(repository_id, object_id, updated_data, headers):
 
         attempts = 0
         while attempts < 3:
-            response = requests.put(url, headers=headers, data=json.dumps(updated_data), timeout=10)
+            response = requests.post(url, headers=headers, data=json.dumps(updated_data), timeout=10)
             if response.status_code == 200:
                 print("Archival object updated successfully!")
                 return response.json()
