@@ -123,18 +123,12 @@ def update_archival_object(repository_id, object_id, updated_data, headers):
 
 
 def clean_payload(data):
-    keys_to_remove = [
-        "create_time", "system_mtime", "user_mtime", "lock_version",
-        "created_by", "last_modified_by"
-    ]
-    for key in keys_to_remove:
-        data.pop(key, None)
-    for field in ["extents", "dates", "instances"]:
-        if field in data:
-            for item in data[field]:
-                for key in keys_to_remove:
-                    item.pop(key, None)
-    return data
+    """
+    Retain only essential fields for the payload.
+    """
+    essential_keys = ["uri", "ref_id", "title", "extents"]
+    cleaned_data = {key: data[key] for key in essential_keys if key in data}
+    return cleaned_data
 
 
 def process_directory(directory):
