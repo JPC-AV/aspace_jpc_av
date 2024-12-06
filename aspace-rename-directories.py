@@ -55,20 +55,18 @@ def get_video_duration(file_path):
 
 def modify_extents_field(data, new_dimensions):
     """
-    Modify the extents field to add the dimensions (duration) and set extent_type to "duration".
+    Modify the extents field to add or update dimensions (duration).
     """
     if "extents" in data:
         for extent in data["extents"]:
-            extent.pop("extent_type", None)  # Remove existing extent_type
-            extent["extent_type"] = "duration"  # Add or update extent_type as "duration"
             extent["dimensions"] = new_dimensions  # Add or update dimensions
     else:
-        # If extents doesn't exist, add a new extents section with dimensions and extent_type
+        # If extents doesn't exist, add a new extents section
         data["extents"] = [
             {
                 "jsonmodel_type": "extent",
                 "extent_type": "duration",
-                "dimensions": new_dimensions,
+                "dimensions": new_dimensions
             }
         ]
     return data
