@@ -10,7 +10,7 @@ import re
 repository = "/repositories/2"
 resource = "/resources/7"
 
-# Define the current working directory (modify if needed)
+# Define the current working directory
 current_dir = os.getcwd()
 print(f"Current working directory: {current_dir}\n")
 
@@ -20,9 +20,6 @@ print(f"The following directories have been found: {directory_list}\n")
 
 
 def get_video_duration(file_path):
-    """
-    Extract the duration of a video file using MediaInfo CLI in the desired hh:mm:ss format.
-    """
     try:
         result = subprocess.run(
             ["mediainfo", "-f", file_path],
@@ -81,6 +78,8 @@ def get_refid(q):
         result = search["results"][0]
         archival_object_id = result["id"].split("/")[-1]
         refid = result.get("ref_id", "")
+        if not refid:
+            print(f"Warning: RefID missing for directory: {q}")
         return archival_object_id, refid
     else:
         print(f"No results found for query: {q}")
@@ -90,15 +89,15 @@ def get_refid(q):
 def fetch_archival_object(repository_id, object_id, headers):
     try:
         url = f"{baseURL}/repositories/{repository_id}/archival_objects/{object_id}"
-        response = requests.get(url, headers=headers)
+        response = requests.get(url, headers=headers, timeout=10)
         if response.status_code == 200:
             return response.json()
         else:
             print(f"Failed to fetch archival object: {response.status_code}")
             print(f"Response content: {response.text}")
             return None
-    except Exception as e:
-        print(f"Error fetching archival object: {e}")
+    except requests.exceptions.RequestException as e:
+        print(f"Network error fetching archival object: {e}")
         return None
 
 
@@ -109,26 +108,26 @@ def update_archival_object(repository_id, object_id, updated_data, headers):
             return None
 
         url = f"{baseURL}/repositories/{repository_id}/archival_objects/{object_id}"
-        response = requests.put(url, headers=headers, data=json.dumps(updated_data))
-        if response.status_code == 200:
-            print("Archival object updated successfully!")
-            return response.json()
-        else:
-            print(f"Failed to update archival object: {response.status_code}")
-            print(f"Response content: {response.text}")
-            return None
-    except Exception as e:
-        print(f"Error updating archival object: {e}")
+        attempts = 0
+        while attempts < 3:
+            response = requests.put(url, headers=headers, data=json.dumps(updated_data), timeout=10)
+            if response.status_code == 200:
+                print("Archival object updated successfully!")
+                return response.json()
+            else:
+                print(f"Failed to update archival object: {response.status_code}")
+                print(f"Response content: {response.text}")
+                attempts += 1
+                print(f"Retrying update... Attempt {attempts}")
+        return None
+    except requests.exceptions.RequestException as e:
+        print(f"Network error updating archival object: {e}")
         return None
 
 
 def clean_payload(data):
-    """
-    Retain only essential fields for the payload.
-    """
     essential_keys = ["uri", "ref_id", "title", "extents"]
-    cleaned_data = {key: data[key] for key in essential_keys if key in data}
-    return cleaned_data
+    return {key: data[key] for key in essential_keys if key in data}
 
 
 def process_directory(directory):
@@ -174,10 +173,11 @@ def rename_directories():
 
 
 def main():
+    global baseURL, headers
+    baseURL, headers = authenticate.login()
     rename_directories()
+    authenticate.logout(headers)
 
 
 if __name__ == "__main__":
-    baseURL, headers = authenticate.login()
     main()
-    authenticate.logout(headers)
