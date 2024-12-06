@@ -130,7 +130,11 @@ def update_archival_object(repository_id, object_id, updated_data, headers):
     Update an archival object in ArchivesSpace.
     """
     try:
-        # Ensure the payload has the correct lock_version
+        # Ensure the payload has the correct URI
+        if "uri" not in updated_data or not updated_data["uri"].endswith(f"/{object_id}"):
+            print("Error: URI in payload does not match the target object ID.")
+            return None
+
         url = f"{baseURL}/repositories/{repository_id}/archival_objects/{object_id}"
         print(f"Updating archival object at URL: {url}")
         print(f"Payload being sent: {json.dumps(updated_data, indent=2)}")
@@ -147,6 +151,7 @@ def update_archival_object(repository_id, object_id, updated_data, headers):
     except Exception as e:
         print(f"Error updating archival object: {e}")
         return None
+
 
 def clean_payload(data):
     """
