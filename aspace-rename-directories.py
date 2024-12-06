@@ -102,15 +102,33 @@ def fetch_archival_object(repository_id, object_id, headers):
 
 
 def update_archival_object(repository_id, object_id, updated_data, headers):
+    """
+    Update an archival object in ArchivesSpace with validation and a minimal payload.
+    """
     try:
+        # Ensure the payload has the correct URI
         if "uri" not in updated_data or not updated_data["uri"].endswith(f"/{object_id}"):
             print("Error: URI in payload does not match the target object ID.")
             return None
 
+        # Prepare the minimal update payload
+        minimal_payload = {
+            "uri": updated_data["uri"],
+            "ref_id": updated_data["ref_id"],
+            "extents": updated_data["extents"],
+            "jsonmodel_type": "archival_object",
+            "lock_version": updated_data.get("lock_version")
+        }
+
+        # Construct the API endpoint URL
         url = f"{baseURL}/repositories/{repository_id}/archival_objects/{object_id}"
+        print(f"API Endpoint: {url}")  # Log the API endpoint for debugging
+        print(f"Payload being sent: {json.dumps(minimal_payload, indent=2)}")
+
+        # Retry mechanism
         attempts = 0
         while attempts < 3:
-            response = requests.put(url, headers=headers, data=json.dumps(updated_data), timeout=10)
+            response = requests.put(url, headers=headers, data=json.dumps(minimal_payload), timeout=10)
             if response.status_code == 200:
                 print("Archival object updated successfully!")
                 return response.json()
