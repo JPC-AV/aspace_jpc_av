@@ -3,6 +3,8 @@ import requests
 import os
 import authenticate
 from pymediainfo import MediaInfo
+import subprocess
+import re
 
 # Base configuration
 repository = "/repositories/2"
@@ -17,51 +19,36 @@ directory_list = [entry for entry in os.listdir(current_dir) if os.path.isdir(en
 print(f"The following directories have been found: {directory_list}\n")
 
 
-import subprocess
-import re
-
 def get_video_duration(file_path):
     """
     Extract the duration of a video file using MediaInfo CLI in the desired hh:mm:ss format.
     """
     try:
-        # Run MediaInfo with verbose output (-f) on the file
         result = subprocess.run(
             ["mediainfo", "-f", file_path],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True
         )
-
-        # Ensure mediainfo executed successfully
         if result.returncode != 0:
             print(f"Error running mediainfo: {result.stderr}")
             return "00:00:00"
 
-        # Parse the output for the duration in hh:mm:ss format
         for line in result.stdout.splitlines():
-            # Look for the "Duration" field with the hh:mm:ss format
             match = re.search(r"Duration\s+:\s+(\d{2}:\d{2}:\d{2})", line)
             if match:
                 return match.group(1)
-
-        # Default if no match found
         return "00:00:00"
     except Exception as e:
         print(f"Error extracting duration: {e}")
         return "00:00:00"
 
-        
 
 def modify_extents_field(data, new_dimensions):
-    """
-    Modify the extents field to add or update dimensions (duration).
-    """
     if "extents" in data:
         for extent in data["extents"]:
-            extent["dimensions"] = new_dimensions  # Add or update dimensions
+            extent["dimensions"] = new_dimensions
     else:
-        # If extents doesn't exist, add a new extents section
         data["extents"] = [
             {
                 "jsonmodel_type": "extent",
@@ -73,9 +60,6 @@ def modify_extents_field(data, new_dimensions):
 
 
 def get_refid(q):
-    """
-    Get the archival_object_id (integer) and refid (string) for a directory from ArchivesSpace.
-    """
     resource_value = str(repository + resource)
     filter = json.dumps(
         {
@@ -94,12 +78,9 @@ def get_refid(q):
     search = requests.get(baseURL + query, headers=headers).json()
 
     if search.get("results"):
-        # Fetch the `id` field (archival_object_id) and `refid` field
         result = search["results"][0]
         archival_object_id = result["id"].split("/")[-1]
         refid = result.get("ref_id", "")
-        if len(search["results"]) > 1:
-            print("Warning: Multiple results found for query.")
         return archival_object_id, refid
     else:
         print(f"No results found for query: {q}")
@@ -107,12 +88,8 @@ def get_refid(q):
 
 
 def fetch_archival_object(repository_id, object_id, headers):
-    """
-    Fetch the existing archival object data from ArchivesSpace.
-    """
     try:
         url = f"{baseURL}/repositories/{repository_id}/archival_objects/{object_id}"
-        print(f"Fetching archival object from URL: {url}")
         response = requests.get(url, headers=headers)
         if response.status_code == 200:
             return response.json()
@@ -126,20 +103,12 @@ def fetch_archival_object(repository_id, object_id, headers):
 
 
 def update_archival_object(repository_id, object_id, updated_data, headers):
-    """
-    Update an archival object in ArchivesSpace.
-    """
     try:
-        # Ensure the payload has the correct URI
         if "uri" not in updated_data or not updated_data["uri"].endswith(f"/{object_id}"):
             print("Error: URI in payload does not match the target object ID.")
             return None
 
         url = f"{baseURL}/repositories/{repository_id}/archival_objects/{object_id}"
-        print(f"Updating archival object at URL: {url}")
-        print(f"Payload being sent: {json.dumps(updated_data, indent=2)}")
-
-        # Send the PUT request
         response = requests.put(url, headers=headers, data=json.dumps(updated_data))
         if response.status_code == 200:
             print("Archival object updated successfully!")
@@ -154,40 +123,23 @@ def update_archival_object(repository_id, object_id, updated_data, headers):
 
 
 def clean_payload(data):
-    """
-    Clean the payload by removing unnecessary fields.
-    """
     keys_to_remove = [
         "create_time", "system_mtime", "user_mtime", "lock_version",
         "created_by", "last_modified_by"
     ]
-
-    # Remove unwanted keys from the main payload
     for key in keys_to_remove:
         data.pop(key, None)
-
-    # Clean nested objects (e.g., extents, dates, instances)
     for field in ["extents", "dates", "instances"]:
         if field in data:
             for item in data[field]:
                 for key in keys_to_remove:
                     item.pop(key, None)
-
     return data
 
 
 def process_directory(directory):
-    """
-    Process a single directory:
-    - Extract video duration from the .mkv file.
-    - Update archival object in ArchivesSpace.
-    - Rename the directory with the refid.
-    """
-    updated_data = clean_payload(modify_extents_field(archival_object_data, video_duration))
     try:
         print(f"Processing directory: {directory}")
-
-        # Fetch the archival_object_id and refid for the directory
         archival_object_id, refid = get_refid(directory)
         if not archival_object_id or not refid:
             print(f"Archival object ID or RefID not found for directory {directory}. Skipping.\n")
@@ -196,41 +148,33 @@ def process_directory(directory):
         print(f"Archival Object ID: {archival_object_id}")
         print(f"RefID: {refid}")
 
-        # Find the .mkv file
         mkv_files = [f for f in os.listdir(directory) if f.endswith(".mkv")]
         if not mkv_files:
             print(f"No .mkv file found in {directory}. Skipping.\n")
             return
 
-        # Use the first .mkv file for duration extraction
         mkv_path = os.path.join(directory, mkv_files[0])
         video_duration = get_video_duration(mkv_path)
         print(f"Extracted duration: {video_duration} for file: {mkv_path}")
 
-        # Fetch existing archival object
         archival_object_data = fetch_archival_object(repository.strip("/repositories/"), archival_object_id, headers)
         if not archival_object_data:
             print(f"Failed to fetch archival object for {archival_object_id}. Skipping.\n")
             return
 
-        # Update the extents field with the video duration
-        updated_data = modify_extents_field(archival_object_data, video_duration)
+        archival_object_data = modify_extents_field(archival_object_data, video_duration)
+        updated_data = clean_payload(archival_object_data)
         update_archival_object(repository.strip("/repositories/"), archival_object_id, updated_data, headers)
 
-        # Rename directory to include the correct refid
         newname = f"{directory}_refid_{refid}"
         print(f"Renaming directory to: {newname}")
         os.rename(directory, newname)
         print("Directory renamed.\n")
-
     except Exception as e:
         print(f"Error processing directory {directory}: {e}")
 
 
 def rename_directories():
-    """
-    Process all directories in the current working directory.
-    """
     for dir in directory_list:
         process_directory(dir)
 
