@@ -130,16 +130,19 @@ def update_archival_object(repository_id, object_id, updated_data, headers):
     Update an archival object in ArchivesSpace.
     """
     try:
+        # Ensure the payload has the correct lock_version
         url = f"{baseURL}/repositories/{repository_id}/archival_objects/{object_id}"
         print(f"Updating archival object at URL: {url}")
         print(f"Payload being sent: {json.dumps(updated_data, indent=2)}")
+
+        # Send the PUT request
         response = requests.put(url, headers=headers, data=json.dumps(updated_data))
         if response.status_code == 200:
             print("Archival object updated successfully!")
             return response.json()
         else:
             print(f"Failed to update archival object: {response.status_code}")
-            print(response.text)
+            print(f"Response content: {response.text}")
             return None
     except Exception as e:
         print(f"Error updating archival object: {e}")
