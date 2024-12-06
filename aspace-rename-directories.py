@@ -148,6 +148,28 @@ def update_archival_object(repository_id, object_id, updated_data, headers):
         print(f"Error updating archival object: {e}")
         return None
 
+def clean_payload(data):
+    """
+    Clean the payload by removing unnecessary fields.
+    """
+    keys_to_remove = [
+        "create_time", "system_mtime", "user_mtime", "lock_version",
+        "created_by", "last_modified_by"
+    ]
+
+    # Remove unwanted keys from the main payload
+    for key in keys_to_remove:
+        data.pop(key, None)
+
+    # Clean nested objects (e.g., extents, dates, instances)
+    for field in ["extents", "dates", "instances"]:
+        if field in data:
+            for item in data[field]:
+                for key in keys_to_remove:
+                    item.pop(key, None)
+
+    return data
+
 
 def process_directory(directory):
     """
