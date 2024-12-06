@@ -20,6 +20,9 @@ print(f"The following directories have been found: {directory_list}\n")
 
 
 def get_video_duration(file_path):
+    """
+    Extract the duration of a video file using MediaInfo CLI in the desired hh:mm:ss format.
+    """
     try:
         result = subprocess.run(
             ["mediainfo", "-f", file_path],
@@ -109,23 +112,26 @@ def fetch_archival_object(repository_id, object_id, headers):
 
 def update_archival_object(repository_id, object_id, updated_data, headers):
     """
-    Update an archival object in ArchivesSpace with validation and a minimal payload.
+    Update an archival object in ArchivesSpace with a simplified payload.
     """
     try:
         if "uri" not in updated_data or not updated_data["uri"].endswith(f"/{object_id}"):
             print("Error: URI in payload does not match the target object ID.")
             return None
 
-        # Ensure lock_version is included
-        if "lock_version" not in updated_data or updated_data["lock_version"] is None:
-            print("Error: lock_version is missing or null in the payload.")
-            return None
-
-        # Prepare the minimal update payload
+        # Simplify the payload to include only required fields
         minimal_payload = {
             "uri": updated_data["uri"],
             "ref_id": updated_data["ref_id"],
-            "extents": updated_data["extents"],
+            "extents": [
+                {
+                    "number": updated_data["extents"][0].get("number", "1"),
+                    "physical_details": updated_data["extents"][0].get("physical_details", ""),
+                    "extent_type": updated_data["extents"][0].get("extent_type", ""),
+                    "jsonmodel_type": "extent",
+                    "dimensions": updated_data["extents"][0]["dimensions"]
+                }
+            ],
             "jsonmodel_type": "archival_object",
             "lock_version": updated_data["lock_version"]
         }
@@ -152,7 +158,7 @@ def update_archival_object(repository_id, object_id, updated_data, headers):
 
 
 def clean_payload(data):
-    essential_keys = ["uri", "ref_id", "title", "extents"]
+    essential_keys = ["uri", "ref_id", "title", "extents", "lock_version"]
     return {key: data[key] for key in essential_keys if key in data}
 
 
@@ -192,7 +198,6 @@ def process_directory(directory):
 
         # Clean the payload to prepare it for the update
         updated_data = clean_payload(archival_object_data)
-        updated_data["lock_version"] = archival_object_data["lock_version"]  # Ensure lock_version is included
 
         # Update the archival object
         update_archival_object(repository.strip("/repositories/"), archival_object_id, updated_data, headers)
