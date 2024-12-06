@@ -90,16 +90,13 @@ def get_refid(q):
 
 
 def fetch_archival_object(repository_id, object_id, headers):
-    """
-    Fetch the existing archival object data from ArchivesSpace.
-    """
     try:
         url = f"{baseURL}/repositories/{repository_id}/archival_objects/{object_id}"
         print(f"Fetching archival object from URL: {url}")
         response = requests.get(url, headers=headers, timeout=10)
         if response.status_code == 200:
             data = response.json()
-            print(f"Fetched lock_version: {data.get('lock_version')}")
+            print(f"Fetched archival object data: {json.dumps(data, indent=2)}")
             return data
         else:
             print(f"Failed to fetch archival object: {response.status_code}")
@@ -112,37 +109,22 @@ def fetch_archival_object(repository_id, object_id, headers):
 
 def update_archival_object(repository_id, object_id, updated_data, headers):
     """
-    Update an archival object in ArchivesSpace with a simplified payload.
+    Update an archival object in ArchivesSpace with a full payload.
     """
     try:
+        # Ensure the payload has the correct URI
         if "uri" not in updated_data or not updated_data["uri"].endswith(f"/{object_id}"):
             print("Error: URI in payload does not match the target object ID.")
             return None
 
-        # Simplify the payload to include only required fields
-        minimal_payload = {
-            "uri": updated_data["uri"],
-            "ref_id": updated_data["ref_id"],
-            "extents": [
-                {
-                    "number": updated_data["extents"][0].get("number", "1"),
-                    "physical_details": updated_data["extents"][0].get("physical_details", ""),
-                    "extent_type": updated_data["extents"][0].get("extent_type", ""),
-                    "jsonmodel_type": "extent",
-                    "dimensions": updated_data["extents"][0]["dimensions"]
-                }
-            ],
-            "jsonmodel_type": "archival_object",
-            "lock_version": updated_data["lock_version"]
-        }
-
+        # Include all fields from the fetched data
         url = f"{baseURL}/repositories/{repository_id}/archival_objects/{object_id}"
         print(f"API Endpoint: {url}")
-        print(f"Payload being sent: {json.dumps(minimal_payload, indent=2)}")
+        print(f"Payload being sent: {json.dumps(updated_data, indent=2)}")
 
         attempts = 0
         while attempts < 3:
-            response = requests.put(url, headers=headers, data=json.dumps(minimal_payload), timeout=10)
+            response = requests.put(url, headers=headers, data=json.dumps(updated_data), timeout=10)
             if response.status_code == 200:
                 print("Archival object updated successfully!")
                 return response.json()
