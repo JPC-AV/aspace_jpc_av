@@ -178,6 +178,7 @@ def process_directory(directory):
     - Update archival object in ArchivesSpace.
     - Rename the directory with the refid.
     """
+    updated_data = clean_payload(modify_extents_field(archival_object_data, video_duration))
     try:
         print(f"Processing directory: {directory}")
 
