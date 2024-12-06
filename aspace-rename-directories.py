@@ -176,15 +176,28 @@ def process_directory(directory):
         video_duration = get_video_duration(mkv_path)
         print(f"Extracted duration: {video_duration} for file: {mkv_path}")
 
+        # Fetch the archival object and ensure lock_version is retrieved
         archival_object_data = fetch_archival_object(repository.strip("/repositories/"), archival_object_id, headers)
         if not archival_object_data:
             print(f"Failed to fetch archival object for {archival_object_id}. Skipping.\n")
             return
 
+        # Modify the extents field with the video duration
         archival_object_data = modify_extents_field(archival_object_data, video_duration)
+
+        # Ensure lock_version is present in the payload
+        if "lock_version" not in archival_object_data or archival_object_data["lock_version"] is None:
+            print("Error: lock_version is missing or null in the payload.")
+            return
+
+        # Clean the payload to prepare it for the update
         updated_data = clean_payload(archival_object_data)
+        updated_data["lock_version"] = archival_object_data["lock_version"]  # Ensure lock_version is included
+
+        # Update the archival object
         update_archival_object(repository.strip("/repositories/"), archival_object_id, updated_data, headers)
 
+        # Rename the directory to include the correct refid
         newname = f"{directory}_refid_{refid}"
         print(f"Renaming directory to: {newname}")
         os.rename(directory, newname)
