@@ -1,27 +1,55 @@
 import json
 import requests
 import os
-import authenticate
+import logging
 from pymediainfo import MediaInfo
 import subprocess
 import re
+import authenticate
+from colorama import Fore, Style, init
 
-# Base configuration
-repository = "/repositories/2"
-resource = "/resources/7"
+# Initialize colorama
+init(autoreset=True)
 
-# Define the current working directory
-current_dir = os.getcwd()
-print(f"Current working directory: {current_dir}\n")
+# Configure logging with color-coded levels
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(message)s",
+    handlers=[logging.StreamHandler()]
+)
 
-# Get a list of all directories in the current directory
-directory_list = [entry for entry in os.listdir(current_dir) if os.path.isdir(entry) and "_refid_" not in entry and "JPC_AV" in entry]
-print(f"The following directories have been found: {directory_list}\n")
+
+class ColoredFormatter(logging.Formatter):
+    """
+    Custom logging formatter with color coding based on log level.
+    """
+    COLORS = {
+        "INFO": Fore.GREEN,
+        "WARNING": Fore.YELLOW,
+        "ERROR": Fore.RED,
+    }
+
+    def format(self, record):
+        level_color = self.COLORS.get(record.levelname, "")
+        formatted_message = super().format(record)
+        return f"{level_color}{formatted_message}{Style.RESET_ALL}"
+
+
+# Replace default formatter with the colored formatter
+for handler in logging.getLogger().handlers:
+    handler.setFormatter(ColoredFormatter("%(asctime)s [%(levelname)s] %(message)s"))
+
+
+def log_spacing():
+    """
+    Add spacing between logs for better readability.
+    """
+    print("\n" + "=" * 79 + "\n")
 
 
 def get_video_duration(file_path):
     """
-    Extract the duration of a video file using MediaInfo CLI in the desired hh:mm:ss format.
+    Extract the duration of a video file using MediaInfo CLI in hh:mm:ss format.
     """
     try:
         result = subprocess.run(
@@ -31,7 +59,7 @@ def get_video_duration(file_path):
             text=True
         )
         if result.returncode != 0:
-            print(f"Error running mediainfo: {result.stderr}")
+            logging.error(f"Error running mediainfo: {result.stderr}")
             return "00:00:00"
 
         for line in result.stdout.splitlines():
@@ -40,169 +68,174 @@ def get_video_duration(file_path):
                 return match.group(1)
         return "00:00:00"
     except Exception as e:
-        print(f"Error extracting duration: {e}")
+        logging.error(f"Error extracting duration: {e}")
         return "00:00:00"
 
 
+def fetch_archival_object(repository_id, object_id, baseURL, headers):
+    """
+    Fetch the full archival object data from ArchivesSpace.
+    """
+    try:
+        url = f"{baseURL}/repositories/{repository_id}/archival_objects/{object_id}"
+        response = requests.get(url, headers=headers, timeout=10)
+        if response.status_code == 200:
+            return response.json()
+        else:
+            logging.error(f"Failed to fetch archival object: {response.status_code}")
+            logging.error(f"Response content: {response.text}")
+            return None
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Network error fetching archival object: {e}")
+        return None
+
+
+def update_archival_object(repository_id, object_id, updated_data, baseURL, headers):
+    """
+    Update the full archival object in ArchivesSpace with all required properties.
+    """
+    try:
+        url = f"{baseURL}/repositories/{repository_id}/archival_objects/{object_id}"
+        attempts = 0
+
+        while attempts < 3:
+            response = requests.post(url, headers=headers, data=json.dumps(updated_data), timeout=10)
+            if response.status_code == 200:
+                logging.info("Archival object updated successfully!")
+                return response.json()
+            else:
+                logging.error(f"Failed to update archival object: {response.status_code}")
+                logging.error(f"Response content: {response.text}")
+                attempts += 1
+                logging.info(f"Retrying update... Attempt {attempts}")
+        return None
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Network error updating archival object: {e}")
+        return None
+
+
 def modify_extents_field(data, new_dimensions):
-    if "extents" in data:
+    """
+    Modify the dimensions field in the extents module of the archival object data.
+    """
+    if "extents" in data and data["extents"]:
+        # Update the dimensions for the first extent entry
         for extent in data["extents"]:
-            extent["dimensions"] = new_dimensions
+            extent["dimensions"] = new_dimensions  # Update only the dimensions field
     else:
+        # Add a default extent if none exists
         data["extents"] = [
             {
                 "jsonmodel_type": "extent",
-                "extent_type": "duration",
-                "dimensions": new_dimensions
+                "extent_type": "1 inch videotape",  # Default type (adjust as needed)
+                "number": "1",
+                "dimensions": new_dimensions,
+                "physical_details": "SD video, color, sound",
+                "portion": "whole"
             }
         ]
     return data
 
 
-def get_refid(q):
-    resource_value = str(repository + resource)
-    filter = json.dumps(
-        {
-            "query": {
-                "jsonmodel_type": "boolean_query",
-                "op": "AND",
-                "subqueries": [
-                    {"jsonmodel_type": "field_query", "field": "primary_type", "value": "archival_object", "literal": True},
-                    {"jsonmodel_type": "field_query", "field": "types", "value": "pui", "negated": True},
-                    {"jsonmodel_type": "field_query", "field": "resource", "value": resource_value, "literal": True},
-                ],
-            }
-        }
-    )
-    query = f"/repositories/2/search?q={q}&page=1&filter={filter}"
-    search = requests.get(baseURL + query, headers=headers).json()
-
-    if search.get("results"):
-        result = search["results"][0]
-        archival_object_id = result["id"].split("/")[-1]
-        refid = result.get("ref_id", "")
-        if not refid:
-            print(f"Warning: RefID missing for directory: {q}")
-        return archival_object_id, refid
-    else:
-        print(f"No results found for query: {q}")
-        return None, None
-
-
-def fetch_archival_object(repository_id, object_id, headers):
-    try:
-        url = f"{baseURL}/repositories/{repository_id}/archival_objects/{object_id}"
-        print(f"Fetching archival object from URL: {url}")
-        response = requests.get(url, headers=headers, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            print(f"Fetched archival object data: {json.dumps(data, indent=2)}")
-            return data
-        else:
-            print(f"Failed to fetch archival object: {response.status_code}")
-            print(f"Response content: {response.text}")
-            return None
-    except requests.exceptions.RequestException as e:
-        print(f"Network error fetching archival object: {e}")
-        return None
-
-
-def update_archival_object(repository_id, object_id, updated_data, headers):
+def process_directory(directory, repository_id, baseURL, headers):
     """
-    Update an archival object in ArchivesSpace with a full payload.
+    Process a single directory: fetch archival object, update metadata, and rename.
     """
     try:
-        # Ensure the payload has the correct URI
-        if "uri" not in updated_data or not updated_data["uri"].endswith(f"/{object_id}"):
-            print("Error: URI in payload does not match the target object ID.")
-            return None
+        logging.info(f"Processing directory: {directory}")
 
-        # Include all fields from the fetched data
-        url = f"{baseURL}/repositories/{repository_id}/archival_objects/{object_id}"
-        print(f"API Endpoint: {url}")
-        print(f"Payload being sent: {json.dumps(updated_data, indent=2)}")
+        # Search for the archival object
+        search_query = f"/repositories/{repository_id}/search?q={directory}&page=1"
+        response = requests.get(baseURL + search_query, headers=headers).json()
+        results = response.get("results", [])
 
-        attempts = 0
-        while attempts < 3:
-            response = requests.post(url, headers=headers, data=json.dumps(updated_data), timeout=10)
-            if response.status_code == 200:
-                print("Archival object updated successfully!")
-                return response.json()
-            else:
-                print(f"Failed to update archival object: {response.status_code}")
-                print(f"Response content: {response.text}")
-                attempts += 1
-                print(f"Retrying update... Attempt {attempts}")
-        return None
-    except requests.exceptions.RequestException as e:
-        print(f"Network error updating archival object: {e}")
-        return None
-
-
-def clean_payload(data):
-    essential_keys = ["uri", "ref_id", "title", "extents", "lock_version"]
-    return {key: data[key] for key in essential_keys if key in data}
-
-
-def process_directory(directory):
-    try:
-        print(f"Processing directory: {directory}")
-        archival_object_id, refid = get_refid(directory)
-        if not archival_object_id or not refid:
-            print(f"Archival object ID or RefID not found for directory {directory}. Skipping.\n")
+        if not results:
+            logging.warning(f"No results found for query: {directory}")
             return
 
-        print(f"Archival Object ID: {archival_object_id}")
-        print(f"RefID: {refid}")
+        archival_object_id = results[0]["id"].split("/")[-1]
+        refid = results[0].get("ref_id", None)
 
+        # Log the retrieved values
+        logging.info(f"Archival Object ID: {archival_object_id}, RefID: {refid}")
+
+        if not refid:
+            logging.warning(f"RefID is missing for directory: {directory}. Skipping renaming.")
+            return
+
+        # Find the .mkv file
         mkv_files = [f for f in os.listdir(directory) if f.endswith(".mkv")]
         if not mkv_files:
-            print(f"No .mkv file found in {directory}. Skipping.\n")
+            logging.warning(f"No .mkv file found in {directory}. Skipping.")
             return
 
         mkv_path = os.path.join(directory, mkv_files[0])
         video_duration = get_video_duration(mkv_path)
-        print(f"Extracted duration: {video_duration} for file: {mkv_path}")
+        logging.info(f"Extracted duration: {video_duration} for file: {mkv_path}")
 
-        # Fetch the archival object and ensure lock_version is retrieved
-        archival_object_data = fetch_archival_object(repository.strip("/repositories/"), archival_object_id, headers)
+        # Fetch the archival object
+        archival_object_data = fetch_archival_object(repository_id, archival_object_id, baseURL, headers)
         if not archival_object_data:
-            print(f"Failed to fetch archival object for {archival_object_id}. Skipping.\n")
+            logging.error(f"Failed to fetch archival object for {archival_object_id}. Skipping.")
             return
 
-        # Modify the extents field with the video duration
+        # Update the extents field
         archival_object_data = modify_extents_field(archival_object_data, video_duration)
 
-        # Ensure lock_version is present in the payload
-        if "lock_version" not in archival_object_data or archival_object_data["lock_version"] is None:
-            print("Error: lock_version is missing or null in the payload.")
+        # Update the archival object
+        updated_object = update_archival_object(repository_id, archival_object_id, archival_object_data, baseURL, headers)
+        if not updated_object:
+            logging.error(f"Failed to update archival object: {archival_object_id}. Skipping.")
             return
 
-        # Clean the payload to prepare it for the update
-        updated_data = clean_payload(archival_object_data)
-
-        # Update the archival object
-        update_archival_object(repository.strip("/repositories/"), archival_object_id, updated_data, headers)
-
-        # Rename the directory to include the correct refid
+        # Rename the directory
         newname = f"{directory}_refid_{refid}"
-        print(f"Renaming directory to: {newname}")
-        os.rename(directory, newname)
-        print("Directory renamed.\n")
+        if not os.path.exists(newname):
+            os.rename(directory, newname)
+            logging.info(f"Directory renamed to:")
+            logging.info(f"  -> {newname}")
+        else:
+            logging.warning(f"Directory {newname} already exists. Skipping rename.")
     except Exception as e:
-        print(f"Error processing directory {directory}: {e}")
+        logging.error(f"Error processing directory {directory}: {e}")
 
 
-def rename_directories():
+
+def rename_directories(repository_id, baseURL, headers):
+    """
+    Process all directories in the current working directory.
+    """
+    current_dir = os.getcwd()
+    logging.info(f"Current working directory: {current_dir}")
+    log_spacing()
+
+    directory_list = [
+        entry for entry in os.listdir(current_dir)
+        if os.path.isdir(entry) and "_refid_" not in entry and "JPC_AV" in entry
+    ]
+    logging.info("The following directories have been found:")
     for dir in directory_list:
-        process_directory(dir)
+        logging.info(f"  - {dir}")
+    log_spacing()
+
+    for directory in directory_list:
+        process_directory(directory, repository_id, baseURL, headers)
+        log_spacing()  # Add spacing after each directory's logs
 
 
 def main():
-    global baseURL, headers
+    """
+    Main function to authenticate, process directories, and log out.
+    """
+    repository_id = "2"  # Define repository ID here
     baseURL, headers = authenticate.login()
-    rename_directories()
-    authenticate.logout(headers)
+
+    logging.info("Login successful!")
+    log_spacing()
+
+    rename_directories(repository_id, baseURL, headers)
+
+    logging.info("Logout successful!")
 
 
 if __name__ == "__main__":
