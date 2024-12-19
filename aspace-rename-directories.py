@@ -72,6 +72,37 @@ def get_video_duration(file_path):
         return "00:00:00"
 
 
+def get_refid(query, repository, resource, baseURL, headers):
+    """
+    Fetch the RefID for a given directory query.
+    """
+    resource_value = str(repository + resource)
+    filter = json.dumps(
+        {
+            "query": {
+                "jsonmodel_type": "boolean_query",
+                "op": "AND",
+                "subqueries": [
+                    {"jsonmodel_type": "field_query", "field": "primary_type", "value": "archival_object", "literal": True},
+                    {"jsonmodel_type": "field_query", "field": "types", "value": "pui", "negated": True},
+                    {"jsonmodel_type": "field_query", "field": "resource", "value": resource_value, "literal": True},
+                ],
+            }
+        }
+    )
+    search_query = f"/repositories/2/search?q={query}&page=1&filter={filter}"
+    response = requests.get(baseURL + search_query, headers=headers).json()
+    
+    # Extract and return the RefID
+    if response.get("results"):
+        ref_id = response["results"][0].get("ref_id", None)
+        archival_object_id = response["results"][0]["id"].split("/")[-1]
+        return ref_id, archival_object_id
+    else:
+        logging.warning(f"No results found for query: {query}")
+        return None, None
+
+
 def fetch_archival_object(repository_id, object_id, baseURL, headers):
     """
     Fetch the full archival object data from ArchivesSpace.
@@ -96,19 +127,14 @@ def update_archival_object(repository_id, object_id, updated_data, baseURL, head
     """
     try:
         url = f"{baseURL}/repositories/{repository_id}/archival_objects/{object_id}"
-        attempts = 0
-
-        while attempts < 3:
-            response = requests.post(url, headers=headers, data=json.dumps(updated_data), timeout=10)
-            if response.status_code == 200:
-                logging.info("Archival object updated successfully!")
-                return response.json()
-            else:
-                logging.error(f"Failed to update archival object: {response.status_code}")
-                logging.error(f"Response content: {response.text}")
-                attempts += 1
-                logging.info(f"Retrying update... Attempt {attempts}")
-        return None
+        response = requests.post(url, headers=headers, data=json.dumps(updated_data), timeout=10)
+        if response.status_code == 200:
+            logging.info("Archival object updated successfully!")
+            return response.json()
+        else:
+            logging.error(f"Failed to update archival object: {response.status_code}")
+            logging.error(f"Response content: {response.text}")
+            return None
     except requests.exceptions.RequestException as e:
         logging.error(f"Network error updating archival object: {e}")
         return None
@@ -121,7 +147,7 @@ def modify_extents_field(data, new_dimensions):
     if "extents" in data and data["extents"]:
         # Update the dimensions for the first extent entry
         for extent in data["extents"]:
-            extent["dimensions"] = new_dimensions  # Update only the dimensions field
+            extent["dimensions"] = new_dimensions
     else:
         # Add a default extent if none exists
         data["extents"] = [
@@ -137,73 +163,9 @@ def modify_extents_field(data, new_dimensions):
     return data
 
 
-def process_directory(directory, repository_id, baseURL, headers):
+def rename_and_update_directories(repository, resource, baseURL, headers):
     """
-    Process a single directory: fetch archival object, update metadata, and rename.
-    """
-    try:
-        logging.info(f"Processing directory: {directory}")
-
-        # Search for the archival object
-        search_query = f"/repositories/{repository_id}/search?q={directory}&page=1"
-        response = requests.get(baseURL + search_query, headers=headers).json()
-        results = response.get("results", [])
-
-        if not results:
-            logging.warning(f"No results found for query: {directory}")
-            return
-
-        archival_object_id = results[0]["id"].split("/")[-1]
-        refid = results[0].get("ref_id", None)
-
-        # Log the retrieved values
-        logging.info(f"Archival Object ID: {archival_object_id}, RefID: {refid}")
-
-        if not refid:
-            logging.warning(f"RefID is missing for directory: {directory}. Skipping renaming.")
-            return
-
-        # Find the .mkv file
-        mkv_files = [f for f in os.listdir(directory) if f.endswith(".mkv")]
-        if not mkv_files:
-            logging.warning(f"No .mkv file found in {directory}. Skipping.")
-            return
-
-        mkv_path = os.path.join(directory, mkv_files[0])
-        video_duration = get_video_duration(mkv_path)
-        logging.info(f"Extracted duration: {video_duration} for file: {mkv_path}")
-
-        # Fetch the archival object
-        archival_object_data = fetch_archival_object(repository_id, archival_object_id, baseURL, headers)
-        if not archival_object_data:
-            logging.error(f"Failed to fetch archival object for {archival_object_id}. Skipping.")
-            return
-
-        # Update the extents field
-        archival_object_data = modify_extents_field(archival_object_data, video_duration)
-
-        # Update the archival object
-        updated_object = update_archival_object(repository_id, archival_object_id, archival_object_data, baseURL, headers)
-        if not updated_object:
-            logging.error(f"Failed to update archival object: {archival_object_id}. Skipping.")
-            return
-
-        # Rename the directory
-        newname = f"{directory}_refid_{refid}"
-        if not os.path.exists(newname):
-            os.rename(directory, newname)
-            logging.info(f"Directory renamed to:")
-            logging.info(f"  -> {newname}")
-        else:
-            logging.warning(f"Directory {newname} already exists. Skipping rename.")
-    except Exception as e:
-        logging.error(f"Error processing directory {directory}: {e}")
-
-
-
-def rename_directories(repository_id, baseURL, headers):
-    """
-    Process all directories in the current working directory.
+    Rename directories and update the dimensions field in the archival object.
     """
     current_dir = os.getcwd()
     logging.info(f"Current working directory: {current_dir}")
@@ -219,21 +181,53 @@ def rename_directories(repository_id, baseURL, headers):
     log_spacing()
 
     for directory in directory_list:
-        process_directory(directory, repository_id, baseURL, headers)
-        log_spacing()  # Add spacing after each directory's logs
+        try:
+            logging.info(f"Processing directory: {directory}")
+            refid, archival_object_id = get_refid(directory, repository, resource, baseURL, headers)
+            if refid:
+                mkv_files = [f for f in os.listdir(directory) if f.endswith(".mkv")]
+                if not mkv_files:
+                    logging.warning(f"No .mkv file found in {directory}. Skipping.")
+                    continue
+
+                mkv_path = os.path.join(directory, mkv_files[0])
+                video_duration = get_video_duration(mkv_path)
+                logging.info(f"Extracted duration: {video_duration} for file: {mkv_path}")
+
+                archival_object_data = fetch_archival_object(repository.strip("/repositories/"), archival_object_id, baseURL, headers)
+                if not archival_object_data:
+                    logging.error(f"Failed to fetch archival object for {archival_object_id}. Skipping.")
+                    continue
+
+                archival_object_data = modify_extents_field(archival_object_data, video_duration)
+                update_archival_object(repository.strip("/repositories/"), archival_object_id, archival_object_data, baseURL, headers)
+
+                newname = f"{directory}_refid_{refid}"
+                if not os.path.exists(newname):
+                    os.rename(directory, newname)
+                    logging.info(f"Directory renamed to:")
+                    logging.info(f"  -> {newname}")
+                else:
+                    logging.warning(f"Directory {newname} already exists. Skipping rename.")
+            else:
+                logging.warning(f"RefID not found for directory: {directory}. Skipping.")
+        except Exception as e:
+            logging.error(f"Error processing directory {directory}: {e}")
+        log_spacing()
 
 
 def main():
     """
     Main function to authenticate, process directories, and log out.
     """
-    repository_id = "2"  # Define repository ID here
+    repository = "/repositories/2"
+    resource = "/resources/7"
     baseURL, headers = authenticate.login()
 
     logging.info("Login successful!")
     log_spacing()
 
-    rename_directories(repository_id, baseURL, headers)
+    rename_and_update_directories(repository, resource, baseURL, headers)
 
     logging.info("Logout successful!")
 
