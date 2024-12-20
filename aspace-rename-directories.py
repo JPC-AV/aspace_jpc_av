@@ -1,3 +1,36 @@
+"""
+ArchivesSpace Directory Processing Script
+
+This script processes directories containing digitized video files, performing the following tasks:
+1. Extracts video runtime metadata (hh:mm:ss) from .mkv files using `mediainfo`.
+2. Updates the corresponding ArchivesSpace (ASpace) record's extent dimensions with the extracted runtime.
+3. Renames directories to include the ASpace reference ID (ref_id).
+
+Expected Input Directory Structure:
+- The script assumes a directory structure where each subdirectory corresponds to a unique AV identifier.
+- Subdirectory names must follow the pattern `JPC_AV_XXXXX` (e.g., `JPC_AV_00001`).
+- Each subdirectory should contain:
+    - A `.mkv` video file (e.g., `JPC_AV_00001.mkv`).
+    - Optional metadata or supplementary files related to the video file.
+
+Example:
+JPC_AV_00001/
+├── JPC_AV_00001.mkv
+├── JPC_AV_00001_metadata.txt
+└── JPC_AV_00001_checksums.md5
+
+The script appends the ref_id retrieved from ArchivesSpace to the directory name.
+After processing, the directory will be renamed to include the ref_id, e.g., `JPC_AV_00001_refid_b645fa3ffd01ad7364c9658f83fdceda`.
+
+Dependencies:
+- Python modules: `json`, `requests`, `os`, `logging`, `pymediainfo`, `subprocess`, `re`, `colorama`
+- A valid ArchivesSpace API session with appropriate credentials (managed via `creds.py` and `authenticate.py`).
+
+Usage:
+- Ensure the script is executed from the parent directory containing the target subdirectories.
+- Run the script using `python3 aspace-rename-directories.py`.
+"""
+
 import json  # Library for working with JSON data structures
 import requests  # Library for making HTTP requests
 import os  # Library for interacting with the operating system (e.g., files, directories)
@@ -5,7 +38,7 @@ import logging  # Library for logging messages (e.g., info, warnings, errors)
 from pymediainfo import MediaInfo  # External library to extract metadata from media files
 import subprocess  # Library for running external commands and capturing their output
 import re  # Library for working with regular expressions (text pattern matching)
-import authenticate  # Custom module assumed to handle API authentication
+import authenticate  # Import the authentication module
 from colorama import Fore, Style, init  # Library for adding colored output to terminal messages
 
 # Initialize Colorama for cross-platform compatibility of colored terminal output
@@ -14,7 +47,7 @@ init(autoreset=True)
 # Configure the logging system to display messages with different log levels
 logging.basicConfig(
     level=logging.INFO,  # Set the logging level to INFO (logs INFO, WARNING, ERROR)
-    format="%(message)s",  # Specify the format of log messages (only the message text)
+    format="%(asctime)s [%(levelname)s] %(message)s",  # Specify the format of log messages (only the message text)
     handlers=[logging.StreamHandler()]  # Specify the log destination (console output)
 )
 
@@ -131,6 +164,79 @@ def get_refid(query, repository, resource, baseURL, headers):
         logging.error(f"Error fetching RefID for query {query}: {e}")
         return None, None  # Default return values on error
 
+def rename_and_update_directories(repository, resource, baseURL, headers):
+    """
+    Process directories to:
+    - Extract video metadata.
+    - Update ASpace records with the video runtime.
+    - Rename directories to include the ASpace RefID.
+
+    Args:
+        repository (str): The repository path in ArchivesSpace.
+        resource (str): The resource path in ArchivesSpace.
+        baseURL (str): The base URL for the ArchivesSpace API.
+        headers (dict): The headers containing the session token for API authentication.
+    """
+    # Get the current working directory
+    current_dir = os.getcwd()
+    logging.info(f"Current working directory: {current_dir}")
+    log_spacing()
+
+    # Find all directories to process
+    directory_list = [
+        entry for entry in os.listdir(current_dir)
+        if os.path.isdir(entry) and "_refid_" not in entry and "JPC_AV" in entry
+    ]
+    logging.info("The following directories have been found:")
+    for directory in directory_list:
+        logging.info(f"  - {directory}")
+    log_spacing()
+
+    # Process each directory
+    for directory in directory_list:
+        try:
+            logging.info(f"Processing directory: {directory}")
+
+            # Step 1: Get RefID and Archival Object ID
+            refid, archival_object_id = get_refid(directory, repository, resource, baseURL, headers)
+            if not refid or not archival_object_id:
+                logging.warning(f"No matching archival object found for directory: {directory}. Skipping.")
+                continue
+
+            logging.info(f"RefID: {refid}, Archival Object ID: {archival_object_id}")
+
+            # Step 2: Find the .mkv file and extract its runtime
+            mkv_files = [f for f in os.listdir(directory) if f.endswith(".mkv")]
+            if not mkv_files:
+                logging.warning(f"No .mkv file found in directory: {directory}. Skipping.")
+                continue
+
+            mkv_path = os.path.join(directory, mkv_files[0])
+            video_duration = get_video_duration(mkv_path)
+            logging.info(f"Extracted runtime: {video_duration} for file: {mkv_path}")
+
+            # Step 3: Fetch and update the archival object in ArchivesSpace
+            archival_object_data = fetch_archival_object(repository.strip("/repositories/"), archival_object_id, baseURL, headers)
+            if not archival_object_data:
+                logging.error(f"Failed to fetch archival object for ID: {archival_object_id}. Skipping.")
+                continue
+
+            updated_data = modify_extents_field(archival_object_data, video_duration)
+            if not update_archival_object(repository.strip("/repositories/"), archival_object_id, updated_data, baseURL, headers):
+                logging.error(f"Failed to update archival object for ID: {archival_object_id}. Skipping.")
+                continue
+
+            # Step 4: Rename the directory to include the RefID
+            new_directory_name = f"{directory}_refid_{refid}"
+            os.rename(directory, new_directory_name)
+            logging.info(f"Directory renamed to: {new_directory_name}")
+
+        except Exception as e:
+            logging.error(f"An error occurred while processing directory {directory}: {e}")
+
+        log_spacing()  # Add spacing between directories
+
+
 def fetch_archival_object(repository_id, object_id, baseURL, headers):
     """
     Fetch the full JSON representation of an archival object from ArchivesSpace.
@@ -220,25 +326,39 @@ def modify_extents_field(data, new_dimensions):
 
 def main():
     """
-    Main function to authenticate, process directories, and log out.
-    This function orchestrates the entire script workflow, including:
-    - Authentication with ArchivesSpace.
-    - Processing directories to extract video metadata and update records.
-    - Renaming directories with RefIDs.
-    - Logging out from ArchivesSpace.
+    Main function to:
+    1. Authenticate with ArchivesSpace.
+    2. Process directories to extract video metadata, update ASpace records, and rename directories.
+    3. Log out from ArchivesSpace.
     """
-    repository = "/repositories/2"  # Define the repository path
-    resource = "/resources/7"  # Define the resource path
-    baseURL, headers = authenticate.login()  # Authenticate with ArchivesSpace
+    # Define repository and resource paths for ArchivesSpace
+    repository = "/repositories/2"
+    resource = "/resources/7"
 
-    logging.info("Login successful!")  # Log successful login
-    log_spacing()  # Add spacing for better log readability
+    # Step 1: Authenticate and obtain session headers
+    baseURL, headers = authenticate.login()  # Attempt to log in to ArchivesSpace
+    if not baseURL or not headers:
+        logging.error("Authentication failed! Exiting the script.")
+        return  # Exit the function if authentication fails
 
-    # Call the function to process directories and perform updates
-    rename_and_update_directories(repository, resource, baseURL, headers)
+    # Log successful login
+    logging.info("Login successful!")
+    log_spacing()  # Add spacing for log readability
 
-    logging.info("Logout successful!")  # Log successful logout
-    authenticate.logout(headers)  # Log out from ArchivesSpace
+    try:
+        # Step 2: Process directories and perform updates
+        # This assumes a function like `rename_and_update_directories()` exists in your script
+        logging.info("Starting to process directories...")
+        rename_and_update_directories(repository, resource, baseURL, headers)
+
+    except Exception as e:
+        # Catch unexpected errors during processing
+        logging.error(f"An error occurred during directory processing: {e}")
+
+    finally:
+        # Step 3: Ensure logout is always attempted, even if an error occurs
+        authenticate.logout(headers)
+        logging.info("Logout successful!")
 
 if __name__ == "__main__":
     main()  # Run the main function
