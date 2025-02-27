@@ -100,7 +100,7 @@ JPC_AV_00001_refid_b645fa3ffd01ad7364c9658f83fdceda
 2. Navigate to the root directory containing the target directories.
 3. Run the script using Python:
    ```
-   python3 <path-to-script>/aspace-video-update.py
+   python3 <path-to-script>/aspace-rename-directories.py
    ```
 
 ## Example Log Output
