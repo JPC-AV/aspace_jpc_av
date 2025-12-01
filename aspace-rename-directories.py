@@ -3,7 +3,7 @@ ArchivesSpace Directory Processing Script
 
 This script processes directories containing digitized video files, performing the following tasks:
 1. Extracts video runtime metadata (hh:mm:ss) from .mkv files using `mediainfo`.
-2. Updates the corresponding ArchivesSpace (ASpace) record's extent dimensions with the extracted runtime.
+2. Updates the corresponding ArchivesSpace (ASpace) record's abstract note with the extracted runtime.
 3. Renames directories to include the ASpace reference ID (ref_id).
 
 Expected Input Directory Structure:
@@ -121,8 +121,10 @@ def get_video_duration(file_path):
 def get_refid(query, repository, resource, baseURL, headers):
     """
     Retrieve the RefID and Archival Object ID for a given query from ArchivesSpace.
+    Searches specifically in the Component Unique Identifier field of item-level archival objects.
+    
     Args:
-        query (str): The directory name or query string.
+        query (str): The directory name or query string (e.g., JPC_AV_00001).
         repository (str): The repository path in ArchivesSpace.
         resource (str): The resource path in ArchivesSpace.
         baseURL (str): The base URL for the ArchivesSpace API.
@@ -131,38 +133,149 @@ def get_refid(query, repository, resource, baseURL, headers):
         tuple: (RefID, Archival Object ID) if found, otherwise (None, None).
     """
     resource_value = str(repository + resource)  # Combine repository and resource paths
-    # Build the search filter query
+    
+    # Build the search filter query to target Component Unique Identifier field
     filter = json.dumps(
         {
             "query": {
                 "jsonmodel_type": "boolean_query",  # Specify the query type
                 "op": "AND",  # Combine subqueries with a logical AND
                 "subqueries": [
+                    # Target archival objects only
                     {"jsonmodel_type": "field_query", "field": "primary_type", "value": "archival_object", "literal": True},
+                    # Exclude PUI types
                     {"jsonmodel_type": "field_query", "field": "types", "value": "pui", "negated": True},
+                    # Limit to specific resource
                     {"jsonmodel_type": "field_query", "field": "resource", "value": resource_value, "literal": True},
+                    # Target item-level records (level = "item")
+                    {"jsonmodel_type": "field_query", "field": "level", "value": "item", "literal": True},
+                    # Search specifically in Component Unique Identifier field
+                    {"jsonmodel_type": "field_query", "field": "component_id", "value": query, "literal": True}
                 ],
             }
         }
     )
-    # Construct the search query URL
-    search_query = f"/repositories/2/search?q={query}&page=1&filter={filter}"
+    
+    # Construct the search query URL - using wildcard search but filtering by component_id
+    search_query = f"/repositories/2/search?q=*&page=1&filter={filter}"
+    
     try:
         # Send a GET request to the ArchivesSpace API and parse the JSON response
         response = requests.get(baseURL + search_query, headers=headers).json()
 
         # Check if results are present
         if response.get("results"):
-            ref_id = response["results"][0].get("ref_id", None)  # Extract the RefID
-            archival_object_id = response["results"][0]["id"].split("/")[-1]  # Extract the Archival Object ID
-            return ref_id, archival_object_id  # Return the RefID and Archival Object ID
+            # Log how many results were found
+            result_count = len(response["results"])
+            if result_count > 1:
+                logging.warning(f"Multiple results found for Component Unique Identifier '{query}': {result_count} matches")
+                logging.warning("Using the first result. Consider ensuring unique identifiers.")
+            
+            # Extract the RefID and Archival Object ID from the first result
+            first_result = response["results"][0]
+            ref_id = first_result.get("ref_id", None)
+            archival_object_id = first_result["id"].split("/")[-1]
+            
+            # Log the found result for verification
+            logging.info(f"Found archival object with Component Unique Identifier '{query}'")
+            logging.info(f"Title: {first_result.get('title', 'N/A')}")
+            logging.info(f"Level: {first_result.get('level', 'N/A')}")
+            
+            return ref_id, archival_object_id
         else:
-            logging.warning(f"No results found for query: {query}")  # Log a warning if no results
+            logging.warning(f"No archival object found with Component Unique Identifier: {query}")
             return None, None
+            
     except Exception as e:
         # Handle unexpected exceptions and log an error
-        logging.error(f"Error fetching RefID for query {query}: {e}")
-        return None, None  # Default return values on error
+        logging.error(f"Error fetching RefID for Component Unique Identifier '{query}': {e}")
+        return None, None
+
+def modify_scope_contents_note(data, runtime):
+    """
+    Add or update a Scope and Contents note (multi-part) with a Defined List containing the video runtime.
+    Creates the structure: Scope and Contents note (multi-part) > Defined List > Item (Label: "Duration", Value: runtime)
+    
+    Args:
+        data (dict): The original archival object JSON data.
+        runtime (str): The video runtime in hh:mm:ss format.
+    Returns:
+        dict: The updated archival object JSON data.
+    """
+    # Create the defined list item with Duration label and runtime value
+    duration_item = {
+        "jsonmodel_type": "note_definedlist_item",
+        "label": "Duration",
+        "value": runtime
+    }
+    
+    # Create the defined list structure (no label as requested)
+    defined_list = {
+        "jsonmodel_type": "note_definedlist",
+        "items": [duration_item]
+    }
+    
+    # Create the Scope and Contents note structure (multi-part)
+    scope_contents_note = {
+        "jsonmodel_type": "note_multipart",
+        "type": "scopecontent",  # Scope and Contents note type
+        "label": "",  # No label as requested
+        "subnotes": [defined_list]  # The defined list goes directly in subnotes
+    }
+    
+    # Initialize notes array if it doesn't exist
+    if "notes" not in data:
+        data["notes"] = []
+    
+    # Check if a Scope and Contents note already exists
+    existing_scope_note = None
+    for note in data["notes"]:
+        if note.get("type") == "scopecontent" and note.get("jsonmodel_type") == "note_multipart":
+            existing_scope_note = note
+            break
+    
+    if existing_scope_note:
+        # If Scope and Contents note exists, update it
+        logging.info("Updating existing Scope and Contents note (multi-part) with runtime information")
+        
+        # Initialize subnotes if it doesn't exist
+        if "subnotes" not in existing_scope_note:
+            existing_scope_note["subnotes"] = []
+        
+        # Check if a defined list already exists in the subnotes
+        existing_defined_list = None
+        for subnote in existing_scope_note["subnotes"]:
+            if subnote.get("jsonmodel_type") == "note_definedlist":
+                existing_defined_list = subnote
+                break
+        
+        if existing_defined_list:
+            # If defined list exists, check for existing Duration item
+            duration_item_exists = False
+            for item in existing_defined_list.get("items", []):
+                if item.get("label") == "Duration":
+                    # Update existing Duration item
+                    item["value"] = runtime
+                    duration_item_exists = True
+                    logging.info(f"Updated existing Duration item with value: {runtime}")
+                    break
+            
+            if not duration_item_exists:
+                # Add new Duration item to existing defined list
+                if "items" not in existing_defined_list:
+                    existing_defined_list["items"] = []
+                existing_defined_list["items"].append(duration_item)
+                logging.info(f"Added new Duration item to existing defined list with value: {runtime}")
+        else:
+            # Add new defined list to existing Scope and Contents note
+            existing_scope_note["subnotes"].append(defined_list)
+            logging.info(f"Added new defined list with Duration item to existing Scope and Contents note: {runtime}")
+    else:
+        # Create new Scope and Contents note (multi-part)
+        data["notes"].append(scope_contents_note)
+        logging.info(f"Created new Scope and Contents note (multi-part) with Duration item: {runtime}")
+    
+    return data
 
 def rename_and_update_directories(repository, resource, baseURL, headers):
     """
@@ -221,7 +334,7 @@ def rename_and_update_directories(repository, resource, baseURL, headers):
                 logging.error(f"Failed to fetch archival object for ID: {archival_object_id}. Skipping.")
                 continue
 
-            updated_data = modify_extents_field(archival_object_data, video_duration)
+            updated_data = modify_scope_contents_note(archival_object_data, video_duration)
             if not update_archival_object(repository.strip("/repositories/"), archival_object_id, updated_data, baseURL, headers):
                 logging.error(f"Failed to update archival object for ID: {archival_object_id}. Skipping.")
                 continue
@@ -235,7 +348,6 @@ def rename_and_update_directories(repository, resource, baseURL, headers):
             logging.error(f"An error occurred while processing directory {directory}: {e}")
 
         log_spacing()  # Add spacing between directories
-
 
 def fetch_archival_object(repository_id, object_id, baseURL, headers):
     """
@@ -297,33 +409,6 @@ def update_archival_object(repository_id, object_id, updated_data, baseURL, head
         logging.error(f"Network error updating archival object: {e}")
         return None
 
-def modify_extents_field(data, new_dimensions):
-    """
-    Modify the dimensions field in the extents section of an archival object.
-    Args:
-        data (dict): The original archival object JSON data.
-        new_dimensions (str): The video runtime in hh:mm:ss format.
-    Returns:
-        dict: The updated archival object JSON data.
-    """
-    if "extents" in data and data["extents"]:
-        # Update the dimensions field for the first extent entry
-        for extent in data["extents"]:
-            extent["dimensions"] = new_dimensions
-    else:
-        # Add a new extent entry if none exist
-        data["extents"] = [
-            {
-                "jsonmodel_type": "extent",  # Specify the JSON model type
-                "extent_type": "1 inch videotape",  # Specify the extent type
-                "number": "1",  # Specify the number of items
-                "dimensions": new_dimensions,  # Set the new dimensions (runtime)
-                "physical_details": "SD video, color, sound",  # Additional details
-                "portion": "whole"  # Specify the portion of the item covered
-            }
-        ]
-    return data
-
 def main():
     """
     Main function to:
@@ -347,7 +432,6 @@ def main():
 
     try:
         # Step 2: Process directories and perform updates
-        # This assumes a function like `rename_and_update_directories()` exists in your script
         logging.info("Starting to process directories...")
         rename_and_update_directories(repository, resource, baseURL, headers)
 
