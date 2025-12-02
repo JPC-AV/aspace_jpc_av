@@ -8,12 +8,14 @@ This script imports item-level archival objects from CSV files into ArchivesSpac
 
 - **Bulk Import**: Create multiple archival objects from CSV data
 - **Parent Hierarchy**: Attach items to existing parent objects using ref_ids
-- **Comprehensive Metadata**: Import titles, dates, extents, notes, and instances
-- **Flexible Duplicate Handling**: Three modes for handling existing records (skip, update, or fail)
+- **Comprehensive Metadata**: Import titles, dates, extents, and notes
+- **Smart Update Mode**: Detects actual changes before updating (shows what changed)
+- **Flexible Duplicate Handling**: Three modes - skip, update, or fail
+- **Colorized Output**: Clean, color-coded terminal output with status indicators
+- **Change Detection**: Only updates records when data actually differs
 - **Error Handling**: Robust error handling with retry logic
 - **Reporting**: Generates CSV, JSON, and log file reports
 - **Dry Run Mode**: Test imports without creating records
-- **Batch Processing**: Process records in batches to avoid overwhelming the API
 
 ## Prerequisites
 
@@ -28,14 +30,52 @@ This script imports item-level archival objects from CSV files into ArchivesSpac
 
 1. Clone or download the script files:
    - `aspace_csv_import.py` - Main import script
-   - `config_sample.py` - Sample configuration file
+   - `creds_template.py` - Credentials template
+   - `csv_utils.py` - CSV validation utilities
+   - `check_extent_types.py` - Extent type checker
 
-2. Create your configuration:
+2. Set up credentials:
    ```bash
-   cp config_sample.py config.py
+   cp creds_template.py creds.py
+   # Edit creds.py with your username and password
+   # Add creds.py to .gitignore
    ```
 
-3. Edit `config.py` with your ArchivesSpace credentials and settings
+## Authentication
+
+### Method 1: Credentials File (Preferred)
+
+Copy the template and add your credentials:
+```bash
+cp creds_template.py creds.py
+```
+
+Edit `creds.py`:
+```python
+user = "mcdowellh"
+password = "your_password_here"
+```
+
+**Important:** Add `creds.py` to your `.gitignore` to avoid exposing credentials!
+
+Then run without credential flags:
+```bash
+python aspace_csv_import.py -f your_file.csv
+```
+
+### Method 2: Command-Line Arguments
+
+Pass credentials directly (useful for testing or one-off runs):
+```bash
+python aspace_csv_import.py -f your_file.csv -u username -p 'password'
+```
+
+**Note:** If your password contains special characters (`&`, `!`, `#`, etc.), wrap it in single quotes:
+```bash
+python aspace_csv_import.py -p '&L!b2Qf#4Fa2P1'
+```
+
+Command-line arguments override creds.py settings.
 
 ## CSV File Format
 
@@ -48,320 +88,248 @@ The CSV should have the following columns:
 | Creation or Recording Date | Creation date (M/D/YYYY) | No | 8/1/1982 |
 | Edit Date | Edit/modified date (M/D/YYYY) | No | 8/2/1982 |
 | Broadcast Date | Broadcast date (M/D/YYYY) | No | 9/1/1982 |
-| EJS Season | Season information | No** | Celebrity Showcase |
-| EJS Episode | Episode information | No** | Episode 1 |
 | Original Format | Physical format (must match dropdown) | Yes | 2 inch videotape |
 | ASpace Parent RefID | Parent object's ref_id | Yes | abc123def456 |
-| Content TRT | Duration in minutes | No | 38 |
 | DESCRIPTION | Scope and contents | No | Pilot episode featuring... |
-| ORIGINAL_MEDIA_TYPE | Detailed media type | No** | 2 inch videotape, 3M |
 
 *If no title is provided, the catalog number will be used
-**Currently not used/commented out in mapping
 
-## Configuration
-
-Edit the script's configuration section or use command-line arguments:
-
-```python
-# ArchivesSpace API Configuration
-ASPACE_URL = "https://your-aspace.edu"
-ASPACE_USERNAME = "your_username"  # Or use -u flag
-ASPACE_PASSWORD = "your_password"  # Or use -p flag
-
-# Repository and Resource Configuration
-REPO_ID = "2"
-RESOURCE_ID = "7"
-
-# Processing Options
-BATCH_SIZE = 10  # Records per batch
-```
-
-Or use command-line arguments to override:
-```bash
-python aspace_csv_import.py -u myusername -p mypassword -f myfile.csv
-```
-
-## Usage
-
-### Command-Line Options
+## Quick Start
 
 ```bash
-python aspace_csv_import.py [options]
+# Set up credentials (one time)
+cp creds_template.py creds.py
+# Edit creds.py with your username and password
 
+# Run commands (with creds.py configured):
+python aspace_csv_import.py -n -f your_file.csv              # Dry run
+python aspace_csv_import.py -f your_file.csv                 # Create records
+python aspace_csv_import.py --update-existing -f your_file.csv  # Update existing
+
+# Or use command-line credentials:
+python aspace_csv_import.py -f your_file.csv -u username -p 'password'
+```
+
+## Command-Line Options
+
+```
 Options:
   -h, --help            Show help message
-  -n, --dry-run         Perform a dry run without creating records (test mode)
-  -f FILE, --file FILE  CSV file to import (default: JPCA-AV_SOURCE-ASpace_CSV_exoort.csv)
-  -u USERNAME           ArchivesSpace username (overrides script setting)
-  -p PASSWORD           ArchivesSpace password (overrides script setting)
-  
+  -n, --dry-run         Test mode - no records created
+  -f FILE, --file FILE  CSV file to import
+  -u USERNAME           ArchivesSpace username
+  -p PASSWORD           ArchivesSpace password
+  --no-color            Disable colored output
+
 Duplicate Handling (choose one):
-  --skip-duplicates     Skip records with duplicate component_id (DEFAULT)
-  --update-existing     Update existing records when component_id already exists
-  --fail-on-duplicate   Stop entire import if duplicate component_id is found
+  --skip-duplicates     Skip existing records (DEFAULT)
+  --update-existing     Update existing records if data changed
+  --fail-on-duplicate   Stop import on first duplicate
 ```
 
-### Duplicate Component ID Handling
+## Duplicate Handling Modes
 
-The script provides three different ways to handle records when a component_id (CATALOG_NUMBER) already exists in ArchivesSpace:
-
-#### 1. Skip Duplicates (DEFAULT)
+### Skip (Default)
 ```bash
-python aspace_csv_import.py  # Default behavior
-# Or explicitly:
-python aspace_csv_import.py --skip-duplicates
+python aspace_csv_import.py -f file.csv -u user -p 'pass'
 ```
-- **Behavior**: Skips rows with existing component_ids and continues processing
-- **Use when**: You want to import only NEW records and leave existing ones untouched
-- **Result**: Shows as "Skipped" in summary
+- Skips records that already exist
+- Creates only new records
+- Safe for re-running imports
 
-#### 2. Update Existing Records
+### Update
 ```bash
-python aspace_csv_import.py --update-existing
+python aspace_csv_import.py --update-existing -f file.csv -u user -p 'pass'
 ```
-- **Behavior**: Updates existing records with data from CSV
-- **Updates**: Title, dates, extents, notes
-- **Preserves**: Parent relationship, instances, component_id
-- **Use when**: You want to refresh metadata for existing records
-- **Result**: Shows as "Updated" in summary
+- Detects what fields have changed
+- Only updates if data differs
+- Shows "unchanged" for records with no differences
+- Displays what changed (title, dates, extents, description)
 
-#### 3. Fail on Duplicate (Strict Mode)
+### Fail
 ```bash
-python aspace_csv_import.py --fail-on-duplicate
+python aspace_csv_import.py --fail-on-duplicate -f file.csv -u user -p 'pass'
 ```
-- **Behavior**: STOPS entire import immediately on first duplicate
-- **Use when**: Duplicates indicate a data problem that needs investigation
-- **Result**: Import terminates with error status
+- Stops entire import on first duplicate
+- Use when duplicates indicate data problems
 
-#### Testing Duplicate Modes
-Always test with dry run first:
-```bash
-# Test skip mode
-python aspace_csv_import.py -n
+## Output
 
-# Test update mode
-python aspace_csv_import.py -n --update-existing
+The script provides colorized terminal output:
 
-# Test strict mode
-python aspace_csv_import.py -n --fail-on-duplicate
+```
+ArchivesSpace CSV Import
+────────────────────────────────────────────────────────────
+  File: your_file.csv
+  Mode: update
+
+→ Connecting to https://api-aspace.jpcarchive.org...
+✓ Authenticated
+→ Loaded 37 valid extent types
+
+────────────────────────────────────────────────────────────
+PROCESSING RECORDS
+────────────────────────────────────────────────────────────
++ JPC_AV_00463 - Created successfully
+↻ JPC_AV_00468 - Updated: title, description
+  → title: Old Title → New Title
+  → description: Old desc... → New desc...
+= JPC_AV_00471 - No changes needed
+○ JPC_AV_00472 - Duplicate - skipped
+
+────────────────────────────────────────────────────────────
+IMPORT SUMMARY
+────────────────────────────────────────────────────────────
+  Total Rows:    4
+  Created:       1
+  Updated:       1
+  Unchanged:     1
+  Skipped:       1
+
+  Mode: update
+
+  Reports: import_reports/
 ```
 
-#### What Gets Updated
-When using `--update-existing`, these fields are replaced:
+### Status Symbols
+- `+` Green - Created new record
+- `↻` Blue - Updated existing record
+- `=` Gray - No changes needed
+- `○` Yellow - Skipped
+- `✗` Red - Error
+
+## Field Mapping
+
+### What Gets Imported
+
+| CSV Column | ArchivesSpace Field |
+|------------|-------------------|
+| CATALOG_NUMBER | component_id |
+| CATALOG_NUMBER | Top Container indicator |
+| TITLE | title |
+| Creation or Recording Date | dates (creation) |
+| Edit Date | dates (modified) |
+| Broadcast Date | dates (broadcast) |
+| Original Format | extent_type |
+| DESCRIPTION | Scope and Contents note |
+| ASpace Parent RefID | parent relationship |
+
+### Fixed Values
+- **Level**: item
+- **Published**: true
+- **Container Type**: AV Case
+- **Instance Type**: Moving Images (Video)
+- **Extent Portion**: whole
+- **Extent Number**: 1
+
+### What Update Mode Changes
+When using `--update-existing`:
 - ✅ Title
-- ✅ All dates (creation, edit, broadcast)
-- ✅ All extents (format type, physical details)
+- ✅ All dates
+- ✅ Extents (format type)
 - ✅ Scope & Contents notes
 
-These fields are preserved:
+What it preserves:
 - ❌ Component ID
 - ❌ Parent relationship
-- ❌ Resource relationship
 - ❌ Instances/containers
 
-#### Choosing the Right Mode
+## Validation
 
-| Scenario | Recommended Mode |
-|----------|-----------------|
-| Fresh import of new data | `--skip-duplicates` (default) |
-| Updating metadata for existing records | `--update-existing` |
-| Data integrity is critical | `--fail-on-duplicate` |
-| Mixed new and existing records | `--skip-duplicates` or `--update-existing` |
-| Testing/debugging | Use `-n` with any mode to preview |
-
-### Basic Usage
-
-1. Place your CSV file in the same directory as the script
-2. Run the script:
-   ```bash
-   # Dry run (test mode) - ALWAYS DO THIS FIRST
-   python aspace_csv_import.py -n
-   
-   # Actual import (creates records, skips duplicates)
-   python aspace_csv_import.py
-   
-   # Update existing records
-   python aspace_csv_import.py --update-existing
-   
-   # Strict mode - stop on any duplicate
-   python aspace_csv_import.py --fail-on-duplicate
-   
-   # Dry run with update mode
-   python aspace_csv_import.py -n --update-existing
-   
-   # Import with credentials on command line
-   python aspace_csv_import.py -u myusername -p mypassword
-   ```
-
-### Dry Run (Test Mode)
-
-Always test with a dry run first:
-```bash
-python aspace_csv_import.py -n
-```
-
-This will:
-- Validate all data
-- Check for duplicates
-- Show what would be created
-- NOT create any records in ArchivesSpace
-
-### Production Run
-
-After successful dry run, run the actual import:
-```bash
-python aspace_csv_import.py
-```
-
-The script will create records in ArchivesSpace. Monitor the output for any errors.
-
-## Workflow
-
-1. **Authentication**: Script logs into ArchivesSpace
-2. **Validation**: Each row is validated for:
-   - Required fields (catalog number, parent ref_id)
-   - Valid extent types (must match dropdown)
-   - Duplicate component IDs (handled based on mode)
-   - Parent object existence
-3. **Object Processing**: Based on duplicate mode:
-   - **New Records**: Creates archival object with metadata
-   - **Existing Records**: Skips, updates, or fails based on flag
-   - Creates top container using catalog number
-   - Links to parent object (required)
-4. **Reporting**: Generates three reports:
-   - Log file with detailed processing information
-   - CSV report with row-by-row results
-   - JSON report with complete data
+The script validates:
+1. **Required fields**: CATALOG_NUMBER, ASpace Parent RefID
+2. **Extent types**: Must match ArchivesSpace dropdown exactly
+3. **Parent existence**: Parent ref_id must exist in ArchivesSpace
+4. **Duplicate detection**: Checks component_id before creating
 
 ## Reports
 
-The script generates three types of reports in the `import_reports` directory:
+Generated in `~/aspace_import_reports/` directory:
 
-### 1. Log File
+- `csv_import_YYYYMMDD_HHMMSS.log` - Detailed log file
+- `import_report_YYYYMMDD_HHMMSS.csv` - Row-by-row results
+- `import_report_YYYYMMDD_HHMMSS.json` - Complete JSON data
+
+## Utility Scripts
+
+### csv_utils.py
+Validate CSV before import:
+```bash
+python csv_utils.py validate your_file.csv
+python csv_utils.py parents your_file.csv
+python csv_utils.py clean your_file.csv
 ```
-import_reports/csv_import_YYYYMMDD_HHMMSS.log
+
+### check_extent_types.py
+Check valid extent types:
+```bash
+python check_extent_types.py
+python check_extent_types.py your_file.csv  # Validate CSV values
 ```
-Detailed processing log with timestamps and error messages
 
-### 2. CSV Report
-```
-import_reports/import_report_YYYYMMDD_HHMMSS.csv
-```
-Summary of each row's import status:
-- row_number
-- catalog_number
-- title
-- status:
-  - `success` - New record created
-  - `updated` - Existing record updated (--update-existing mode)
-  - `skipped` - Row skipped (duplicate or missing data)
-  - `error` - Failed to create/update
-- message
-- uri (of created/updated object)
+## Recommended Workflow
 
-### 3. JSON Report
-```
-import_reports/import_report_YYYYMMDD_HHMMSS.json
-```
-Complete import data in JSON format for programmatic analysis
+1. **Validate CSV**
+   ```bash
+   python csv_utils.py validate your_file.csv
+   ```
 
-## Data Mapping
+2. **Check parent ref_ids exist**
+   ```bash
+   python csv_utils.py parents your_file.csv
+   ```
 
-### Dates
-The script creates three types of dates:
-- **Creation Date**: From "Creation or Recording Date" column (label: "creation")
-- **Edit Date**: From "Edit Date" column (label: "modified")
-- **Broadcast Date**: From "Broadcast Date" column (label: "broadcast")
+3. **Verify extent types**
+   ```bash
+   python check_extent_types.py your_file.csv
+   ```
 
-Dates are converted from M/D/YYYY to YYYY-MM-DD format.
+4. **Dry run**
+   ```bash
+   python aspace_csv_import.py -n -f your_file.csv -u user -p 'pass'
+   ```
 
-### Extents
-Creates extent records with:
-- **Portion**: "whole"
-- **Number**: "1"
-- **Type**: "videocassettes"
-- **Physical Details**: From ORIGINAL_MEDIA_TYPE column
-- **Container Summary**: From Original Format column
+5. **Run import**
+   ```bash
+   python aspace_csv_import.py -f your_file.csv -u user -p 'pass'
+   ```
 
-### Notes
-Creates three types of notes:
-1. **Scope and Contents** (multipart):
-   - Description text
-   - Duration information
-2. **Physical Characteristics**: Original media details
-3. **General Note**: Season/episode information
-
-### Instances
-Creates moving image instances with top containers where:
-- **Indicator**: Catalog number (e.g., JPC_AV_00012)
-- **Barcode**: Same as indicator
-- **Type**: "box"
-
-## Error Handling
-
-### Common Errors and Solutions
-
-| Error | Cause | Solution |
-|-------|-------|----------|
-| "Authentication failed" | Wrong credentials | Check username/password |
-| "Parent not found" | Invalid parent ref_id | Verify parent exists in ArchivesSpace |
-| "Missing Parent RefID" | No parent specified | All items require parent objects |
-| "Invalid extent type" | Original Format not in dropdown | Must match ArchivesSpace controlled vocabulary exactly |
-| "Duplicate component ID" | Catalog number already exists | Handle based on mode - see below |
-| "Session expired" | Long running import | Script auto-reconnects |
-
-### Duplicate Component ID Handling
-
-| Mode | When Duplicate Found | Result |
-|------|---------------------|--------|
-| `--skip-duplicates` (default) | Skips row, continues | Row marked as "skipped" |
-| `--update-existing` | Updates existing record | Row marked as "updated" |
-| `--fail-on-duplicate` | Stops entire import | Import terminates with error |
-
-### Fatal Errors
-The script will stop if:
-- Cannot authenticate with ArchivesSpace
-- CSV file is not found
-- Missing Parent RefID (all items must have parents)
-- Invalid extent type (must match dropdown exactly)
-- Duplicate found with `--fail-on-duplicate` flag
-
-## Performance Considerations
-
-- **Batch Size**: Default is 10 records per batch with 1-second pause
-- **API Rate Limiting**: Script includes retry logic with delays
-- **Large Imports**: For >1000 records, consider:
-  - Running during off-peak hours
-  - Increasing batch delays
-  - Splitting CSV into smaller files
+6. **Verify in ArchivesSpace**
 
 ## Troubleshooting
 
-1. **Check the log file first** - Most issues are clearly logged
-2. **Verify parent ref_ids** - Use ArchivesSpace search to confirm
-3. **Test with small batches** - Start with 5-10 records
-4. **Validate CSV encoding** - Should be UTF-8
+### Common Errors
 
-## Customization
+| Error | Solution |
+|-------|----------|
+| "Authentication failed" | Check username/password in config.py |
+| "Parent not found" | Verify parent ref_id exists |
+| "Missing Parent RefID" | Add parent ref_id to CSV |
+| "Invalid extent type" | Check value matches dropdown exactly |
 
-To adapt for other collections:
+## API Configuration
 
-1. **Modify date labels**: Change in `create_date_objects()`
-2. **Adjust extent types**: Update in `create_extent_objects()`
-3. **Add custom notes**: Extend `create_notes()`
-4. **Change instance types**: Modify `create_instances()`
+The script connects to:
+- **API URL**: https://api-aspace.jpcarchive.org
+- **Repository ID**: 2
+- **Resource ID**: 7
 
-## Support
-
-For issues specific to the JPC collection, consult the development team.
-For general ArchivesSpace API questions, see: https://archivesspace.github.io/archivesspace/api/
+Note: The API subdomain means no `/api` suffix is needed in paths.
 
 ## Version History
 
-- v1.0 (2024): Initial release for JPC audiovisual collection
+- **v2.0** (2024): Major update
+  - Colorized terminal output
+  - Smart change detection in update mode
+  - "Unchanged" status for records with no differences
+  - Cleaner output formatting
+  - Removed noisy logging from console
+  - Added `--no-color` flag
+
+- **v1.0** (2024): Initial release
   - Basic CSV import functionality
   - Parent hierarchy support
+  - Three duplicate modes
   - Comprehensive error handling
 
 ## License

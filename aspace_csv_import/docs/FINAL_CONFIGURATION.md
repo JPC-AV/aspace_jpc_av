@@ -14,11 +14,11 @@
 
 ### 3. **Container Type** → CHANGED TO "AV Case"
 - Was: "box"
-- Now: "AV Case" (matching your ArchivesSpace dropdown)
+- Now: "AV Case" (matching ArchivesSpace dropdown)
 
 ### 4. **Instance Type** → CHANGED TO "Moving Images (Video)"
 - Was: "moving_images"  
-- Now: "Moving Images (Video)" (matching your ArchivesSpace dropdown)
+- Now: "Moving Images (Video)" (matching ArchivesSpace dropdown)
 
 ### 5. **Parent RefID** → NOW REQUIRED
 - If "ASpace Parent RefID" column is blank → **CRITICAL ERROR**
@@ -184,5 +184,3 @@ python aspace_csv_import.py -f file.csv -u USER -p 'PASS' --update-existing
 ```
 
 ## Ready to Import!
-
-The script is now configured exactly to your specifications and ready for testing.
