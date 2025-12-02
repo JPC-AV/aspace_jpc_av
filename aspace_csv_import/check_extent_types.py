@@ -8,24 +8,34 @@ import requests
 import json
 import sys
 
-# Import settings from main script
-try:
-    from aspace_csv_import import ASPACE_URL, ASPACE_USERNAME, ASPACE_PASSWORD
-except ImportError:
-    # Fallback configuration
-    ASPACE_URL = "https://api-aspace.jpcarchive.org"
-    ASPACE_USERNAME = input("Enter ArchivesSpace username: ")
-    ASPACE_PASSWORD = input("Enter ArchivesSpace password: ")
+# Configuration
+ASPACE_URL = "https://api-aspace.jpcarchive.org"
 
-def get_extent_types():
+# Import credentials from creds.py
+try:
+    from creds import user as ASPACE_USERNAME, password as ASPACE_PASSWORD
+except ImportError:
+    ASPACE_USERNAME = None
+    ASPACE_PASSWORD = None
+
+def get_extent_types(username=None, password=None):
     """Fetch valid extent types from ArchivesSpace."""
+    
+    # Use provided credentials or fall back to imported/None
+    user = username or ASPACE_USERNAME
+    passwd = password or ASPACE_PASSWORD
+    
+    if not user or not passwd:
+        print("Error: No credentials available.")
+        print("Either copy creds_template.py to creds.py, or use -u and -p flags")
+        return None
     
     # Authenticate
     print(f"Connecting to {ASPACE_URL}...")
     try:
         response = requests.post(
-            f"{ASPACE_URL}/users/{ASPACE_USERNAME}/login",
-            data={"password": ASPACE_PASSWORD}
+            f"{ASPACE_URL}/users/{user}/login",
+            data={"password": passwd}
         )
         
         if response.status_code != 200:
@@ -35,10 +45,6 @@ def get_extent_types():
         session = response.json()['session']
         headers = {"X-ArchivesSpace-Session": session}
         print("Successfully authenticated")
-        
-        # Get extent types enumeration
-        # Note: The enumeration ID may vary by ArchivesSpace instance
-        # Common IDs: 14 for extent_extent_type, but this may differ
         
         print("\nFetching extent types...")
         
@@ -115,15 +121,24 @@ def check_csv_values(csv_file):
 
 def main():
     """Main function."""
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='Validate extent types against ArchivesSpace')
+    parser.add_argument('csv_file', nargs='?', help='CSV file to validate (optional)')
+    parser.add_argument('-u', '--username', help='ArchivesSpace username')
+    parser.add_argument('-p', '--password', help='ArchivesSpace password')
+    
+    args = parser.parse_args()
+    
     print("=" * 60)
     print("ArchivesSpace Extent Types Validator")
     print("=" * 60)
     
     # Get valid types from ArchivesSpace
-    valid_types = get_extent_types()
+    valid_types = get_extent_types(args.username, args.password)
     
     if valid_types:
-        print(f"\nâœ“ Found {len(valid_types)} valid extent types in ArchivesSpace:\n")
+        print(f"\n[OK] Found {len(valid_types)} valid extent types in ArchivesSpace:\n")
         for i, extent_type in enumerate(valid_types, 1):
             print(f"  {i:3}. {extent_type}")
         
@@ -134,29 +149,28 @@ def main():
             f.write("# Copy these exactly as shown into your CSV\n\n")
             for extent_type in valid_types:
                 f.write(f"{extent_type}\n")
-        print(f"\nâœ“ Saved list to: {output_file}")
+        print(f"\n[OK] Saved list to: {output_file}")
         
         # Check CSV if provided
-        if len(sys.argv) > 1:
-            csv_file = sys.argv[1]
+        if args.csv_file:
             print(f"\n" + "=" * 60)
-            print(f"Checking CSV file: {csv_file}")
+            print(f"Checking CSV file: {args.csv_file}")
             print("=" * 60)
             
-            used_types = check_csv_values(csv_file)
+            used_types = check_csv_values(args.csv_file)
             if used_types:
                 print(f"\nExtent types used in your CSV:\n")
                 
                 invalid_types = []
                 for extent_type in used_types:
                     if extent_type in valid_types:
-                        print(f"  âœ“ {extent_type} - Valid")
+                        print(f"  [OK] {extent_type} - Valid")
                     else:
-                        print(f"  âœ— {extent_type} - INVALID (not in ArchivesSpace)")
+                        print(f"  [X]  {extent_type} - INVALID (not in ArchivesSpace)")
                         invalid_types.append(extent_type)
                 
                 if invalid_types:
-                    print(f"\nâš  WARNING: {len(invalid_types)} invalid extent type(s) found!")
+                    print(f"\n[!] WARNING: {len(invalid_types)} invalid extent type(s) found!")
                     print("\nThese values must be changed to match valid ArchivesSpace values.")
                     print("\nSuggested mappings:")
                     for invalid in invalid_types:
@@ -168,18 +182,18 @@ def main():
                                 suggestions.append(valid)
                         
                         if suggestions:
-                            print(f"  '{invalid}' â†’ maybe: {', '.join(suggestions[:3])}")
+                            print(f"  '{invalid}' -> maybe: {', '.join(suggestions[:3])}")
                         else:
-                            print(f"  '{invalid}' â†’ no similar type found")
+                            print(f"  '{invalid}' -> no similar type found")
                 else:
-                    print("\nâœ“ All extent types in CSV are valid!")
+                    print("\n[OK] All extent types in CSV are valid!")
         else:
             print("\nTip: Run with a CSV file to validate its extent types:")
             print(f"  python {sys.argv[0]} your_file.csv")
     else:
-        print("\nâœ— Could not fetch extent types from ArchivesSpace")
+        print("\n[X] Could not fetch extent types from ArchivesSpace")
         print("\nPossible issues:")
-        print("  - Check your credentials")
+        print("  - Check your credentials (creds.py or -u/-p flags)")
         print("  - Verify ArchivesSpace URL")
         print("  - Ensure you have permission to view enumerations")
 

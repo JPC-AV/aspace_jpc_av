@@ -1,4 +1,5 @@
-# Configuration with credentials
+# Credentials (DO NOT COMMIT)
+creds.py
 config.py
 
 # Generated reports and logs

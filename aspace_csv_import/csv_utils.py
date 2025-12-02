@@ -14,19 +14,34 @@ import os
 import argparse
 
 # Import settings from main script or use defaults
+ASPACE_URL = "https://api-aspace.jpcarchive.org"
+REPO_ID = "2"
+
+# Try to import credentials from creds.py
 try:
-    from aspace_csv_import import (
-        ASPACE_URL, ASPACE_USERNAME, ASPACE_PASSWORD,
-        REPO_ID, parse_date
-    )
+    from creds import user as ASPACE_USERNAME, password as ASPACE_PASSWORD
 except ImportError:
-    print("Warning: Could not import settings from main script")
-    print("Please configure settings in this file or ensure aspace_csv_import.py is available")
-    # Default settings
-    ASPACE_URL = "https://api-aspace.jpcarchive.org"
-    ASPACE_USERNAME = "your_username"
-    ASPACE_PASSWORD = "your_password"
-    REPO_ID = "2"
+    ASPACE_USERNAME = None
+    ASPACE_PASSWORD = None
+
+# Try to import parse_date from main script
+try:
+    from aspace_csv_import import parse_date
+except ImportError:
+    # Fallback parse_date function
+    from datetime import datetime as dt
+    def parse_date(date_string):
+        if not date_string or date_string.strip() == "":
+            return None
+        date_string = date_string.strip()
+        formats = ["%m/%d/%Y", "%m/%d/%y", "%Y-%m-%d", "%Y/%m/%d", "%d/%m/%Y"]
+        for fmt in formats:
+            try:
+                date_obj = dt.strptime(date_string, fmt)
+                return date_obj.strftime("%Y-%m-%d")
+            except ValueError:
+                continue
+        return None
 
 # ==============================
 # VALIDATION FUNCTIONS
@@ -152,6 +167,12 @@ def check_parent_refs(parent_refs: List[str], url: str = None, username: str = N
     aspace_user = username or ASPACE_USERNAME
     aspace_pass = password or ASPACE_PASSWORD
     aspace_repo = repo_id or REPO_ID
+    
+    # Check credentials
+    if not aspace_user or not aspace_pass:
+        print("Error: No credentials available.")
+        print("Either copy creds_template.py to creds.py, or use -u and -p flags")
+        return results
     
     # Authenticate
     try:
