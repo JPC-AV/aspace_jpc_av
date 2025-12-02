@@ -1,2 +1,0 @@
-# ArchivesSpace CSV Import Script Dependencies
-requests>=2.28.0
