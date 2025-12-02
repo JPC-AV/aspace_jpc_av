@@ -1,0 +1,48 @@
+# Configuration with credentials
+config.py
+
+# Generated reports and logs
+import_reports/
+validation_report_*.json
+parent_lookup_*.csv
+*_cleaned.csv
+valid_extent_types.txt
+
+# Log files
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Temporary files
+*.tmp
+*.bak
+*.backup
+tmp/
+temp/
+
+# CSV data files (optional - uncomment if you want to exclude data)
+# *.csv
+# !config_sample.csv  # except example files
+
+# Sensitive data
+*.password
+*.key
+*.token
+credentials.json
