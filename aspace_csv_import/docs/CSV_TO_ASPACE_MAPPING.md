@@ -17,7 +17,7 @@ Here's exactly where each CSV column's data is going in the ArchivesSpace archiv
 | CSV Column | ArchivesSpace Field | Date Label | Date Type | Format Conversion |
 |------------|-------------------|------------|-----------|-------------------|
 | **Creation or Recording Date** | `dates[0]` | "creation" | single | M/D/YYYY -> YYYY-MM-DD |
-| **Edit Date** | `dates[1]` | "modified" | single | M/D/YYYY -> YYYY-MM-DD |
+| **Edit Date** | `dates[1]` | "Edited" | single | M/D/YYYY -> YYYY-MM-DD |
 | **Broadcast Date** | `dates[2]` | "broadcast" | single | M/D/YYYY -> YYYY-MM-DD |
 
 ### Extent Fields
@@ -54,7 +54,7 @@ The **Content TRT** field is commented out in `aspace_csv_import.py` because dur
 ```json
 {
   "jsonmodel_type": "note_multipart",
-  "type": "scopecontent",
+  "type": "scopecontent", - change this to a different multipart note? ODD? other?
   "subnotes": [
     {
       "jsonmodel_type": "note_definedlist",

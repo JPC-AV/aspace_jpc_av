@@ -364,7 +364,7 @@ def create_date_objects(row: Dict) -> List[Dict]:
         if date_str:
             dates.append({
                 "date_type": "single",
-                "label": "modified",
+                "label": "Edited",
                 "begin": date_str,
                 "expression": date_str,
                 "jsonmodel_type": "date"
