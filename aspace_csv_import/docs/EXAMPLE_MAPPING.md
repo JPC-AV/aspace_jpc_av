@@ -58,7 +58,7 @@ ORIGINAL_MEDIA_TYPE: 2 inch videotape, 3M  # IGNORED - commented out
     {
       "jsonmodel_type": "note_multipart",
       "type": "scopecontent",
-      "label": "Scope and Contents",
+      "label": "",
       "publish": true,
       "subnotes": [
         {

@@ -424,7 +424,7 @@ def create_notes(row: Dict) -> List[Dict]:
         notes.append({
             "jsonmodel_type": "note_multipart",
             "type": "scopecontent",
-            "label": "Scope and Contents",
+            "label": "",
             "subnotes": scope_content_parts,
             "publish": True
         })
