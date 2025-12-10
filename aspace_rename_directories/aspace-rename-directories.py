@@ -3,7 +3,7 @@ ArchivesSpace Directory Processing Script
 
 This script processes directories containing digitized video files, performing the following tasks:
 1. Extracts video runtime metadata (hh:mm:ss) from .mkv files using `mediainfo`.
-2. Updates the corresponding ArchivesSpace (ASpace) record's abstract note with the extracted runtime.
+2. Updates the corresponding ArchivesSpace (ASpace) record's ODD (Other Descriptive Data) note with the extracted runtime.
 3. Renames directories to include the ASpace reference ID (ref_id).
 
 Expected Input Directory Structure:
@@ -21,6 +21,11 @@ JPC_AV_00001/
 
 The script appends the ref_id retrieved from ArchivesSpace to the directory name.
 After processing, the directory will be renamed to include the ref_id, e.g., `JPC_AV_00001_refid_b645fa3ffd01ad7364c9658f83fdceda`.
+
+Duration Note Structure:
+- Creates/updates an Other Descriptive Data (ODD) note (multi-part)
+- Uses a Defined List structure with a "Duration" label/value pair
+- Overwrites any existing ODD note when updating
 
 Dependencies:
 - Python modules: `json`, `requests`, `os`, `logging`, `pymediainfo`, `subprocess`, `re`, `colorama`
@@ -191,10 +196,12 @@ def get_refid(query, repository, resource, baseURL, headers):
         logging.error(f"Error fetching RefID for Component Unique Identifier '{query}': {e}")
         return None, None
 
-def modify_scope_contents_note(data, runtime):
+def modify_odd_note(data, runtime):
     """
-    Add or update a Scope and Contents note (multi-part) with a Defined List containing the video runtime.
-    Creates the structure: Scope and Contents note (multi-part) > Defined List > Item (Label: "Duration", Value: runtime)
+    Add or update an Other Descriptive Data (ODD) note (multi-part) with a Defined List containing the video runtime.
+    Creates the structure: ODD note (multi-part) > Defined List > Item (Label: "Duration", Value: runtime)
+    
+    Note: This will overwrite any existing ODD note content when updating.
     
     Args:
         data (dict): The original archival object JSON data.
@@ -209,17 +216,17 @@ def modify_scope_contents_note(data, runtime):
         "value": runtime
     }
     
-    # Create the defined list structure (no label as requested)
+    # Create the defined list structure
     defined_list = {
         "jsonmodel_type": "note_definedlist",
         "items": [duration_item]
     }
     
-    # Create the Scope and Contents note structure (multi-part)
-    scope_contents_note = {
+    # Create the ODD note structure (multi-part)
+    odd_note = {
         "jsonmodel_type": "note_multipart",
-        "type": "scopecontent",  # Scope and Contents note type
-        "label": "",  # No label as requested
+        "type": "odd",  # Other Descriptive Data note type
+        "label": "",  # No label
         "subnotes": [defined_list]  # The defined list goes directly in subnotes
     }
     
@@ -227,53 +234,22 @@ def modify_scope_contents_note(data, runtime):
     if "notes" not in data:
         data["notes"] = []
     
-    # Check if a Scope and Contents note already exists
-    existing_scope_note = None
-    for note in data["notes"]:
-        if note.get("type") == "scopecontent" and note.get("jsonmodel_type") == "note_multipart":
-            existing_scope_note = note
+    # Check if an ODD note already exists and find its index
+    existing_odd_index = None
+    for i, note in enumerate(data["notes"]):
+        if note.get("type") == "odd" and note.get("jsonmodel_type") == "note_multipart":
+            existing_odd_index = i
             break
     
-    if existing_scope_note:
-        # If Scope and Contents note exists, update it
-        logging.info("Updating existing Scope and Contents note (multi-part) with runtime information")
-        
-        # Initialize subnotes if it doesn't exist
-        if "subnotes" not in existing_scope_note:
-            existing_scope_note["subnotes"] = []
-        
-        # Check if a defined list already exists in the subnotes
-        existing_defined_list = None
-        for subnote in existing_scope_note["subnotes"]:
-            if subnote.get("jsonmodel_type") == "note_definedlist":
-                existing_defined_list = subnote
-                break
-        
-        if existing_defined_list:
-            # If defined list exists, check for existing Duration item
-            duration_item_exists = False
-            for item in existing_defined_list.get("items", []):
-                if item.get("label") == "Duration":
-                    # Update existing Duration item
-                    item["value"] = runtime
-                    duration_item_exists = True
-                    logging.info(f"Updated existing Duration item with value: {runtime}")
-                    break
-            
-            if not duration_item_exists:
-                # Add new Duration item to existing defined list
-                if "items" not in existing_defined_list:
-                    existing_defined_list["items"] = []
-                existing_defined_list["items"].append(duration_item)
-                logging.info(f"Added new Duration item to existing defined list with value: {runtime}")
-        else:
-            # Add new defined list to existing Scope and Contents note
-            existing_scope_note["subnotes"].append(defined_list)
-            logging.info(f"Added new defined list with Duration item to existing Scope and Contents note: {runtime}")
+    if existing_odd_index is not None:
+        # If ODD note exists, overwrite it entirely with new duration content
+        logging.info("Overwriting existing ODD note (multi-part) with runtime information")
+        data["notes"][existing_odd_index] = odd_note
+        logging.info(f"Replaced ODD note with Duration: {runtime}")
     else:
-        # Create new Scope and Contents note (multi-part)
-        data["notes"].append(scope_contents_note)
-        logging.info(f"Created new Scope and Contents note (multi-part) with Duration item: {runtime}")
+        # Create new ODD note (multi-part)
+        data["notes"].append(odd_note)
+        logging.info(f"Created new ODD note (multi-part) with Duration item: {runtime}")
     
     return data
 
@@ -334,7 +310,7 @@ def rename_and_update_directories(repository, resource, baseURL, headers):
                 logging.error(f"Failed to fetch archival object for ID: {archival_object_id}. Skipping.")
                 continue
 
-            updated_data = modify_scope_contents_note(archival_object_data, video_duration)
+            updated_data = modify_odd_note(archival_object_data, video_duration)
             if not update_archival_object(repository.strip("/repositories/"), archival_object_id, updated_data, baseURL, headers):
                 logging.error(f"Failed to update archival object for ID: {archival_object_id}. Skipping.")
                 continue
