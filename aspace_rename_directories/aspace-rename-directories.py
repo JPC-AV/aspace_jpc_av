@@ -479,6 +479,7 @@ def main():
         
         def format_usage(self):
             usage = f"\nusage: {self.prog} -d PATH [options]\n"
+            help_hint = f"       {Style.DIM}Use -h or --help for detailed information{Style.RESET_ALL}\n"
             options = f"""
   {Fore.CYAN}-d, --directory PATH{Style.RESET_ALL}  Target directory {Fore.YELLOW}(required){Style.RESET_ALL}
   {Fore.CYAN}-n, --dry-run{Style.RESET_ALL}         Preview changes without executing
@@ -487,7 +488,7 @@ def main():
   {Fore.CYAN}--no-update{Style.RESET_ALL}           Rename only, skip ASpace record updates
   {Fore.CYAN}--rename-mkv{Style.RESET_ALL}          Also rename .mkv files to include ref_id
 """
-            return usage + options
+            return usage + help_hint + options
         
         def format_help(self):
             # Add leading newline before help output

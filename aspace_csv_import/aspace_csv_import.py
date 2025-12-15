@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""
-ArchivesSpace CSV Import Script for JPC Audiovisual Collection
-Imports item-level archival objects from CSV file into ArchivesSpace
-Author: JPC Digital Archives Team
-Version: 2.0
-"""
+"""ArchivesSpace CSV Import Script - imports item-level archival objects from CSV into ArchivesSpace."""
 
 import csv
 import json
@@ -85,6 +80,58 @@ def print_section(text: str):
     print(f"\n{Colors.DIM}{'─' * 60}{Colors.RESET}")
     print(f"{Colors.BOLD}{text}{Colors.RESET}")
     print(f"{Colors.DIM}{'─' * 60}{Colors.RESET}")
+
+# ==============================
+# HELP MENU
+# ==============================
+
+def get_colored_help():
+    """Generate a colored and formatted help message for the command line."""
+    C = Colors  # Shorthand
+    
+    help_text = "\n" + f"""{C.BOLD}{C.CYAN}╔══════════════════════════════════════════════════════════════════════════════╗
+║              ArchivesSpace CSV Import Script                                 ║
+╚══════════════════════════════════════════════════════════════════════════════╝{C.RESET}
+
+{C.BOLD}DESCRIPTION{C.RESET}
+    Imports item-level archival objects from CSV into ArchivesSpace:
+    {C.GREEN}1.{C.RESET} Creates archival objects with metadata (titles, dates, extents, notes)
+    {C.GREEN}2.{C.RESET} Links to parent objects via ref_id
+    {C.GREEN}3.{C.RESET} Creates top containers (AV Case) for each item
+
+{C.BOLD}USAGE{C.RESET}
+    {C.GREEN}${C.RESET} python3 aspace_csv_import.py -f FILE [options]
+
+{C.BOLD}OPTIONS{C.RESET}
+    {C.CYAN}-f, --file FILE{C.RESET}       {C.YELLOW}(required){C.RESET}  CSV file to import
+    {C.CYAN}-n, --dry-run{C.RESET}                    Preview changes without creating records
+    {C.CYAN}-u, --username USER{C.RESET}              ASpace username (or use creds.py)
+    {C.CYAN}-p, --password PASS{C.RESET}              ASpace password (or use creds.py)
+    {C.CYAN}--no-color{C.RESET}                       Disable colored output
+
+{C.BOLD}DUPLICATE HANDLING{C.RESET} {C.DIM}(mutually exclusive){C.RESET}
+    {C.CYAN}--skip-duplicates{C.RESET}                Skip existing records {C.DIM}(default){C.RESET}
+    {C.CYAN}--update-existing{C.RESET}                Update existing records with CSV data
+    {C.CYAN}--fail-on-duplicate{C.RESET}              Stop import on first duplicate
+
+{C.BOLD}EXAMPLES{C.RESET}
+    {C.GREEN}${C.RESET} python3 aspace_csv_import.py -f data.csv
+    {C.GREEN}${C.RESET} python3 aspace_csv_import.py -f data.csv --dry-run
+    {C.GREEN}${C.RESET} python3 aspace_csv_import.py -f data.csv --update-existing
+    {C.GREEN}${C.RESET} python3 aspace_csv_import.py -f data.csv -u admin -p secret
+
+{C.BOLD}CSV COLUMNS{C.RESET}
+    {C.CYAN}Required:{C.RESET}  CATALOG_NUMBER, ASpace Parent RefID
+    {C.CYAN}Optional:{C.RESET}  TITLE, Creation or Recording Date, Edit Date, Broadcast Date,
+               Original Format, Content TRT, DESCRIPTION
+
+{C.BOLD}OUTPUT{C.RESET}
+    Reports saved to: {C.CYAN}~/aspace_import_reports/{C.RESET}
+
+{C.BOLD}TARGET{C.RESET}
+    Repository: {C.CYAN}/repositories/2{C.RESET}  Resource: {C.CYAN}/resources/7{C.RESET}
+"""
+    return help_text
 
 # ==============================
 # CONFIGURATION
@@ -888,62 +935,90 @@ def print_summary(summary: Dict):
 def main():
     """Main execution function."""
     
-    parser = argparse.ArgumentParser(
-        description='Import JPC audiovisual metadata from CSV to ArchivesSpace',
+    # Custom ArgumentParser for cleaner usage and colored errors
+    class CustomArgumentParser(argparse.ArgumentParser):
+        def format_usage(self):
+            C = Colors
+            usage = f"\nusage: {self.prog} -f FILE [options]\n"
+            help_hint = f"       {C.DIM}Use -h or --help for detailed information{C.RESET}\n"
+            options = f"""
+  {C.CYAN}-f, --file FILE{C.RESET}       {C.YELLOW}(required){C.RESET}  CSV file to import
+  {C.CYAN}-n, --dry-run{C.RESET}                    Preview changes without creating records
+  {C.CYAN}-u, --username USER{C.RESET}              ASpace username (or use creds.py)
+  {C.CYAN}-p, --password PASS{C.RESET}              ASpace password (or use creds.py)
+  {C.CYAN}--no-color{C.RESET}                       Disable colored output
+  {C.CYAN}--skip-duplicates{C.RESET}                Skip existing records {C.DIM}(default){C.RESET}
+  {C.CYAN}--update-existing{C.RESET}                Update existing records with CSV data
+  {C.CYAN}--fail-on-duplicate{C.RESET}              Stop import on first duplicate
+"""
+            return usage + help_hint + options
+        
+        def format_help(self):
+            return "\n" + super().format_help()
+        
+        def error(self, message):
+            self.print_usage(sys.stderr)
+            self.exit(2, f"\n{Colors.RED}error: {message}{Colors.RESET}\n")
+    
+    parser = CustomArgumentParser(
+        description=get_colored_help(),
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  %(prog)s                    # Run import, skip duplicates (default)
-  %(prog)s -n                 # Dry run (test without creating records)
-  %(prog)s --update-existing  # Update existing records with same component_id
-  %(prog)s --fail-on-duplicate # Stop entire import if duplicate found
-        """
+        add_help=False,
+        usage=argparse.SUPPRESS
+    )
+    
+    parser.add_argument(
+        '-h', '--help',
+        action='help',
+        default=argparse.SUPPRESS,
+        help=argparse.SUPPRESS
     )
     
     parser.add_argument(
         '-n', '--dry-run',
         action='store_true',
-        help='Perform a dry run without creating records (test mode)'
+        help=argparse.SUPPRESS
     )
     
     parser.add_argument(
         '-f', '--file',
-        default=CSV_FILE,
-        help=f'CSV file to import (default: {CSV_FILE})'
+        required=True,
+        metavar='FILE',
+        help=argparse.SUPPRESS
     )
     
     parser.add_argument(
         '-u', '--username',
-        help='ArchivesSpace username (overrides script setting)'
+        help=argparse.SUPPRESS
     )
     
     parser.add_argument(
         '-p', '--password',
-        help='ArchivesSpace password (overrides script setting)'
+        help=argparse.SUPPRESS
     )
     
     parser.add_argument(
         '--no-color',
         action='store_true',
-        help='Disable colored output'
+        help=argparse.SUPPRESS
     )
     
     duplicate_group = parser.add_mutually_exclusive_group()
     duplicate_group.add_argument(
         '--update-existing',
         action='store_true',
-        help='Update existing records when component_id already exists'
+        help=argparse.SUPPRESS
     )
     duplicate_group.add_argument(
         '--skip-duplicates',
         action='store_true',
         default=True,
-        help='Skip records with duplicate component_id (default behavior)'
+        help=argparse.SUPPRESS
     )
     duplicate_group.add_argument(
         '--fail-on-duplicate',
         action='store_true',
-        help='Stop entire import if duplicate component_id is found'
+        help=argparse.SUPPRESS
     )
     
     args = parser.parse_args()
@@ -952,7 +1027,7 @@ Examples:
     if args.no_color:
         Colors.disable()
     
-    csv_file = args.file if args.file else CSV_FILE
+    csv_file = args.file
     username = args.username if args.username else ASPACE_USERNAME
     password = args.password if args.password else ASPACE_PASSWORD
     

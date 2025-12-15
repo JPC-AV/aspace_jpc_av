@@ -52,7 +52,7 @@ python check_extent_types.py your_file.csv
 Test the import without creating any records:
 
 ```bash
-python aspace_csv_import.py -n -f your_file.csv
+python aspace_csv_import.py -f your_file.csv --dry-run
 ```
 
 Review the output. All rows should show `+` (would create) with no errors.
@@ -90,8 +90,26 @@ Check generated reports in `~/aspace_import_reports/`:
 
 After digitization, run `aspace-rename-directories.py` to:
 1. Extract exact duration from .mkv files via mediainfo
-2. Add Duration to Scope and Contents note
+2. Add Duration to ODD note (Other Descriptive Data)
 3. Rename directories to include ASpace ref_id
+4. Optionally rename .mkv files with `--rename-mkv` flag
+
+```bash
+# Basic usage (required -d flag)
+python aspace-rename-directories.py -d /path/to/videos
+
+# Dry run to preview changes
+python aspace-rename-directories.py -d /path/to/videos --dry-run
+
+# Also rename .mkv files to include ref_id
+python aspace-rename-directories.py -d /path/to/videos --rename-mkv
+
+# Update ASpace only, don't rename directories
+python aspace-rename-directories.py -d /path/to/videos --no-rename
+
+# Rename only, don't update ASpace
+python aspace-rename-directories.py -d /path/to/videos --no-update
+```
 
 ---
 
@@ -104,12 +122,18 @@ python csv_utils.py validate file.csv
 # Check parents exist
 python csv_utils.py parents file.csv
 
-# Dry run
-python aspace_csv_import.py -n -f file.csv
+# Dry run import
+python aspace_csv_import.py -f file.csv --dry-run
 
 # Actual import
 python aspace_csv_import.py -f file.csv
 
 # Import with update mode
 python aspace_csv_import.py -f file.csv --update-existing
+
+# Post-digitization: update ASpace and rename directories
+python aspace-rename-directories.py -d /path/to/videos
+
+# Post-digitization: dry run
+python aspace-rename-directories.py -d /path/to/videos --dry-run
 ```
