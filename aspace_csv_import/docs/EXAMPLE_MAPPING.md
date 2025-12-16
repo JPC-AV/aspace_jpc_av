@@ -11,6 +11,7 @@ Broadcast Date: [empty]
 Original Format: 2 inch videotape
 ASpace Parent RefID: abc123def456
 DESCRIPTION: Promotional clip for episode 22 of the Ebony/Jet Celebrity Showcase series.
+_TRANSFER_NOTES: Slight ringing present throughout. Hue is inconsistent; skin tones are redder in some sections.
 ```
 
 ## Resulting ArchivesSpace JSON Object
@@ -62,6 +63,18 @@ DESCRIPTION: Promotional clip for episode 22 of the Ebony/Jet Celebrity Showcase
           "content": "Promotional clip for episode 22 of the Ebony/Jet Celebrity Showcase series."
         }
       ]
+    },
+    {
+      "jsonmodel_type": "note_multipart",
+      "type": "phystech",
+      "label": "",
+      "publish": true,
+      "subnotes": [
+        {
+          "jsonmodel_type": "note_text",
+          "content": "Slight ringing present throughout. Hue is inconsistent; skin tones are redder in some sections."
+        }
+      ]
     }
   ],
   
@@ -110,6 +123,9 @@ DESCRIPTION: Promotional clip for episode 22 of the Ebony/Jet Celebrity Showcase
 ### Notes Section
 **Scope and Contents:**
 - Promotional clip for episode 22 of the Ebony/Jet Celebrity Showcase series.
+
+**Physical Characteristics and Technical Requirements:**
+- Slight ringing present throughout. Hue is inconsistent; skin tones are redder in some sections.
 
 ### Instance
 - **Type:** Moving Images (Video)

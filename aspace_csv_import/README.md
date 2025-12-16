@@ -217,6 +217,7 @@ IMPORT SUMMARY
 | Broadcast Date | `dates[]` (label: broadcast) | Converted to YYYY-MM-DD |
 | Original Format | `extent_type` | Must match ASpace dropdown exactly |
 | DESCRIPTION | Scope and Contents note | Multipart note with text subnote |
+| _TRANSFER_NOTES | Physical Characteristics note | Playback/quality issues (phystech) |
 | ASpace Parent RefID | `parent.ref` | **Required** - links to parent object |
 
 ### Fixed Values

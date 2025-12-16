@@ -33,6 +33,7 @@ Here's exactly where each CSV column's data is going in the ArchivesSpace archiv
 | CSV Column | Note Type | Note Field | Location in Note |
 |------------|-----------|------------|------------------|
 | **DESCRIPTION** | Scope and Contents (multipart) | `subnotes[].content` | Text subnote (note_text) |
+| **_TRANSFER_NOTES** | Physical Characteristics and Technical Requirements (multipart) | `subnotes[].content` | Text subnote (note_text) |
 
 #### Duration Mapping (via aspace-rename-directories.py)
 

@@ -12,6 +12,7 @@
 | **Original Format** | `extent_type` | ✅ Active |
 | **ASpace Parent RefID** | `parent.ref` | ✅ Active |
 | **DESCRIPTION** 📼 | Scope and Contents note | ✅ Active |
+| **_TRANSFER_NOTES** 📼 | Physical Characteristics and Technical Requirements note (phystech) | ✅ Active |
 
 ## Fields Handled Separately
 
@@ -51,7 +52,6 @@ Fields marked with 📼 are embedded in the Matroska (.mkv) container as key:val
 | **Ephemera Description** | "One sheet pre-formated Segment Log filled in with handwritten time codes, subjects, producers, and editors.", "8.5\" x 11\" sheet of lined white paper with segments, timecode, producers, and length handwritten" | Separated Materials note (`separatedmaterial`) | Medium |
 | **Related Objects** | Hash values linking related items | Related Materials note | Medium |
 | **_PRE_TRANSFER_NOTES** 📼 | "uneven pack", "cardboard box", "Dried tape lubricant present on edge of tape." | phystech or Custodial History note - tape condition before transfer | Medium |
-| **_TRANSFER_NOTES** 📼 | "Unmixed audio - interview audio in left channel, audio for clips in right channel.", "Slight ringing present throughout", "Hue is inconsistent; skin tones are redder in some sections." | phystech note - playback/quality issues | Medium |
 | **notes** | "Same program can be found on JPC_AV_01808 without commercials.", "Updub from type B tape to type C tape.", "Color\nInterview audio on channel 1, music and audio for clips on channel 2" | General note (odd) or Processing Information | Medium |
 | **Sub-Series** | "EJS", "ABAA", "Fashion Fair", "Ebony Magazine", "Jet Magazine", "WJPC Radio" | Could inform hierarchy/arrangement | Medium |
 | **EJS Season** | "Season 03", "Season 04", "Celebrity Showcase", "TBD" | Scope and Contents (note_definedlist) | Low |
@@ -147,7 +147,6 @@ Fields marked with 📼 are embedded in the Matroska (.mkv) container as key:val
 | **Ephemera Description** | `separatedmaterial` note | Documents accompanying materials (segment logs, rundowns) |
 | **Related Objects** | `relatedmaterial` note | Links related AV items |
 | **_PRE_TRANSFER_NOTES** 📼 | `phystech` note | Tape condition info (uneven pack, dried lubricant, etc.) |
-| **_TRANSFER_NOTES** 📼 | `phystech` note | Playback/quality issues (unmixed audio, hue shifts, ringing) |
 | **notes** | `odd` note or `processinfo` | Contextual info (dubs, related tapes, audio channel notes) |
 | **Sub-Series** | Hierarchy/arrangement documentation | Already in hierarchy via parent |
 

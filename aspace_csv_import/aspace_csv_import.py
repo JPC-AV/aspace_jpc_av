@@ -458,6 +458,7 @@ def create_notes(row: Dict) -> List[Dict]:
     """Create ArchivesSpace notes from CSV row."""
     notes = []
     
+    # Scope and Contents note from DESCRIPTION
     scope_content_parts = []
     
     description = row.get('DESCRIPTION', '').strip()
@@ -473,6 +474,20 @@ def create_notes(row: Dict) -> List[Dict]:
             "type": "scopecontent",
             "label": "",
             "subnotes": scope_content_parts,
+            "publish": True
+        })
+    
+    # Physical Characteristics and Technical Requirements note from _TRANSFER_NOTES
+    transfer_notes = row.get('_TRANSFER_NOTES', '').strip()
+    if transfer_notes:
+        notes.append({
+            "jsonmodel_type": "note_multipart",
+            "type": "phystech",
+            "label": "",
+            "subnotes": [{
+                "jsonmodel_type": "note_text",
+                "content": transfer_notes
+            }],
             "publish": True
         })
     
