@@ -41,6 +41,12 @@ This script imports item-level archival objects from CSV files into ArchivesSpac
    # Add creds.py to .gitignore
    ```
 
+## Related Documentation
+
+- **CSV_TO_ASPACE_MAPPING.md** - Detailed field mapping from CSV columns to ArchivesSpace fields
+- **POTENTIAL_MAPPINGS.md** - Analysis of unmapped CSV fields and future mapping possibilities
+- **EXAMPLE_MAPPING.md** - Example showing CSV row transformed to ArchivesSpace JSON
+
 ## Authentication
 
 ### Method 1: Credentials File (Preferred)
@@ -52,7 +58,7 @@ cp creds_template.py creds.py
 
 Edit `creds.py`:
 ```python
-user = "mcdowellh"
+user = "your_username"
 password = "your_password_here"
 ```
 
@@ -70,10 +76,7 @@ Pass credentials directly (useful for testing or one-off runs):
 python aspace_csv_import.py -f your_file.csv -u username -p 'password'
 ```
 
-**Note:** If your password contains special characters (`&`, `!`, `#`, etc.), wrap it in single quotes:
-```bash
-python aspace_csv_import.py -p '&L!b2Qf#4Fa2P1'
-```
+**Note:** If your password contains special characters (`&`, `!`, `#`, etc.), wrap it in single quotes.
 
 Command-line arguments override creds.py settings.
 
@@ -93,6 +96,8 @@ The CSV should have the following columns:
 | DESCRIPTION | Scope and contents | No | Pilot episode featuring... |
 
 *If no title is provided, the catalog number will be used
+
+**Note:** The CSV contains 80+ columns, but only 8 are actively mapped. See **POTENTIAL_MAPPINGS.md** for analysis of unmapped fields.
 
 ## Quick Start
 
@@ -131,7 +136,7 @@ Duplicate Handling (choose one):
 
 ### Skip (Default)
 ```bash
-python aspace_csv_import.py -f file.csv -u user -p 'pass'
+python aspace_csv_import.py -f file.csv
 ```
 - Skips records that already exist
 - Creates only new records
@@ -139,7 +144,7 @@ python aspace_csv_import.py -f file.csv -u user -p 'pass'
 
 ### Update
 ```bash
-python aspace_csv_import.py --update-existing -f file.csv -u user -p 'pass'
+python aspace_csv_import.py --update-existing -f file.csv
 ```
 - Detects what fields have changed
 - Only updates if data differs
@@ -148,7 +153,7 @@ python aspace_csv_import.py --update-existing -f file.csv -u user -p 'pass'
 
 ### Fail
 ```bash
-python aspace_csv_import.py --fail-on-duplicate -f file.csv -u user -p 'pass'
+python aspace_csv_import.py --fail-on-duplicate -f file.csv
 ```
 - Stops entire import on first duplicate
 - Use when duplicates indicate data problems
@@ -163,7 +168,7 @@ ArchivesSpace CSV Import
   File: your_file.csv
   Mode: update
 
-→ Connecting to https://api-aspace.jpcarchive.org...
+→ Connecting to ArchivesSpace...
 ✓ Authenticated
 → Loaded 37 valid extent types
 
@@ -188,7 +193,7 @@ IMPORT SUMMARY
 
   Mode: update
 
-  Reports: import_reports/
+  Reports: ~/aspace_import_reports/
 ```
 
 ### Status Symbols
@@ -202,25 +207,35 @@ IMPORT SUMMARY
 
 ### What Gets Imported
 
-| CSV Column | ArchivesSpace Field |
-|------------|-------------------|
-| CATALOG_NUMBER | component_id |
-| CATALOG_NUMBER | Top Container indicator |
-| TITLE | title |
-| Creation or Recording Date | dates (creation) |
-| Edit Date | dates (modified) |
-| Broadcast Date | dates (broadcast) |
-| Original Format | extent_type |
-| DESCRIPTION | Scope and Contents note |
-| ASpace Parent RefID | parent relationship |
+| CSV Column | ArchivesSpace Field | Notes |
+|------------|-------------------|-------|
+| CATALOG_NUMBER | `component_id` | Component Unique Identifier |
+| CATALOG_NUMBER | `top_container.indicator` | Container indicator (no barcode) |
+| TITLE | `title` | Falls back to CATALOG_NUMBER if empty |
+| Creation or Recording Date | `dates[]` (label: creation) | Converted to YYYY-MM-DD |
+| Edit Date | `dates[]` (label: Edited) | Converted to YYYY-MM-DD |
+| Broadcast Date | `dates[]` (label: broadcast) | Converted to YYYY-MM-DD |
+| Original Format | `extent_type` | Must match ASpace dropdown exactly |
+| DESCRIPTION | Scope and Contents note | Multipart note with text subnote |
+| ASpace Parent RefID | `parent.ref` | **Required** - links to parent object |
 
 ### Fixed Values
-- **Level**: item
-- **Published**: true
-- **Container Type**: AV Case
-- **Instance Type**: Moving Images (Video)
-- **Extent Portion**: whole
-- **Extent Number**: 1
+| Field | Value |
+|-------|-------|
+| Level | item |
+| Published | true |
+| Container Type | AV Case |
+| Instance Type | Moving Images (Video) |
+| Extent Portion | whole |
+| Extent Number | 1 |
+
+### Duration (Handled Separately)
+
+Duration is **not** imported by `aspace_csv_import.py`. Instead, `aspace-rename-directories.py` extracts exact runtime from `.mkv` files during DAMS ingest and creates an ODD note with a Defined List containing:
+- Label: "Duration"
+- Value: hh:mm:ss format (e.g., "01:23:45")
+
+This provides more accurate duration data than CSV estimates.
 
 ### What Update Mode Changes
 When using `--update-existing`:
@@ -237,8 +252,8 @@ What it preserves:
 ## Validation
 
 The script validates:
-1. **Required fields**: CATALOG_NUMBER, ASpace Parent RefID
-2. **Extent types**: Must match ArchivesSpace dropdown exactly
+1. **Required fields**: CATALOG_NUMBER, ASpace Parent RefID (critical error if missing)
+2. **Extent types**: Must match ArchivesSpace dropdown exactly (critical error if not)
 3. **Parent existence**: Parent ref_id must exist in ArchivesSpace
 4. **Duplicate detection**: Checks component_id before creating
 
@@ -286,12 +301,12 @@ python check_extent_types.py your_file.csv  # Validate CSV values
 
 4. **Dry run**
    ```bash
-   python aspace_csv_import.py -n -f your_file.csv -u user -p 'pass'
+   python aspace_csv_import.py -n -f your_file.csv
    ```
 
 5. **Run import**
    ```bash
-   python aspace_csv_import.py -f your_file.csv -u user -p 'pass'
+   python aspace_csv_import.py -f your_file.csv
    ```
 
 6. **Verify in ArchivesSpace**
@@ -302,10 +317,10 @@ python check_extent_types.py your_file.csv  # Validate CSV values
 
 | Error | Solution |
 |-------|----------|
-| "Authentication failed" | Check username/password in config.py |
-| "Parent not found" | Verify parent ref_id exists |
-| "Missing Parent RefID" | Add parent ref_id to CSV |
-| "Invalid extent type" | Check value matches dropdown exactly |
+| "Authentication failed" | Check username/password in creds.py |
+| "Parent not found" | Verify parent ref_id exists in ASpace |
+| "Missing Parent RefID" | Add parent ref_id to CSV (required field) |
+| "Invalid extent type" | Check Original Format matches ASpace dropdown exactly |
 
 ## API Configuration
 
@@ -314,8 +329,6 @@ The script connects to:
 - **Repository ID**: 2
 - **Resource ID**: 7
 
-Note: The API subdomain means no `/api` suffix is needed in paths.
-
 ## Version History
 
 - **v2.0** (2024): Major update
@@ -323,6 +336,7 @@ Note: The API subdomain means no `/api` suffix is needed in paths.
   - Smart change detection in update mode
   - "Unchanged" status for records with no differences
   - Cleaner output formatting
+  - Credentials file support (creds.py)
   - Removed noisy logging from console
   - Added `--no-color` flag
 
