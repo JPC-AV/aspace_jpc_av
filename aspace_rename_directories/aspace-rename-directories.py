@@ -1,4 +1,4 @@
-"""ArchivesSpace Directory Processing Script - extracts video runtime and updates ASpace ODD notes."""
+"""ArchivesSpace Directory Processing Script - extracts video runtime and updates ASpace Scope and Contents notes."""
 
 import json  # Library for working with JSON data structures
 import requests  # Library for making HTTP requests
@@ -79,8 +79,9 @@ def get_colored_help():
 
 {BOLD}{WHITE}DESCRIPTION{RESET}
     Processes JPC_AV_* directories to:
-    {GREEN}1.{RESET} Extract video runtime from .mkv files → {YELLOW}ODD note{RESET} in ArchivesSpace
-    {GREEN}2.{RESET} Rename directories to include {YELLOW}ref_id{RESET}
+    {GREEN}1.{RESET} Extract video runtime from .mkv files → {YELLOW}Scope and Contents note{RESET} in ArchivesSpace
+    {GREEN}2.{RESET} Set extent physical_details → {YELLOW}SD video, color, sound{RESET}
+    {GREEN}3.{RESET} Rename directories to include {YELLOW}ref_id{RESET}
 
 {BOLD}{WHITE}USAGE{RESET}
     {GREEN}${RESET} python3 aspace-rename-directories.py -d PATH [options]
@@ -212,12 +213,12 @@ def get_refid(query, repository, resource, baseURL, headers):
         logging.error(f"Error fetching RefID for Component Unique Identifier '{query}': {e}")
         return None, None
 
-def modify_odd_note(data, runtime):
+def modify_scopecontent_note(data, runtime):
     """
-    Add or update an Other Descriptive Data (ODD) note (multi-part) with a Defined List containing the video runtime.
-    Creates the structure: ODD note (multi-part) > Defined List > Item (Label: "Duration", Value: runtime)
+    Add a Duration defined list to the existing Scope and Contents note.
+    If no scopecontent note exists, creates one with just the duration.
     
-    Note: This will overwrite any existing ODD note content when updating.
+    Creates the structure: Scope and Contents note > subnotes > Defined List > Item (Label: "Duration", Value: runtime)
     
     Args:
         data (dict): The original archival object JSON data.
@@ -233,39 +234,76 @@ def modify_odd_note(data, runtime):
     }
     
     # Create the defined list structure
-    defined_list = {
+    duration_defined_list = {
         "jsonmodel_type": "note_definedlist",
         "items": [duration_item]
-    }
-    
-    # Create the ODD note structure (multi-part)
-    odd_note = {
-        "jsonmodel_type": "note_multipart",
-        "type": "odd",  # Other Descriptive Data note type
-        "label": "",  # No label
-        "subnotes": [defined_list]  # The defined list goes directly in subnotes
     }
     
     # Initialize notes array if it doesn't exist
     if "notes" not in data:
         data["notes"] = []
     
-    # Check if an ODD note already exists and find its index
-    existing_odd_index = None
+    # Find existing Scope and Contents note
+    existing_scope_note = None
+    existing_scope_index = None
     for i, note in enumerate(data["notes"]):
-        if note.get("type") == "odd" and note.get("jsonmodel_type") == "note_multipart":
-            existing_odd_index = i
+        if note.get("type") == "scopecontent" and note.get("jsonmodel_type") == "note_multipart":
+            existing_scope_note = note
+            existing_scope_index = i
             break
     
-    if existing_odd_index is not None:
-        # If ODD note exists, overwrite it entirely with new duration content
-        logging.info("Overwriting existing ODD note (multi-part) with runtime information")
-        data["notes"][existing_odd_index] = odd_note
-        logging.info(f"Replaced ODD note with Duration: {runtime}")
+    if existing_scope_note is not None:
+        # Scope and Contents note exists - add/update Duration defined list in subnotes
+        logging.info("Found existing Scope and Contents note - adding Duration defined list")
+        
+        # Ensure subnotes array exists
+        if "subnotes" not in existing_scope_note:
+            existing_scope_note["subnotes"] = []
+        
+        # Remove any existing Duration defined list (to allow re-running without duplicates)
+        existing_scope_note["subnotes"] = [
+            subnote for subnote in existing_scope_note["subnotes"]
+            if not (
+                subnote.get("jsonmodel_type") == "note_definedlist" and
+                any(item.get("label") == "Duration" for item in subnote.get("items", []))
+            )
+        ]
+        
+        # Append the new Duration defined list
+        existing_scope_note["subnotes"].append(duration_defined_list)
+        logging.info(f"Added Duration defined list to Scope and Contents note: {runtime}")
     else:
-        # Create new ODD note (multi-part)
-        data["notes"].append(odd_note)
-        logging.info(f"Created new ODD note (multi-part) with Duration item: {runtime}")
+        # No Scope and Contents note exists - create a new one with just the duration
+        logging.info("No existing Scope and Contents note found - creating new one")
+        scope_note = {
+            "jsonmodel_type": "note_multipart",
+            "type": "scopecontent",
+            "subnotes": [duration_defined_list]
+        }
+        data["notes"].append(scope_note)
+        logging.info(f"Created new Scope and Contents note with Duration: {runtime}")
+    
+    return data
+
+def set_extent_physical_details(data):
+    """
+    Set the physical_details field on all extents to 'SD video, color, sound'.
+    
+    Args:
+        data (dict): The original archival object JSON data.
+    Returns:
+        dict: The updated archival object JSON data.
+    """
+    # Initialize extents array if it doesn't exist
+    if "extents" not in data or not data["extents"]:
+        logging.warning("No extents found on archival object - skipping physical_details")
+        return data
+    
+    # Update physical_details on all extents
+    for extent in data["extents"]:
+        extent["physical_details"] = "SD video, color, sound"
+    
+    logging.info(f"Set physical_details to 'SD video, color, sound' on {len(data['extents'])} extent(s)")
     
     return data
 
@@ -355,13 +393,15 @@ def rename_and_update_directories(repository, resource, baseURL, headers,
             if not no_update:
                 if dry_run:
                     logging.info(f"{Fore.YELLOW}[DRY RUN]{Style.RESET_ALL} Would update ASpace record with duration: {video_duration}")
+                    logging.info(f"{Fore.YELLOW}[DRY RUN]{Style.RESET_ALL} Would set extent physical_details to: SD video, color, sound")
                 else:
                     archival_object_data = fetch_archival_object(repository.strip("/repositories/"), archival_object_id, baseURL, headers)
                     if not archival_object_data:
                         logging.error(f"Failed to fetch archival object for ID: {archival_object_id}. Skipping.")
                         continue
 
-                    updated_data = modify_odd_note(archival_object_data, video_duration)
+                    updated_data = modify_scopecontent_note(archival_object_data, video_duration)
+                    updated_data = set_extent_physical_details(updated_data)
                     if not update_archival_object(repository.strip("/repositories/"), archival_object_id, updated_data, baseURL, headers):
                         logging.error(f"Failed to update archival object for ID: {archival_object_id}. Skipping.")
                         continue

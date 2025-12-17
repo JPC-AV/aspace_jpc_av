@@ -14,6 +14,30 @@ DESCRIPTION: Promotional clip for episode 22 of the Ebony/Jet Celebrity Showcase
 _TRANSFER_NOTES: Slight ringing present throughout. Hue is inconsistent; skin tones are redder in some sections.
 ```
 
+## Hardcoded Values
+
+These values are set by the scripts regardless of CSV content:
+
+### From aspace_csv_import.py
+
+| Field | Value |
+|-------|-------|
+| `level` | "item" |
+| `publish` | true |
+| `resource.ref` | "/repositories/2/resources/7" |
+| `extents[].portion` | "whole" |
+| `extents[].number` | "1" |
+| `instances[].instance_type` | "Moving Images (Video)" |
+| `top_container.type` | "AV Case" |
+
+### From aspace-rename-directories.py
+
+| Field | Value |
+|-------|-------|
+| `extents[].physical_details` | "SD video, color, sound" |
+| `notes[scopecontent].subnotes[].label` | "Duration" |
+| `notes[scopecontent].subnotes[].value` | Extracted from .mkv via mediainfo (hh:mm:ss) |
+
 ## Resulting ArchivesSpace JSON Object
 
 ```json
@@ -133,16 +157,25 @@ _TRANSFER_NOTES: Slight ringing present throughout. Hue is inconsistent; skin to
 
 ---
 
-## Duration (added later by aspace-rename-directories.py)
+## Updates Added Later by aspace-rename-directories.py
 
-During DAMS ingest, `aspace-rename-directories.py` extracts runtime from .mkv files via mediainfo and adds an ODD note:
+During DAMS ingest, `aspace-rename-directories.py` extracts runtime from .mkv files via mediainfo and updates the archival object:
+
+### Duration (added to Scope and Contents note)
+
+A defined list subnote is appended to the existing Scope and Contents note:
 
 ```json
 {
   "jsonmodel_type": "note_multipart",
-  "type": "odd",
+  "type": "scopecontent",
   "label": "",
+  "publish": true,
   "subnotes": [
+    {
+      "jsonmodel_type": "note_text",
+      "content": "Promotional clip for episode 22 of the Ebony/Jet Celebrity Showcase series."
+    },
     {
       "jsonmodel_type": "note_definedlist",
       "items": [
@@ -154,5 +187,19 @@ During DAMS ingest, `aspace-rename-directories.py` extracts runtime from .mkv fi
       ]
     }
   ]
+}
+```
+
+### Physical Details (added to Extent)
+
+The extent is updated with physical_details:
+
+```json
+{
+  "portion": "whole",
+  "number": "1",
+  "extent_type": "2 inch videotape",
+  "physical_details": "SD video, color, sound",
+  "jsonmodel_type": "extent"
 }
 ```

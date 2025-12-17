@@ -20,6 +20,10 @@ Here's exactly where each CSV column's data is going in the ArchivesSpace archiv
 | **Edit Date** | `dates[1]` | "Edited" | single | M/D/YYYY -> YYYY-MM-DD |
 | **Broadcast Date** | `dates[2]` | "broadcast" | single | M/D/YYYY -> YYYY-MM-DD |
 
+Each date object also includes:
+- `begin`: The converted date (YYYY-MM-DD format)
+- `expression`: Set to the same value as `begin`
+
 ### Extent Fields
 
 | CSV Column | ArchivesSpace Extent Field | Value/Mapping |
@@ -41,20 +45,23 @@ Duration is handled separately by `aspace-rename-directories.py` during the DAMS
 
 1. Extracts exact runtime from `.mkv` files using `mediainfo` CLI tool
 2. Formats duration as `hh:mm:ss` (e.g., "01:23:45")
-3. Creates or updates an **Other Descriptive Data (ODD)** note (note_multipart, type: odd)
-4. Adds a **Defined List** subnote (note_definedlist) containing:
+3. Adds a **Defined List** subnote to the existing **Scope and Contents** note (note_multipart, type: scopecontent)
+4. The Defined List (note_definedlist) contains:
    - Label: "Duration"
    - Value: extracted runtime (e.g., "01:23:45")
 
-**Note:** If an ODD note already exists, it will be **overwritten** with the new duration content.
+**Note:** If a Scope and Contents note already exists, the Duration defined list is appended to its subnotes (any existing Duration defined list is replaced to prevent duplicates). If no Scope and Contents note exists, a new one is created containing only the Duration defined list.
 
 **Resulting JSON structure:**
 ```json
 {
   "jsonmodel_type": "note_multipart",
-  "type": "odd",
-  "label": "",
+  "type": "scopecontent",
   "subnotes": [
+    {
+      "jsonmodel_type": "note_text",
+      "content": "Description text from CSV import..."
+    },
     {
       "jsonmodel_type": "note_definedlist",
       "items": [
@@ -70,6 +77,16 @@ Duration is handled separately by `aspace-rename-directories.py` during the DAMS
 ```
 
 This approach provides more accurate duration data than CSV estimates since it's extracted directly from the digitized video files.
+
+#### Extent Physical Details (via aspace-rename-directories.py)
+
+The `aspace-rename-directories.py` script also sets a hardcoded value for extent physical details:
+
+| Field | Value | Notes |
+|-------|-------|-------|
+| `extents[].physical_details` | "SD video, color, sound" | Applied to all extents on the archival object |
+
+This is set at the same time as the duration update, during the DAMS ingest workflow.
 
 ### Instance/Container Fields
 

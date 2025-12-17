@@ -123,7 +123,7 @@ def get_colored_help():
 {C.BOLD}CSV COLUMNS{C.RESET}
     {C.CYAN}Required:{C.RESET}  CATALOG_NUMBER, ASpace Parent RefID
     {C.CYAN}Optional:{C.RESET}  TITLE, Creation or Recording Date, Edit Date, Broadcast Date,
-               Original Format, Content TRT, DESCRIPTION
+               Original Format, DESCRIPTION, _TRANSFER_NOTES
 
 {C.BOLD}OUTPUT{C.RESET}
     Reports saved to: {C.CYAN}~/aspace_import_reports/{C.RESET}
@@ -138,12 +138,11 @@ def get_colored_help():
 # ==============================
 
 # ArchivesSpace API Configuration
-ASPACE_URL = "https://api-aspace.jpcarchive.org"  # API endpoint (no /api suffix needed)
-
-# Credentials - imported from creds.py (copy creds_template.py to creds.py)
+# Credentials and URL - imported from creds.py (copy creds_template.py to creds.py)
 try:
-    from creds import user as ASPACE_USERNAME, password as ASPACE_PASSWORD
+    from creds import baseURL as ASPACE_URL, user as ASPACE_USERNAME, password as ASPACE_PASSWORD
 except ImportError:
+    ASPACE_URL = None
     ASPACE_USERNAME = None
     ASPACE_PASSWORD = None
     print("Warning: creds.py not found. Use -u and -p flags or copy creds_template.py to creds.py")
@@ -604,7 +603,7 @@ def create_archival_object(row: Dict, client: ArchivesSpaceClient,
     
     title = row.get('TITLE', '').strip()
     if not title:
-        title = row.get('CATALOG_NUMBER', 'Untitled')
+        title = row.get('CATALOG_NUMBER')
     ao_data["title"] = title
     
     catalog_number = row.get('CATALOG_NUMBER', '').strip()
@@ -1051,6 +1050,11 @@ def main():
         print_status("error", "Missing credentials. Either:")
         print("         1. Copy creds_template.py to creds.py and add your credentials")
         print("         2. Use -u and -p flags")
+        sys.exit(1)
+    
+    # Check URL
+    if not ASPACE_URL:
+        print_status("error", "Missing baseURL in creds.py")
         sys.exit(1)
     
     if args.update_existing:

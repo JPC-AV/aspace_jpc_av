@@ -1,6 +1,6 @@
 # ArchivesSpace API Credentials
-# Copy this file to creds.py and fill in your credentials
-# Make sure creds.py is in your .gitignore!
+# Copy this file to creds.py and fill in your values
 
-user = ""
-password = ""
+baseURL = "URL"  # API endpoint (no /api suffix needed)
+user = "your_username"
+password = "your_password"

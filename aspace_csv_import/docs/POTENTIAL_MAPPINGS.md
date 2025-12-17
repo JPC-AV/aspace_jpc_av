@@ -15,11 +15,12 @@
 | **DESCRIPTION** 📼 | Scope and Contents note | ✅ Active |
 | **_TRANSFER_NOTES** 📼 | Physical Characteristics and Technical Requirements note (phystech) | ✅ Active |
 
-## Fields Handled Separately
+## Fields Handled by aspace-rename-directories.py
 
-| CSV Column | Handled By | Maps To |
-|------------|------------|---------|
-| **Content TRT** | `aspace-rename-directories.py` | ODD note > Defined List > "Duration" |
+| Field | Source | Maps To |
+|-------|--------|---------|
+| **Duration** | Extracted from .mkv via mediainfo | Scope and Contents note > Defined List > "Duration" |
+| **Physical Details** | Hardcoded | `extents[].physical_details` = "SD video, color, sound" |
 
 ### Matroska Container Tags 📼
 
@@ -269,14 +270,21 @@ Fields marked with 📼 are embedded in the Matroska (.mkv) container as key:val
 }
 ```
 
-#### Content TRT → Duration (via aspace-rename-directories.py)
+#### Duration (via aspace-rename-directories.py)
+
+Duration is extracted from .mkv files via mediainfo and added as a defined list subnote to the Scope and Contents note:
 
 ```json
 {
   "jsonmodel_type": "note_multipart",
-  "type": "odd",
+  "type": "scopecontent",
   "label": "",
+  "publish": true,
   "subnotes": [
+    {
+      "jsonmodel_type": "note_text",
+      "content": "Promotional clip for episode 22 of the Ebony/Jet Celebrity Showcase series."
+    },
     {
       "jsonmodel_type": "note_definedlist",
       "items": [
@@ -288,6 +296,20 @@ Fields marked with 📼 are embedded in the Matroska (.mkv) container as key:val
       ]
     }
   ]
+}
+```
+
+#### Physical Details (via aspace-rename-directories.py)
+
+Physical details are hardcoded and added to all extents:
+
+```json
+{
+  "jsonmodel_type": "extent",
+  "portion": "whole",
+  "number": "1",
+  "extent_type": "2 inch videotape",
+  "physical_details": "SD video, color, sound"
 }
 ```
 
