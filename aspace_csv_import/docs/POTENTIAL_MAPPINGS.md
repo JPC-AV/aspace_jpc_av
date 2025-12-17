@@ -1,4 +1,5 @@
 # Potential Future Mappings
+# separate out encoder settings into separate fields build good formula in Encoder Settings
 
 ## Fields Currently Mapped by aspace_csv_import.py
 
@@ -46,146 +47,262 @@ Fields marked with 📼 are embedded in the Matroska (.mkv) container as key:val
 
 ### Potentially Useful for Archival Description
 
-| CSV Column | Sample Data | Potential ASpace Mapping | Priority |
-|------------|-------------|-------------------------|----------|
-| **TERMS_OF_USE** 📼 | "Some or all of this video may be subject to copyright..." | Conditions Governing Use note (`userestrict`) | High |
-| **Ephemera Description** | "One sheet pre-formated Segment Log filled in with handwritten time codes, subjects, producers, and editors.", "8.5\" x 11\" sheet of lined white paper with segments, timecode, producers, and length handwritten" | Separated Materials note (`separatedmaterial`) | Medium |
-| **Related Objects** | Hash values linking related items | Related Materials note | Medium |
-| **_PRE_TRANSFER_NOTES** 📼 | "uneven pack", "cardboard box", "Dried tape lubricant present on edge of tape." | phystech or Custodial History note - tape condition before transfer | Medium |
-| **notes** | "Same program can be found on JPC_AV_01808 without commercials.", "Updub from type B tape to type C tape.", "Color\nInterview audio on channel 1, music and audio for clips on channel 2" | General note (odd) or Processing Information | Medium |
-| **Sub-Series** | "EJS", "ABAA", "Fashion Fair", "Ebony Magazine", "Jet Magazine", "WJPC Radio" | Could inform hierarchy/arrangement | Medium |
-| **EJS Season** | "Season 03", "Season 04", "Celebrity Showcase", "TBD" | Scope and Contents (note_definedlist) | Low |
-| **EJS Episode** | "4002" | Scope and Contents (note_definedlist) | Low |
-| **ORIGINAL_MEDIA_TYPE** 📼 | "U-matic, Sony, KCS-60XBR" | `extent.physical_details` or phystech note. *Computed field: Original Format + Format Manufacturer + Format Make/Model* | Low |
-| **Ephemera With Tape** | "Yes", "No" | Separated Materials note trigger | Low |
-| **Ephemera Condition** | (sparse data) | Separated Materials note | Low |
-| **ENCODED_BY** 📼 | "Smithsonian NMAAHC, David Sohl, US" | Processing Information note (`processinfo`) or phystech note. *Same as "digitized by"* | Low |
-| **DATE_DIGITIZED** 📼 | "2024-01-09" | Processing Information note (`processinfo`) - date of digitization | Low |
-| **Tape Capacity** | "35", "60", "30" (minutes) | phystech note | Very Low |
-| **Agents** | "Barry White", "New Edition,Ricky Bell,Michael Bivins,Ronnie DeVoe,Johnny Gill,Ralph E. Tresvant,Tracy Chapman,Sammy Davis Jr." | `linked_agents[]` - comma-separated names. *Plan is to enter agents at episode (sub-series) level manually in ASpace, not item level via bulk upload. Note: agents at episode level will contain all agents in that episode - works for tapes with complete episodes but creates false inheritance for raw footage tapes that only feature some agents.* **Question: What is the best way to prevent an agent from being inherited by a specific item-level record?** | Unknown |
+| CSV Column | Sample Data | Potential ASpace Mapping | Reasoning |
+|------------|-------------|-------------------------|-----------|
+| **DATE_DIGITIZED** 📼 | "2024-01-09" | Processing Information note (`processinfo`) | Date of digitization; available in Matroska tags |
+| **EJS Episode** | "4002" | Scope and Contents (note_definedlist) | Limited use outside EJS sub-series |
+| **EJS Season** | "Season 03", "Season 04", "Celebrity Showcase", "TBD" | Scope and Contents (note_definedlist) | Limited use outside EJS sub-series |
+| **ENCODED_BY** 📼 | "Smithsonian NMAAHC, David Sohl, US" | Processing Information note (`processinfo`) | Same as "digitized by"; available in Matroska tags |
+| **Ephemera Description** | "One sheet pre-formated Segment Log filled in with handwritten time codes, subjects, producers, and editors." | Separated Materials note (`separatedmaterial`) | Documents accompanying materials |
+| **Sub-Series** | "EJS", "ABAA", "Fashion Fair", "Ebony Magazine", "Jet Magazine", "WJPC Radio" | Could inform hierarchy/arrangement | Already in hierarchy via parent |
 
 ### Internal/Processing Fields - Not Mapped to ArchivesSpace
 
 | CSV Column | Sample Data | Reason Not Mapped |
 |------------|-------------|-------------------|
-| **ASpace File Type** | "Edited footage", "Raw footage", "Promo footage" | Used by staff to locate correct parent ref_id (these are sub-series in ASpace) |
-| **(old)Box #** | "AV_2", "AV_4" | Legacy tracking only |
-| **JPC_AV Number** | "02792" | Redundant with CATALOG_NUMBER |
-| **New Box #** | "AV_U_002" | Internal container tracking |
-| **Outside Vendor** | (empty) | Internal workflow |
-| **Old Inventory Title** | Older title variants | Superseded by TITLE |
-| **Processing Title** | Older title variants | Superseded by TITLE |
+| **COLLECTION** 📼 | "Johnson Publishing Company Archive" | Available in Matroska tags; redundant - fixed to one resource |
+| **DATE_TAGGED** 📼 | (empty) | Available in Matroska tags; internal tracking |
+| **ENCODER_SETTINGS** 📼 | (empty) | Available in Matroska tags; computed field |
+| **ORIGINAL_MEDIA_TYPE** 📼 | "U-matic, Sony, KCS-60XBR" | Available in Matroska tags; computed field |
+| **_ORIGINAL_FPS** 📼 | (empty) | Available in Matroska tags; technical |
+| **_PRE_TRANSFER_NOTES** 📼 | "uneven pack", "cardboard box", "Dried tape lubricant..." | Available in Matroska tags; pre-transfer condition info |
+| **TERMS_OF_USE** 📼 | "Some or all of this video may be subject to copyright..." | Available in Matroska tags; access restrictions at collection level |
+| **JPC_AV Number** | "02792" | Computed into CATALOG_NUMBER |
+| **vrecord Version** | "2025-09-04" | Computed into ENCODER_SETTINGS |
+| **VTR Manufacturer** | "Sony" | Computed into ENCODER_SETTINGS |
+| **VTR Model** | "VO-9850" | Computed into ENCODER_SETTINGS |
+| **VTR Serial #** | (empty) | Computed into ENCODER_SETTINGS |
 | **Format Manufacturer** | "Sony", "3M", "Fuji" | Computed into ORIGINAL_MEDIA_TYPE |
 | **Format Make/Model** | "BRS-5", "UCA-60", "KCS-60XBR" | Computed into ORIGINAL_MEDIA_TYPE |
-| **US Art Location** | "AV-C1-S3" | Internal shelf location |
-| **Record_ID** | "U-matic_recp0uaZlf7R8cUPF" | Database internal ID |
-| **Current Location (Building)** | "US Art" | Internal tracking |
-| **Vendor Name** | (empty) | Internal workflow |
-| **Other Location** | (empty) | Internal tracking |
-| **ASpace Item Record Created** | "No", "Yes" | Workflow tracking |
-| **ASpace Item Record Published** | (empty) | Workflow tracking |
-| **ASpace Parent Record Created** | (empty) | Workflow tracking |
-| **VTT Needed** | (empty) | Workflow tracking |
-| **VTT Ordered** | (empty) | Workflow tracking |
-| **VTT Complete** | (empty) | Workflow tracking |
-| **Digitized** | "Yes", "Not Yet" | Workflow tracking |
-| **Problem Tape** | (empty) | Internal QC |
-| **Reason For Not Digitizing** | (empty) | Internal workflow |
-| **ProcAmp Adjustments** | "Set-up: +10, Y-level: -65..." | Technical transfer settings |
-| **VTR Manufacturer** | "Sony" | Equipment tracking |
-| **VTR Model** | "VO-9850" | Equipment tracking |
-| **VTR Serial #** | (empty) | Equipment tracking |
-| **Passed QC** | (empty) | Internal QC |
-| **File Size GB** | "16" | Technical - could extract from file |
-| **Tape Baked** | "Yes", "No" | Conservation workflow |
-| **Hours Baked** | "24" | Conservation workflow |
-| **Tape Cleaned** | "Yes" | Conservation workflow |
-| **Cleaning Machine** | "VT3100" | Equipment tracking |
-| **COLLECTION** 📼 | "Johnson Publishing Company Archive" | Redundant - fixed to one resource |
-| **ENCODER_SETTINGS** 📼 | (empty) | Technical metadata |
-| **DATE_TAGGED** 📼 | (empty) | Workflow tracking |
-| **_ORIGINAL_FPS** 📼 | (empty) | Technical - extract from file |
-| **Metadata Embedding Assigned To** | (empty) | Workflow tracking |
-| **Metadata Embedding Complete** | "Not Yet" | Workflow tracking |
-| **In DAMS** | "Not Yet" | Workflow tracking |
-| **old inventory #** | (empty) | Legacy tracking |
-| **Last Modified** | "2025-12-10 16:34" | Database metadata |
-| **Last Modified By** | "David Sohl" | Database metadata |
-| **Created** | "2025-06-29" | Database metadata |
-| **Created By** | "Bleakley McDowell" | Database metadata |
-| **Format Counter** | "1733" | Internal tracking |
-| **Format Counter Format** | "U-matic" | Internal tracking |
-| **Row_ID** | "53038" | Database internal ID |
-| **Tape/Case Photographed** | (empty) | Workflow tracking |
-| **Date Tape/Case Photographed** | (empty) | Workflow tracking |
-| **Notes Tape/Case Photographed** | (empty) | Workflow tracking |
-| **vrecord Version** | "2025-09-04" | Software version tracking |
-| **Problem Record** | (empty) | Internal QC |
-| **Problem Record Notes** | (empty) | Internal QC |
-| **Rehoused** | (empty) | Conservation workflow |
-| **Empty Parent RefID** | "Empty", "Not Empty" | Workflow validation |
-| **Attachments** | (empty) | Database field |
-| **Currently in Archival(ish) Housing** | "Yes (in a good home)" | Internal tracking |
-
----
-
-## Recommended Priority Implementation
-
-### High Priority
-| Field | Mapping | Rationale |
-|-------|---------|-----------|
-| **TERMS_OF_USE** 📼 | `userestrict` note (Conditions Governing Use) | Standard archival access info |
-
-### Unknown Priority
-| Field | Mapping | Rationale |
-|-------|---------|-----------|
-| **Agents** | `linked_agents[]` | Comma-separated performer/interviewee names; plan is to enter at episode (sub-series) level manually in ASpace rather than item-level bulk upload |
-
-### Medium Priority
-| Field | Mapping | Rationale |
-|-------|---------|-----------|
-| **Ephemera Description** | `separatedmaterial` note | Documents accompanying materials (segment logs, rundowns) |
-| **Related Objects** | `relatedmaterial` note | Links related AV items |
-| **_PRE_TRANSFER_NOTES** 📼 | `phystech` note | Tape condition info (uneven pack, dried lubricant, etc.) |
-| **notes** | `odd` note or `processinfo` | Contextual info (dubs, related tapes, audio channel notes) |
-| **Sub-Series** | Hierarchy/arrangement documentation | Already in hierarchy via parent |
-
-### Low Priority
-| Field | Mapping | Rationale |
-|-------|---------|-----------|
-| **EJS Season** | Scope and Contents (note_definedlist) | Limited use outside EJS sub-series |
-| **EJS Episode** | Scope and Contents (note_definedlist) | Limited use outside EJS sub-series |
-| **ORIGINAL_MEDIA_TYPE** 📼 | `extent.physical_details` | Computed field - mostly redundant with Original Format |
-| **Ephemera fields** | `separatedmaterial` note | Only if populated |
+| **Cleaning Machine** | "VT3100" | Internal tracking: conservation |
+| **Currently in Archival(ish) Housing** | "Yes (in a good home)" | Internal tracking: conservation |
+| **Hours Baked** | "24" | Internal tracking: conservation |
+| **Rehoused** | (empty) | Internal tracking: conservation |
+| **Tape Baked** | "Yes", "No" | Internal tracking: conservation |
+| **Tape Cleaned** | "Yes" | Internal tracking: conservation |
+| **notes** | "Same program on JPC_AV_01808 without commercials." | Internal tracking: contextual notes |
+| **Related Objects** | Hash values linking related items | Internal tracking: contextual notes |
+| **Attachments** | (empty) | Internal tracking: database |
+| **Created** | "2025-06-29" | Internal tracking: database |
+| **Created By** | "Bleakley McDowell" | Internal tracking: database |
+| **Last Modified** | "2025-12-10 16:34" | Internal tracking: database |
+| **Last Modified By** | "David Sohl" | Internal tracking: database |
+| **Record_ID** | "U-matic_recp0uaZlf7R8cUPF" | Internal tracking: database |
+| **Row_ID** | "53038" | Internal tracking: database |
+| **Format Counter** | "1733" | Internal tracking: inventory |
+| **Format Counter Format** | "U-matic" | Internal tracking: inventory |
+| **(old)Box #** | "AV_2", "AV_4" | Internal tracking: legacy |
+| **old inventory #** | (empty) | Internal tracking: legacy |
+| **Old Inventory Title** | Older title variants | Internal tracking: legacy |
+| **Current Location (Building)** | "US Art" | Internal tracking: location |
+| **New Box #** | "AV_U_002" | Internal tracking: location |
+| **Other Location** | (empty) | Internal tracking: location |
+| **US Art Location** | "AV-C1-S3" | Internal tracking: location |
+| **Passed QC** | (empty) | Internal tracking: QC |
+| **Problem Record** | (empty) | Internal tracking: QC |
+| **Problem Record Notes** | (empty) | Internal tracking: QC |
+| **Problem Tape** | (empty) | Internal tracking: QC |
+| **Reason For Not Digitizing** | (empty) | Internal tracking: QC |
+| **ASpace File Type** | "Edited footage", "Raw footage", "Promo footage" | Internal tracking: workflow |
+| **ASpace Item Record Created** | "No", "Yes" | Internal tracking: workflow |
+| **ASpace Item Record Published** | (empty) | Internal tracking: workflow |
+| **ASpace Parent Record Created** | (empty) | Internal tracking: workflow |
+| **Date Tape/Case Photographed** | (empty) | Internal tracking: workflow |
+| **Digitized** | "Yes", "Not Yet" | Internal tracking: workflow |
+| **Empty Parent RefID** | "Empty", "Not Empty" | Internal tracking: workflow |
+| **In DAMS** | "Not Yet" | Internal tracking: workflow |
+| **Metadata Embedding Assigned To** | (empty) | Internal tracking: workflow |
+| **Metadata Embedding Complete** | "Not Yet" | Internal tracking: workflow |
+| **Notes Tape/Case Photographed** | (empty) | Internal tracking: workflow |
+| **Outside Vendor** | (empty) | Internal tracking: workflow |
+| **Processing Title** | Older title variants | Internal tracking: workflow |
+| **Tape/Case Photographed** | (empty) | Internal tracking: workflow |
+| **Vendor Name** | (empty) | Internal tracking: workflow |
+| **VTT Complete** | (empty) | Internal tracking: workflow |
+| **VTT Needed** | (empty) | Internal tracking: workflow |
+| **VTT Ordered** | (empty) | Internal tracking: workflow |
+| **Agents** | "Barry White", "New Edition,Ricky Bell,Michael Bivins..." | Manually entered at episode level in ASpace |
+| **Ephemera Condition** | (sparse data) | Sparse data |
+| **Ephemera With Tape** | "Yes", "No" | Sparse data |
+| **File Size GB** | "16" | Technical |
+| **ProcAmp Adjustments** | "Set-up: +10, Y-level: -65..." | Technical |
+| **Tape Capacity** | "35", "60", "30" (minutes) | Technical |
 
 ---
 
 ## Example JSON Structures
 
-### Agents → Linked Agents
+### Active - Currently Mapped
+
+#### CATALOG_NUMBER → component_id
 
 ```json
 {
-  "linked_agents": [
+  "component_id": "JPC_AV_00012"
+}
+```
+
+#### CATALOG_NUMBER → Top Container
+
+```json
+{
+  "indicator": "JPC_AV_00012",
+  "type": "AV Case",
+  "repository": {
+    "ref": "/repositories/2"
+  }
+}
+```
+
+#### TITLE → title
+
+```json
+{
+  "title": "Ebony/Jet Celebrity Showcase, episode 22, promo"
+}
+```
+
+#### Creation or Recording Date → dates (creation)
+
+```json
+{
+  "dates": [
     {
-      "role": "subject",
-      "ref": "/agents/people/123"
-    },
-    {
-      "role": "subject", 
-      "ref": "/agents/people/456"
+      "jsonmodel_type": "date",
+      "date_type": "single",
+      "label": "creation",
+      "begin": "1982-08-01",
+      "expression": "1982-08-01"
     }
   ]
 }
 ```
-*Note: Requires agent records to exist or be created first. CSV contains comma-separated names like "Barry White" or "New Edition,Ricky Bell,Michael Bivins,Ronnie DeVoe,Johnny Gill,Ralph E. Tresvant"*
 
-### Ephemera Description → Separated Materials
+#### Edit Date → dates (Edited)
+
+```json
+{
+  "dates": [
+    {
+      "jsonmodel_type": "date",
+      "date_type": "single",
+      "label": "Edited",
+      "begin": "1982-08-15",
+      "expression": "1982-08-15"
+    }
+  ]
+}
+```
+
+#### Broadcast Date → dates (broadcast)
+
+```json
+{
+  "dates": [
+    {
+      "jsonmodel_type": "date",
+      "date_type": "single",
+      "label": "broadcast",
+      "begin": "1982-09-01",
+      "expression": "1982-09-01"
+    }
+  ]
+}
+```
+
+#### Original Format → extent_type
+
+```json
+{
+  "extents": [
+    {
+      "jsonmodel_type": "extent",
+      "portion": "whole",
+      "number": "1",
+      "extent_type": "2 inch videotape"
+    }
+  ]
+}
+```
+
+#### ASpace Parent RefID → parent.ref
+
+```json
+{
+  "parent": {
+    "ref": "/repositories/2/archival_objects/12345"
+  }
+}
+```
+
+#### DESCRIPTION → Scope and Contents
+
+```json
+{
+  "jsonmodel_type": "note_multipart",
+  "type": "scopecontent",
+  "label": "",
+  "publish": true,
+  "subnotes": [
+    {
+      "jsonmodel_type": "note_text",
+      "content": "Promotional clip for episode 22 of the Ebony/Jet Celebrity Showcase series."
+    }
+  ]
+}
+```
+
+#### _TRANSFER_NOTES → Physical Characteristics and Technical Requirements
+
+```json
+{
+  "jsonmodel_type": "note_multipart",
+  "type": "phystech",
+  "label": "",
+  "publish": true,
+  "subnotes": [
+    {
+      "jsonmodel_type": "note_text",
+      "content": "Slight ringing present throughout. Hue is inconsistent; skin tones are redder in some sections."
+    }
+  ]
+}
+```
+
+#### Content TRT → Duration (via aspace-rename-directories.py)
+
+```json
+{
+  "jsonmodel_type": "note_multipart",
+  "type": "odd",
+  "label": "",
+  "subnotes": [
+    {
+      "jsonmodel_type": "note_definedlist",
+      "items": [
+        {
+          "jsonmodel_type": "note_definedlist_item",
+          "label": "Duration",
+          "value": "01:23:45"
+        }
+      ]
+    }
+  ]
+}
+```
+
+---
+
+### Potential - Not Currently Mapped
+
+#### Ephemera Description → Separated Materials
 
 ```json
 {
   "jsonmodel_type": "note_multipart",
   "type": "separatedmaterial",
+  "label": "",
+  "publish": true,
   "subnotes": [
     {
       "jsonmodel_type": "note_text",
@@ -195,55 +312,63 @@ Fields marked with 📼 are embedded in the Matroska (.mkv) container as key:val
 }
 ```
 
-### TERMS_OF_USE → Conditions Governing Use
-
-```json
-{
-  "jsonmodel_type": "note_multipart",
-  "type": "userestrict",
-  "subnotes": [
-    {
-      "jsonmodel_type": "note_text",
-      "content": "Some or all of this video may be subject to copyright or other intellectual property rights. Proper usage is the responsibility of the user."
-    }
-  ]
-}
-```
-
-### _TRANSFER_NOTES → Physical Characteristics
-
-```json
-{
-  "jsonmodel_type": "note_multipart",
-  "type": "phystech",
-  "subnotes": [
-    {
-      "jsonmodel_type": "note_text",
-      "content": "Frequent visual errors from initial recording process."
-    }
-  ]
-}
-```
-
-### EJS Season / Episode → Scope and Contents (Defined List)
+#### EJS Season / Episode → Scope and Contents (Defined List)
 
 ```json
 {
   "jsonmodel_type": "note_multipart",
   "type": "scopecontent",
+  "label": "",
+  "publish": true,
   "subnotes": [
     {
       "jsonmodel_type": "note_definedlist",
       "items": [
         {
+          "jsonmodel_type": "note_definedlist_item",
           "label": "Season",
           "value": "Celebrity Showcase"
         },
         {
+          "jsonmodel_type": "note_definedlist_item",
           "label": "Episode",
           "value": "22"
         }
       ]
+    }
+  ]
+}
+```
+
+#### ENCODED_BY → Processing Information
+
+```json
+{
+  "jsonmodel_type": "note_multipart",
+  "type": "processinfo",
+  "label": "",
+  "publish": true,
+  "subnotes": [
+    {
+      "jsonmodel_type": "note_text",
+      "content": "Digitized by: Smithsonian NMAAHC, David Sohl, US"
+    }
+  ]
+}
+```
+
+#### DATE_DIGITIZED → Processing Information
+
+```json
+{
+  "jsonmodel_type": "note_multipart",
+  "type": "processinfo",
+  "label": "",
+  "publish": true,
+  "subnotes": [
+    {
+      "jsonmodel_type": "note_text",
+      "content": "Digitized: 2024-01-09"
     }
   ]
 }
