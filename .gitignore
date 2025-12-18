@@ -1,16 +1,25 @@
-# Mac
-.DS_Store
-
-
-#############
-## Python
-#############
-
+# Credentials (DO NOT COMMIT)
 creds.py
+config.py
+credentials.json
+*.password
+*.key
+*.token
 
-*.py[co]
+# Generated reports and logs
+import_reports/
+validation_report_*.json
+parent_lookup_*.csv
+*_cleaned.csv
+valid_extent_types.txt
+*.log
 
-# Packages
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
 *.egg
 *.egg-info
 dist/
@@ -21,6 +30,27 @@ var/
 sdist/
 develop-eggs/
 .installed.cfg
-
-# Installer logs
 pip-log.txt
+
+# Virtual environments
+env/
+venv/
+ENV/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+
+# Temporary files
+*.tmp
+*.bak
+*.backup
+tmp/
+temp/
