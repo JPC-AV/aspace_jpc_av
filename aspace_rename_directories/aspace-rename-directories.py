@@ -9,8 +9,16 @@ from pymediainfo import MediaInfo  # External library to extract metadata from m
 import subprocess  # Library for running external commands and capturing their output
 import re  # Library for working with regular expressions (text pattern matching)
 import argparse  # Library for parsing command-line arguments
-import authenticate  # Import the authentication module
 from colorama import Fore, Style, init  # Library for adding colored output to terminal messages
+
+# Import credentials and configuration from creds.py
+try:
+    from creds import baseURL as ASPACE_URL, user as ASPACE_USERNAME, password as ASPACE_PASSWORD
+    from creds import repo_id as REPO_ID, resource_id as RESOURCE_ID
+except ImportError:
+    print(f"{Fore.RED}Error: creds.py not found or missing required fields{Style.RESET_ALL}")
+    print("Required fields: baseURL, user, password, repo_id, resource_id")
+    sys.exit(1)
 
 # Initialize Colorama for cross-platform compatibility of colored terminal output
 init(autoreset=True)
@@ -50,6 +58,62 @@ class ColoredFormatter(logging.Formatter):
 # Apply the custom formatter to all logging handlers
 for handler in logging.getLogger().handlers:
     handler.setFormatter(ColoredFormatter("%(asctime)s [%(levelname)s] %(message)s"))
+
+
+class ArchivesSpaceClient:
+    """Handles ArchivesSpace API authentication and session management."""
+    
+    def __init__(self):
+        self.base_url = ASPACE_URL
+        self.username = ASPACE_USERNAME
+        self.password = ASPACE_PASSWORD
+        self.session = None
+        self.headers = {}
+    
+    def login(self) -> bool:
+        """Authenticate with ArchivesSpace and get session token."""
+        try:
+            response = requests.post(
+                f"{self.base_url}/users/{self.username}/login",
+                data={"password": self.password}
+            )
+            
+            if response.status_code == 200:
+                self.session = response.json()['session']
+                self.headers = {"X-ArchivesSpace-Session": self.session}
+                logging.info("Successfully authenticated with ArchivesSpace")
+                return True
+            else:
+                logging.error(f"Authentication failed: {response.status_code} - {response.text}")
+                return False
+                
+        except Exception as e:
+            logging.error(f"Authentication error: {str(e)}")
+            return False
+    
+    def logout(self) -> bool:
+        """Log out of ArchivesSpace by invalidating the session token."""
+        if not self.session:
+            return True
+        
+        try:
+            response = requests.post(
+                f"{self.base_url}/logout",
+                headers=self.headers
+            )
+            
+            if response.status_code == 200:
+                logging.info("Successfully logged out of ArchivesSpace")
+                self.session = None
+                self.headers = {}
+                return True
+            else:
+                logging.warning(f"Logout failed: {response.status_code}")
+                return False
+                
+        except Exception as e:
+            logging.warning(f"Logout error: {str(e)}")
+            return False
 
 def log_spacing():
     """
@@ -596,19 +660,18 @@ def main():
         logging.info(f"{Fore.YELLOW}DRY RUN MODE - No changes will be made{Style.RESET_ALL}")
         log_spacing()
     
-    # Define repository and resource paths for ArchivesSpace
-    repository = "/repositories/2"
-    resource = "/resources/7"
+    # Define repository and resource paths for ArchivesSpace (from creds.py)
+    repository = f"/repositories/{REPO_ID}"
+    resource = f"/resources/{RESOURCE_ID}"
 
-    # Step 1: Authenticate and obtain session headers
+    # Step 1: Authenticate with ArchivesSpace
     # (Always needed - even --no-update requires ASpace lookup for ref_id)
-    baseURL, headers = authenticate.login()  # Attempt to log in to ArchivesSpace
-    if not baseURL or not headers:
+    client = ArchivesSpaceClient()
+    if not client.login():
         logging.error("Authentication failed! Exiting the script.")
         return  # Exit the function if authentication fails
 
     # Log successful login
-    logging.info("Login successful!")
     log_spacing()  # Add spacing for log readability
 
     try:
@@ -617,8 +680,8 @@ def main():
         rename_and_update_directories(
             repository=repository,
             resource=resource,
-            baseURL=baseURL,
-            headers=headers,
+            baseURL=client.base_url,
+            headers=client.headers,
             target_dir=args.directory,
             dry_run=args.dry_run,
             no_rename=args.no_rename,
@@ -633,9 +696,7 @@ def main():
 
     finally:
         # Step 3: Ensure logout is always attempted, even if an error occurs
-        if headers:
-            authenticate.logout(headers)
-            logging.info("Logout successful!")
+        client.logout()
 
 if __name__ == "__main__":
     main()  # Run the main function

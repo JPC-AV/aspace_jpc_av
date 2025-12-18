@@ -141,16 +141,17 @@ def get_colored_help():
 # Credentials and URL - imported from creds.py (copy creds_template.py to creds.py)
 try:
     from creds import baseURL as ASPACE_URL, user as ASPACE_USERNAME, password as ASPACE_PASSWORD
+    from creds import repo_id as REPO_ID, resource_id as RESOURCE_ID
 except ImportError:
     ASPACE_URL = None
     ASPACE_USERNAME = None
     ASPACE_PASSWORD = None
-    print("Warning: creds.py not found. Use -u and -p flags or copy creds_template.py to creds.py")
+    REPO_ID = None
+    RESOURCE_ID = None
+    print("Warning: creds.py not found. Copy creds_template.py to creds.py")
 
 # Repository and Resource Configuration
-REPO_ID = "2"  # Your repository ID
-RESOURCE_ID = "7"  # Your resource ID
-RESOURCE_URI = f"/repositories/{REPO_ID}/resources/{RESOURCE_ID}"
+RESOURCE_URI = f"/repositories/{REPO_ID}/resources/{RESOURCE_ID}" if REPO_ID and RESOURCE_ID else None
 
 # CSV File Configuration
 CSV_FILE = "JPCA-AV_SOURCE-ASpace_CSV_exoort.csv"  # Input CSV file
@@ -241,6 +242,30 @@ class ArchivesSpaceClient:
                 
         except Exception as e:
             logging.error(f"Authentication error: {str(e)}")
+            return False
+    
+    def logout(self) -> bool:
+        """Log out of ArchivesSpace by invalidating the session token."""
+        if not self.session:
+            return True
+        
+        try:
+            response = requests.post(
+                f"{self.base_url}/logout",
+                headers=self.headers
+            )
+            
+            if response.status_code == 200:
+                logging.info("Successfully logged out of ArchivesSpace")
+                self.session = None
+                self.headers = {}
+                return True
+            else:
+                logging.warning(f"Logout failed: {response.status_code}")
+                return False
+                
+        except Exception as e:
+            logging.warning(f"Logout error: {str(e)}")
             return False
     
     def make_request(self, method: str, endpoint: str, data: Dict = None, 
@@ -718,6 +743,7 @@ def process_csv_row(row: Dict, row_num: int, client: ArchivesSpaceClient,
         if not catalog_number:
             result["status"] = "skipped"
             result["message"] = "Missing catalog number"
+            logging.warning(f"Row {row_num}: Skipped - missing catalog number")
             return result
         
         # Validate extent type
@@ -743,6 +769,7 @@ def process_csv_row(row: Dict, row_num: int, client: ArchivesSpaceClient,
             elif duplicate_mode == 'skip':
                 result["status"] = "skipped"
                 result["message"] = "Duplicate - skipped"
+                logging.info(f"Skipped duplicate: {catalog_number} (exists at {existing_uri})")
                 return result
                 
             elif duplicate_mode == 'update':
@@ -752,14 +779,20 @@ def process_csv_row(row: Dict, row_num: int, client: ArchivesSpaceClient,
                     if ao_result.get('unchanged'):
                         result["status"] = "unchanged"
                         result["message"] = "No changes needed"
+                        logging.info(f"Unchanged: {catalog_number} (no updates needed)")
                     else:
                         result["status"] = "updated"
                         result["changes"] = changes
                         result["message"] = f"Updated: {', '.join(changes.keys())}" if changes else "Updated"
+                        if dry_run:
+                            logging.info(f"[DRY RUN] Would update: {catalog_number} - {', '.join(changes.keys())}")
+                        else:
+                            logging.info(f"Updated: {catalog_number} - {', '.join(changes.keys())}")
                     result["uri"] = ao_result.get('uri', existing_uri)
                 else:
                     result["status"] = "error"
                     result["message"] = "Failed to update"
+                    logging.error(f"Failed to update: {catalog_number}")
                 
                 return result
         
@@ -787,9 +820,11 @@ def process_csv_row(row: Dict, row_num: int, client: ArchivesSpaceClient,
             result["message"] = "Created successfully"
             if ao_result.get('dry_run'):
                 result["message"] = "Would be created"
+                logging.info(f"[DRY RUN] Would create: {catalog_number}")
         else:
             result["status"] = "error"
             result["message"] = "Failed to create"
+            logging.error(f"Failed to create archival object: {catalog_number}")
             
     except Exception as e:
         result["status"] = "error"
@@ -910,7 +945,7 @@ def generate_reports(results: List[Dict], summary: Dict):
     except Exception as e:
         logging.error(f"Failed to write JSON report: {str(e)}")
 
-def print_summary(summary: Dict):
+def print_summary(summary: Dict, elapsed_time: str = None):
     """Print import summary to console."""
     print_section("IMPORT SUMMARY")
     
@@ -938,6 +973,9 @@ def print_summary(summary: Dict):
     
     if summary.get('dry_run', False):
         print(f"\n  {Colors.YELLOW}{Colors.BOLD}DRY RUN - No records were modified{Colors.RESET}")
+    
+    if elapsed_time:
+        print(f"\n  Processing Time: {elapsed_time}")
     
     print(f"\n  Reports: {OUTPUT_DIR}/")
     print(f"{Colors.DIM}{'─' * 60}{Colors.RESET}\n")
@@ -1057,6 +1095,11 @@ def main():
         print_status("error", "Missing baseURL in creds.py")
         sys.exit(1)
     
+    # Check repo and resource config
+    if not REPO_ID or not RESOURCE_ID:
+        print_status("error", "Missing repo_id or resource_id in creds.py")
+        sys.exit(1)
+    
     if args.update_existing:
         duplicate_mode = 'update'
     elif args.fail_on_duplicate:
@@ -1073,6 +1116,9 @@ def main():
     print(f"  Mode: {duplicate_mode}")
     if args.dry_run:
         print(f"  {Colors.YELLOW}{Colors.BOLD}DRY RUN{Colors.RESET}")
+    
+    # Start timing
+    start_time = time.time()
     
     # Check file
     if not os.path.exists(csv_file):
@@ -1098,15 +1144,28 @@ def main():
     try:
         results, summary = process_csv_file(csv_file, client, args.dry_run, duplicate_mode)
         generate_reports(results, summary)
-        print_summary(summary)
+        
+        # Calculate elapsed time
+        elapsed_seconds = time.time() - start_time
+        hours, remainder = divmod(int(elapsed_seconds), 3600)
+        minutes, seconds = divmod(remainder, 60)
+        elapsed_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+        
+        print_summary(summary, elapsed_str)
         
         if summary['failed'] > 0:
+            client.logout()
             sys.exit(2)
             
     except Exception as e:
         print_status("error", f"Fatal error: {str(e)}")
         logging.error(f"Fatal error during import: {str(e)}")
+        client.logout()
         sys.exit(1)
+    
+    # Logout
+    client.logout()
+    print_status("success", "Logged out")
 
 if __name__ == "__main__":
     main()
