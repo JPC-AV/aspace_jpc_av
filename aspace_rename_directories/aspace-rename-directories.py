@@ -159,6 +159,7 @@ def get_colored_help():
     {CYAN}-d, --directory PATH{RESET}  {YELLOW}(required){RESET}  Target directory with JPC_AV_* subdirs
     {CYAN}-n, --dry-run{RESET}                    Preview changes without executing
     {CYAN}-v, --verbose{RESET}                    Enable debug-level logging
+    {CYAN}--single PATH [PATH ...]{RESET}         Process specific directories directly (not subdirs)
     {CYAN}--no-rename{RESET}                      Update ASpace only, skip directory renames
     {CYAN}--no-update{RESET}                      Rename only, skip ASpace record updates
     {CYAN}--rename-mkv{RESET}                     Also rename .mkv files to include ref_id
@@ -166,6 +167,8 @@ def get_colored_help():
 {BOLD}{WHITE}EXAMPLES{RESET}
     {GREEN}${RESET} python3 aspace-rename-directories.py -d /path/to/videos
     {GREEN}${RESET} python3 aspace-rename-directories.py -d /path/to/videos --dry-run
+    {GREEN}${RESET} python3 aspace-rename-directories.py --single /path/to/JPC_AV_00001
+    {GREEN}${RESET} python3 aspace-rename-directories.py --single /path/to/JPC_AV_00001 /path/to/JPC_AV_00002
     {GREEN}${RESET} python3 aspace-rename-directories.py -d /path/to/videos --rename-mkv
 
 {BOLD}{WHITE}INPUT/OUTPUT{RESET}
@@ -378,7 +381,8 @@ def set_extent_physical_details(data):
 
 def rename_and_update_directories(repository, resource, baseURL, headers, 
                                    target_dir, dry_run=False, no_rename=False, 
-                                   no_update=False, verbose=False, rename_mkv=False):
+                                   no_update=False, verbose=False, rename_mkv=False,
+                                   single=False):
     """
     Process directories to:
     - Extract video metadata.
@@ -397,13 +401,17 @@ def rename_and_update_directories(repository, resource, baseURL, headers,
         verbose (bool): If True, show additional debug information.
         rename_mkv (bool): If True, also rename .mkv files to include ref_id.
     """
-    # Validate target directory
-    if not os.path.isdir(target_dir):
-        logging.error(f"Target directory does not exist: {target_dir}")
-        return
-    working_dir = os.path.abspath(target_dir)
-    
-    logging.info(f"Working directory: {working_dir}")
+    # Handle --single mode (target_dir may be None)
+    if single:
+        logging.info(f"Processing {len(single)} specified director{'y' if len(single) == 1 else 'ies'}")
+        working_dir = None  # Not used in --single mode
+    else:
+        # Validate target directory
+        if not target_dir or not os.path.isdir(target_dir):
+            logging.error(f"Target directory does not exist: {target_dir}")
+            return
+        working_dir = os.path.abspath(target_dir)
+        logging.info(f"Working directory: {working_dir}")
     
     # Log active options
     if no_rename:
@@ -415,11 +423,40 @@ def rename_and_update_directories(repository, resource, baseURL, headers,
     
     log_spacing()
 
-    # Find all directories to process
-    directory_list = [
-        entry for entry in os.listdir(working_dir)
-        if os.path.isdir(os.path.join(working_dir, entry)) and "_refid_" not in entry and "JPC_AV" in entry
-    ]
+    # Find directories to process
+    if single:
+        # --single mode: process only the specified directories (not their subdirs)
+        directory_list = []
+        parent_dirs = {}  # Map directory name to its parent path
+        
+        for path in single:
+            path = path.rstrip('/')
+            directory_name = os.path.basename(path)
+            parent_dir = os.path.dirname(path)
+            
+            if "JPC_AV" not in directory_name:
+                logging.error(f"Directory name must contain 'JPC_AV': {directory_name}")
+                continue
+            if "_refid_" in directory_name:
+                logging.error(f"Directory already has refid: {directory_name}")
+                continue
+            if not os.path.isdir(path):
+                logging.error(f"Directory not found: {path}")
+                continue
+                
+            directory_list.append(directory_name)
+            parent_dirs[directory_name] = parent_dir
+        
+        # For --single mode, we'll handle paths individually in the loop
+        use_single_mode = True
+    else:
+        # Normal mode: find all JPC_AV_* subdirectories
+        directory_list = [
+            entry for entry in os.listdir(working_dir)
+            if os.path.isdir(os.path.join(working_dir, entry)) and "_refid_" not in entry and "JPC_AV" in entry
+        ]
+        parent_dirs = {}
+        use_single_mode = False
     
     # Sort directories alphabetically/numerically
     directory_list.sort()
@@ -435,7 +472,10 @@ def rename_and_update_directories(repository, resource, baseURL, headers,
 
     # Process each directory
     for directory in directory_list:
-        dir_path = os.path.join(working_dir, directory)
+        if use_single_mode:
+            dir_path = os.path.join(parent_dirs[directory], directory)
+        else:
+            dir_path = os.path.join(working_dir, directory)
         try:
             logging.info(f"Processing directory: {directory}")
 
@@ -590,12 +630,13 @@ def main():
             super().__init__(*args, **kwargs)
         
         def format_usage(self):
-            usage = f"\nusage: {self.prog} -d PATH [options]\n"
+            usage = f"\nusage: {self.prog} [-d PATH | --single PATH [PATH ...]] [options]\n"
             help_hint = f"       {Style.DIM}Use -h or --help for detailed information{Style.RESET_ALL}\n"
             options = f"""
-  {Fore.CYAN}-d, --directory PATH{Style.RESET_ALL}  Target directory {Fore.YELLOW}(required){Style.RESET_ALL}
+  {Fore.CYAN}-d, --directory PATH{Style.RESET_ALL}  Target directory {Fore.YELLOW}(required unless --single){Style.RESET_ALL}
   {Fore.CYAN}-n, --dry-run{Style.RESET_ALL}         Preview changes without executing
   {Fore.CYAN}-v, --verbose{Style.RESET_ALL}         Enable debug-level logging
+  {Fore.CYAN}--single PATH [PATH ...]{Style.RESET_ALL}  Process specific directories directly
   {Fore.CYAN}--no-rename{Style.RESET_ALL}           Update ASpace only, skip directory renames
   {Fore.CYAN}--no-update{Style.RESET_ALL}           Rename only, skip ASpace record updates
   {Fore.CYAN}--rename-mkv{Style.RESET_ALL}          Also rename .mkv files to include ref_id
@@ -626,7 +667,7 @@ def main():
     parser.add_argument(
         '-d', '--directory',
         type=str,
-        required=True,
+        required=False,
         metavar='PATH',
         help=argparse.SUPPRESS
     )
@@ -655,8 +696,18 @@ def main():
         action='store_true',
         help=argparse.SUPPRESS
     )
+    parser.add_argument(
+        '--single',
+        nargs='+',
+        metavar='PATH',
+        help=argparse.SUPPRESS
+    )
     
     args = parser.parse_args()
+    
+    # Validate: require either -d or --single
+    if not args.directory and not args.single:
+        parser.error("either -d/--directory or --single is required")
     
     # Set logging level based on verbose flag
     if args.verbose:
@@ -695,7 +746,8 @@ def main():
             no_rename=args.no_rename,
             no_update=args.no_update,
             verbose=args.verbose,
-            rename_mkv=args.rename_mkv
+            rename_mkv=args.rename_mkv,
+            single=args.single
         )
 
     except Exception as e:
