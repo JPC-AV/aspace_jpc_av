@@ -521,7 +521,9 @@ def rename_and_update_directories(repository, resource, baseURL, headers,
             # Step 4: Rename the directory (unless --no-rename)
             if not no_rename:
                 new_directory_name = f"{directory}_refid_{refid}"
-                new_dir_path = os.path.join(working_dir, new_directory_name)
+                # Use parent_dirs for --single mode, working_dir for normal mode
+                parent_path = parent_dirs[directory] if use_single_mode else working_dir
+                new_dir_path = os.path.join(parent_path, new_directory_name)
                 
                 if dry_run:
                     logging.info(f"{Fore.YELLOW}[DRY RUN]{Style.RESET_ALL} Would rename directory: {directory} → {new_directory_name}")
