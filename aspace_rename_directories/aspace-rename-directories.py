@@ -10,14 +10,19 @@ import subprocess  # Library for running external commands and capturing their o
 import re  # Library for working with regular expressions (text pattern matching)
 import argparse  # Library for parsing command-line arguments
 from colorama import Fore, Style, init  # Library for adding colored output to terminal messages
+from pathlib import Path  # Library for working with file paths
 
-# Import credentials and configuration from creds.py
+# Add parent directory to path for shared creds.py import
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+# Import credentials and configuration from creds.py (in repo root)
 try:
     from creds import baseURL as ASPACE_URL, user as ASPACE_USERNAME, password as ASPACE_PASSWORD
     from creds import repo_id as REPO_ID, resource_id as RESOURCE_ID
 except ImportError:
     print(f"{Fore.RED}Error: creds.py not found or missing required fields{Style.RESET_ALL}")
     print("Required fields: baseURL, user, password, repo_id, resource_id")
+    print("See creds_template.py in repo root for format.")
     sys.exit(1)
 
 # Initialize Colorama for cross-platform compatibility of colored terminal output

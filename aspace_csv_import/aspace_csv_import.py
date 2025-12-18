@@ -137,8 +137,11 @@ def get_colored_help():
 # CONFIGURATION
 # ==============================
 
+# Add parent directory to path for shared creds.py import
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 # ArchivesSpace API Configuration
-# Credentials and URL - imported from creds.py (copy creds_template.py to creds.py)
+# Credentials and URL - imported from creds.py (in repo root)
 try:
     from creds import baseURL as ASPACE_URL, user as ASPACE_USERNAME, password as ASPACE_PASSWORD
     from creds import repo_id as REPO_ID, resource_id as RESOURCE_ID
@@ -148,7 +151,7 @@ except ImportError:
     ASPACE_PASSWORD = None
     REPO_ID = None
     RESOURCE_ID = None
-    print("Warning: creds.py not found. Copy creds_template.py to creds.py")
+    print("Warning: creds.py not found. See creds_template.py in repo root for format.")
 
 # Repository and Resource Configuration
 RESOURCE_URI = f"/repositories/{REPO_ID}/resources/{RESOURCE_ID}" if REPO_ID and RESOURCE_ID else None
