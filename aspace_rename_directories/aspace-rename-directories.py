@@ -9,6 +9,8 @@ from pymediainfo import MediaInfo  # External library to extract metadata from m
 import subprocess  # Library for running external commands and capturing their output
 import re  # Library for working with regular expressions (text pattern matching)
 import argparse  # Library for parsing command-line arguments
+import time  # Library for timing operations
+from datetime import datetime  # Library for date/time formatting
 from colorama import Fore, Style, init  # Library for adding colored output to terminal messages
 from pathlib import Path  # Library for working with file paths
 
@@ -28,11 +30,19 @@ except ImportError:
 # Initialize Colorama for cross-platform compatibility of colored terminal output
 init(autoreset=True)
 
+# Output Configuration
+OUTPUT_DIR = os.path.expanduser("~/aspace_rename_reports")
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+LOG_FILE = f"{OUTPUT_DIR}/rename_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+
 # Configure the logging system to display messages with different log levels
 logging.basicConfig(
     level=logging.INFO,  # Set the logging level to INFO (logs INFO, WARNING, ERROR)
-    format="%(asctime)s [%(levelname)s] %(message)s",  # Specify the format of log messages (only the message text)
-    handlers=[logging.StreamHandler()]  # Specify the log destination (console output)
+    format="%(asctime)s [%(levelname)s] %(message)s",  # Specify the format of log messages
+    handlers=[
+        logging.StreamHandler(),  # Console output
+        logging.FileHandler(LOG_FILE)  # File output
+    ]
 )
 
 # Define a custom logging formatter to add colors to log messages
@@ -725,6 +735,16 @@ def main():
     repository = f"/repositories/{REPO_ID}"
     resource = f"/resources/{RESOURCE_ID}"
 
+    # Start timing
+    start_time = time.time()
+    
+    # Log script start
+    logging.info("=" * 60)
+    logging.info("ArchivesSpace Directory Processing Script Started")
+    logging.info(f"Timestamp: {datetime.now()}")
+    logging.info(f"Dry Run: {args.dry_run}")
+    logging.info("=" * 60)
+
     # Step 1: Authenticate with ArchivesSpace
     # (Always needed - even --no-update requires ASpace lookup for ref_id)
     client = ArchivesSpaceClient()
@@ -759,6 +779,16 @@ def main():
     finally:
         # Step 3: Ensure logout is always attempted, even if an error occurs
         client.logout()
+        
+        # Calculate and display elapsed time
+        elapsed_seconds = time.time() - start_time
+        hours, remainder = divmod(int(elapsed_seconds), 3600)
+        minutes, seconds = divmod(remainder, 60)
+        elapsed_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+        
+        log_spacing()
+        logging.info(f"Processing Time: {elapsed_str}")
+        logging.info(f"Log file: {LOG_FILE}")
 
 if __name__ == "__main__":
     main()  # Run the main function
