@@ -421,6 +421,9 @@ def rename_and_update_directories(repository, resource, baseURL, headers,
         if os.path.isdir(os.path.join(working_dir, entry)) and "_refid_" not in entry and "JPC_AV" in entry
     ]
     
+    # Sort directories alphabetically/numerically
+    directory_list.sort()
+    
     if not directory_list:
         logging.warning("No matching directories found to process.")
         return
