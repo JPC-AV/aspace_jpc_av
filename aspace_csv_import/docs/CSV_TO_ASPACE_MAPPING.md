@@ -1,66 +1,199 @@
 # CSV to ArchivesSpace Field Mapping
 
-## Current Mapping in the Script
+## Quick Reference: All Data Written to ArchivesSpace
 
-Here's exactly where each CSV column's data is going in the ArchivesSpace archival object:
+### Data from CSV (via aspace_csv_import.py)
 
-### Core Fields
+| Source | Maps To | Example | Notes |
+|--------|---------|---------|-------|
+| CATALOG_NUMBER | `component_id` | JPC_AV_00012 | Must be unique |
+| CATALOG_NUMBER | `top_container.indicator` | JPC_AV_00012 | Creates new top container |
+| TITLE | `title` | Ebony/Jet Celebrity Showcase, episode 22 | |
+| Creation or Recording Date | `dates[]` (label: creation) | 1982-08-01 | Converted from M/D/YYYY |
+| Edit Date | `dates[]` (label: Edited) | 1982-08-15 | Converted from M/D/YYYY |
+| Broadcast Date | `dates[]` (label: broadcast) | 1982-09-01 | Converted from M/D/YYYY |
+| Original Format | `extents[].extent_type` | 2 inch videotape | Must match ASpace dropdown exactly |
+| DESCRIPTION | Scope and Contents note (note_text) | Promotional clip for episode... | |
+| _TRANSFER_NOTES | Physical Characteristics note (note_text) | Slight ringing present... | Note type: phystech |
+| ASpace Parent RefID | `parent.ref` | /repositories/2/archival_objects/12345 | **Required** |
 
-| CSV Column | ArchivesSpace Field | Location/Type | Example Value | Notes |
-|------------|-------------------|---------------|---------------|--------|
-| **CATALOG_NUMBER** | `component_id` | Archival Object | "JPC_AV_00012" | Component Unique Identifier - MUST be unique |
-| **CATALOG_NUMBER** | `indicator` | Top Container | "JPC_AV_00012" | Container indicator only (no barcode) |
-| **TITLE** | `title` | Archival Object | "Ebony/Jet Celebrity Showcase" | If empty, falls back to CATALOG_NUMBER |
+### Data from MKV Files (via aspace-rename-directories.py)
 
-### Date Fields
+| Source | Maps To | Example | Notes |
+|--------|---------|---------|-------|
+| MKV duration (mediainfo) | Scope and Contents note (note_definedlist) | Duration: 01:23:45 | Added to existing note or creates new one |
 
-| CSV Column | ArchivesSpace Field | Date Label | Date Type | Format Conversion |
-|------------|-------------------|------------|-----------|-------------------|
-| **Creation or Recording Date** | `dates[0]` | "creation" | single | M/D/YYYY -> YYYY-MM-DD |
-| **Edit Date** | `dates[1]` | "Edited" | single | M/D/YYYY -> YYYY-MM-DD |
-| **Broadcast Date** | `dates[2]` | "broadcast" | single | M/D/YYYY -> YYYY-MM-DD |
+### Hardcoded Values (via aspace_csv_import.py)
 
-Each date object also includes:
-- `begin`: The converted date (YYYY-MM-DD format)
-- `expression`: Set to the same value as `begin`
+| Field | Value |
+|-------|-------|
+| `level` | item |
+| `publish` | true |
+| `resource.ref` | /repositories/{repo_id}/resources/{resource_id} |
+| `extents[].portion` | whole |
+| `extents[].number` | 1 |
+| `instance_type` | Moving Images (Video) |
+| `top_container.type` | AV Case |
 
-### Extent Fields
+### Hardcoded Values (via aspace-rename-directories.py)
 
-| CSV Column | ArchivesSpace Extent Field | Value/Mapping |
-|------------|---------------------------|---------------|
-| **Original Format** | `extent_type` | **MUST match dropdown exactly** (e.g., "2 inch videotape") |
-| (hardcoded) | `portion` | "whole" |
-| (hardcoded) | `number` | "1" |
+| Field | Value |
+|-------|-------|
+| `extents[].physical_details` | SD video, color, sound |
 
-### Notes
+---
 
-| CSV Column | Note Type | Note Field | Location in Note |
-|------------|-----------|------------|------------------|
-| **DESCRIPTION** | Scope and Contents (multipart) | `subnotes[].content` | Text subnote (note_text) |
-| **_TRANSFER_NOTES** | Physical Characteristics and Technical Requirements (multipart) | `subnotes[].content` | Text subnote (note_text) |
+## JSON Structures for Active Mappings
 
-#### Duration Mapping (via aspace-rename-directories.py)
+### CATALOG_NUMBER → component_id
 
-Duration is handled separately by `aspace-rename-directories.py` during the DAMS ingest workflow. This script:
+```json
+{
+  "component_id": "JPC_AV_00012"
+}
+```
 
-1. Extracts exact runtime from `.mkv` files using `mediainfo` CLI tool
-2. Formats duration as `hh:mm:ss` (e.g., "01:23:45")
-3. Adds a **Defined List** subnote to the existing **Scope and Contents** note (note_multipart, type: scopecontent)
-4. The Defined List (note_definedlist) contains:
-   - Label: "Duration"
-   - Value: extracted runtime (e.g., "01:23:45")
+### CATALOG_NUMBER → Top Container
 
-**Note:** If a Scope and Contents note already exists, the Duration defined list is appended to its subnotes (any existing Duration defined list is replaced to prevent duplicates). If no Scope and Contents note exists, a new one is created containing only the Duration defined list.
+```json
+{
+  "indicator": "JPC_AV_00012",
+  "type": "AV Case",
+  "repository": {
+    "ref": "/repositories/2"
+  }
+}
+```
 
-**Resulting JSON structure:**
+### TITLE → title
+
+```json
+{
+  "title": "Ebony/Jet Celebrity Showcase, episode 22, promo"
+}
+```
+
+### Creation or Recording Date → dates (creation)
+
+```json
+{
+  "dates": [
+    {
+      "jsonmodel_type": "date",
+      "date_type": "single",
+      "label": "creation",
+      "begin": "1982-08-01",
+      "expression": "1982-08-01"
+    }
+  ]
+}
+```
+
+### Edit Date → dates (Edited)
+
+```json
+{
+  "dates": [
+    {
+      "jsonmodel_type": "date",
+      "date_type": "single",
+      "label": "Edited",
+      "begin": "1982-08-15",
+      "expression": "1982-08-15"
+    }
+  ]
+}
+```
+
+### Broadcast Date → dates (broadcast)
+
+```json
+{
+  "dates": [
+    {
+      "jsonmodel_type": "date",
+      "date_type": "single",
+      "label": "broadcast",
+      "begin": "1982-09-01",
+      "expression": "1982-09-01"
+    }
+  ]
+}
+```
+
+### Original Format → extent_type
+
+```json
+{
+  "extents": [
+    {
+      "jsonmodel_type": "extent",
+      "portion": "whole",
+      "number": "1",
+      "extent_type": "2 inch videotape"
+    }
+  ]
+}
+```
+
+### ASpace Parent RefID → parent.ref
+
+```json
+{
+  "parent": {
+    "ref": "/repositories/2/archival_objects/12345"
+  }
+}
+```
+
+### DESCRIPTION → Scope and Contents
+
 ```json
 {
   "jsonmodel_type": "note_multipart",
   "type": "scopecontent",
+  "label": "",
+  "publish": true,
   "subnotes": [
     {
       "jsonmodel_type": "note_text",
-      "content": "Description text from CSV import..."
+      "content": "Promotional clip for episode 22 of the Ebony/Jet Celebrity Showcase series."
+    }
+  ]
+}
+```
+
+### _TRANSFER_NOTES → Physical Characteristics and Technical Requirements
+
+```json
+{
+  "jsonmodel_type": "note_multipart",
+  "type": "phystech",
+  "label": "",
+  "publish": true,
+  "subnotes": [
+    {
+      "jsonmodel_type": "note_text",
+      "content": "Slight ringing present throughout. Hue is inconsistent; skin tones are redder in some sections."
+    }
+  ]
+}
+```
+
+### Duration (via aspace-rename-directories.py)
+
+Duration is extracted from .mkv files via mediainfo and added as a defined list subnote to the Scope and Contents note:
+
+```json
+{
+  "jsonmodel_type": "note_multipart",
+  "type": "scopecontent",
+  "label": "",
+  "publish": true,
+  "subnotes": [
+    {
+      "jsonmodel_type": "note_text",
+      "content": "Promotional clip for episode 22 of the Ebony/Jet Celebrity Showcase series."
     },
     {
       "jsonmodel_type": "note_definedlist",
@@ -76,40 +209,19 @@ Duration is handled separately by `aspace-rename-directories.py` during the DAMS
 }
 ```
 
-This approach provides more accurate duration data than CSV estimates since it's extracted directly from the digitized video files.
+### Physical Details (via aspace-rename-directories.py)
 
-#### Extent Physical Details (via aspace-rename-directories.py)
+Physical details are hardcoded and added to all extents:
 
-The `aspace-rename-directories.py` script also sets a hardcoded value for extent physical details:
-
-| Field | Value | Notes |
-|-------|-------|-------|
-| `extents[].physical_details` | "SD video, color, sound" | Applied to all extents on the archival object |
-
-This is set at the same time as the duration update, during the DAMS ingest workflow.
-
-### Instance/Container Fields
-
-| CSV Column | ArchivesSpace Field | Notes |
-|------------|-------------------|--------|
-| **CATALOG_NUMBER** | `top_container.indicator` | Creates new top container |
-| (not used) | `top_container.barcode` | Left blank |
-| (hardcoded) | `instance_type` | "Moving Images (Video)" |
-| (hardcoded) | `top_container.type` | "AV Case" |
-
-### Hierarchy
-
-| CSV Column | ArchivesSpace Field | Notes |
-|------------|-------------------|--------|
-| **ASpace Parent RefID** | `parent.ref` | **REQUIRED** - Links to existing parent archival object URI. Critical error if missing. |
-
-### Fixed Values (Not from CSV)
-
-| ArchivesSpace Field | Fixed Value | Reason |
-|--------------------|-------------|---------|
-| `level` | "item" | All records are item-level |
-| `publish` | true | All records are published |
-| `resource.ref` | "/repositories/2/resources/7" | Fixed resource |
+```json
+{
+  "jsonmodel_type": "extent",
+  "portion": "whole",
+  "number": "1",
+  "extent_type": "2 inch videotape",
+  "physical_details": "SD video, color, sound"
+}
+```
 
 ---
 
@@ -118,43 +230,21 @@ This is set at the same time as the duration update, during the DAMS ingest work
 ### Multipart Notes (note_multipart)
 | Type | Label |
 |------|-------|
-| `abstract` | Abstract |
 | `scopecontent` | Scope and Contents |
+| `phystech` | Physical Characteristics and Technical Requirements |
+| `odd` | General Note |
 | `bioghist` | Biographical / Historical |
-| `arrangement` | Arrangement |
 | `accessrestrict` | Conditions Governing Access |
 | `userestrict` | Conditions Governing Use |
-| `accruals` | Accruals |
 | `acqinfo` | Immediate Source of Acquisition |
-| `altformavail` | Existence and Location of Copies |
-| `appraisal` | Appraisal |
 | `custodhist` | Custodial History |
-| `dimensions` | Dimensions |
-| `fileplan` | File Plan |
-| `legalstatus` | Legal Status |
-| `odd` | General Note |
-| `originalsloc` | Existence and Location of Originals |
-| `otherfindaid` | Other Finding Aids |
-| `phystech` | Physical Characteristics and Technical Requirements |
-| `prefercite` | Preferred Citation |
 | `processinfo` | Processing Information |
 | `relatedmaterial` | Related Materials |
 | `separatedmaterial` | Separated Materials |
 
-### Singlepart Notes (note_singlepart)
-| Type | Label |
-|------|-------|
-| `abstract` | Abstract |
-| `physdesc` | Physical Description |
-| `langmaterial` | Language of Materials |
-| `physloc` | Physical Location |
-| `materialspec` | Materials Specific Details |
-| `physfacet` | Physical Facet |
-
-### Special Subnote Types (within multipart notes)
+### Subnote Types (within multipart notes)
 | Type | Description |
 |------|-------------|
 | `note_text` | Plain text block |
 | `note_definedlist` | Label/value pairs (like Duration: 01:23:45) |
 | `note_orderedlist` | Numbered list |
-| `note_chronology` | Chronological list with dates |

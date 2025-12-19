@@ -90,16 +90,23 @@ Check generated reports in `~/aspace_import_reports/`:
 
 After digitization, run `aspace-rename-directories.py` to:
 1. Extract exact duration from .mkv files via mediainfo
-2. Add Duration to ODD note (Other Descriptive Data)
-3. Rename directories to include ASpace ref_id
-4. Optionally rename .mkv files with `--rename-mkv` flag
+2. Add Duration to Scope and Contents note (as a defined list)
+3. Add physical details to extent ("SD video, color, sound")
+4. Rename directories to include ASpace ref_id
+5. Optionally rename .mkv files with `--rename-mkv` flag
+
+**Logs:** Written to `~/aspace_rename_reports/rename_YYYYMMDD_HHMMSS.log`
 
 ```bash
-# Basic usage (required -d flag)
+# Process all JPC_AV_* directories in a folder
 python aspace-rename-directories.py -d /path/to/videos
 
 # Dry run to preview changes
 python aspace-rename-directories.py -d /path/to/videos --dry-run
+
+# Process specific directories directly
+python aspace-rename-directories.py --single /path/to/JPC_AV_00001
+python aspace-rename-directories.py --single /path/to/JPC_AV_00001 /path/to/JPC_AV_00002
 
 # Also rename .mkv files to include ref_id
 python aspace-rename-directories.py -d /path/to/videos --rename-mkv
@@ -133,6 +140,9 @@ python aspace_csv_import.py -f file.csv --update-existing
 
 # Post-digitization: update ASpace and rename directories
 python aspace-rename-directories.py -d /path/to/videos
+
+# Post-digitization: process specific directories
+python aspace-rename-directories.py --single /path/to/JPC_AV_00001
 
 # Post-digitization: dry run
 python aspace-rename-directories.py -d /path/to/videos --dry-run

@@ -1,8 +1,10 @@
-# Example: CSV Row -> ArchivesSpace Object
+# Example: CSV Row → ArchivesSpace Object
+
+This document shows a complete example of how a single CSV row becomes an ArchivesSpace archival object. For detailed field mappings, see [CSV_TO_ASPACE_MAPPING.md](CSV_TO_ASPACE_MAPPING.md).
 
 ## Sample CSV Row
 
-```csv
+```
 CATALOG_NUMBER: JPC_AV_00012
 TITLE: Ebony/Jet Celebrity Showcase, episode 22, promo
 Creation or Recording Date: 8/1/1982
@@ -14,72 +16,40 @@ DESCRIPTION: Promotional clip for episode 22 of the Ebony/Jet Celebrity Showcase
 _TRANSFER_NOTES: Slight ringing present throughout. Hue is inconsistent; skin tones are redder in some sections.
 ```
 
-## Hardcoded Values
+## Step 1: aspace_csv_import.py Creates the Record
 
-These values are set by the scripts regardless of CSV content:
-
-### From aspace_csv_import.py
-
-| Field | Value |
-|-------|-------|
-| `level` | "item" |
-| `publish` | true |
-| `resource.ref` | "/repositories/2/resources/7" |
-| `extents[].portion` | "whole" |
-| `extents[].number` | "1" |
-| `instances[].instance_type` | "Moving Images (Video)" |
-| `top_container.type` | "AV Case" |
-
-### From aspace-rename-directories.py
-
-| Field | Value |
-|-------|-------|
-| `extents[].physical_details` | "SD video, color, sound" |
-| `notes[scopecontent].subnotes[].label` | "Duration" |
-| `notes[scopecontent].subnotes[].value` | Extracted from .mkv via mediainfo (hh:mm:ss) |
-
-## Resulting ArchivesSpace JSON Object
+### Archival Object Created
 
 ```json
 {
   "jsonmodel_type": "archival_object",
-  "resource": {
-    "ref": "/repositories/2/resources/7"
-  },
-  "parent": {
-    "ref": "/repositories/2/archival_objects/12345"
-  },
+  "resource": {"ref": "/repositories/2/resources/7"},
+  "parent": {"ref": "/repositories/2/archival_objects/12345"},
   "level": "item",
   "publish": true,
-  
   "title": "Ebony/Jet Celebrity Showcase, episode 22, promo",
-  
   "component_id": "JPC_AV_00012",
-  
   "dates": [
     {
+      "jsonmodel_type": "date",
       "date_type": "single",
       "label": "creation",
       "begin": "1982-08-01",
-      "expression": "1982-08-01",
-      "jsonmodel_type": "date"
+      "expression": "1982-08-01"
     }
   ],
-  
   "extents": [
     {
+      "jsonmodel_type": "extent",
       "portion": "whole",
       "number": "1",
-      "extent_type": "2 inch videotape",
-      "jsonmodel_type": "extent"
+      "extent_type": "2 inch videotape"
     }
   ],
-  
   "notes": [
     {
       "jsonmodel_type": "note_multipart",
       "type": "scopecontent",
-      "label": "",
       "publish": true,
       "subnotes": [
         {
@@ -91,7 +61,6 @@ These values are set by the scripts regardless of CSV content:
     {
       "jsonmodel_type": "note_multipart",
       "type": "phystech",
-      "label": "",
       "publish": true,
       "subnotes": [
         {
@@ -101,35 +70,77 @@ These values are set by the scripts regardless of CSV content:
       ]
     }
   ],
-  
   "instances": [
     {
-      "instance_type": "Moving Images (Video)",
       "jsonmodel_type": "instance",
+      "instance_type": "Moving Images (Video)",
       "sub_container": {
         "jsonmodel_type": "sub_container",
-        "top_container": {
-          "ref": "/repositories/2/top_containers/78901"
-        }
+        "top_container": {"ref": "/repositories/2/top_containers/78901"}
       }
     }
   ]
 }
 ```
 
-## The Top Container (created separately):
+### Top Container Created
 
 ```json
 {
   "indicator": "JPC_AV_00012",
   "type": "AV Case",
-  "repository": {
-    "ref": "/repositories/2"
-  }
+  "repository": {"ref": "/repositories/2"}
 }
 ```
 
-## What This Looks Like in ArchivesSpace UI:
+## Step 2: aspace-rename-directories.py Updates the Record
+
+After digitization, this script extracts runtime from the .mkv file and updates the record.
+
+### Updates Made
+
+1. **Duration** added to Scope and Contents note as a defined list
+2. **Physical details** added to extent
+
+### Updated Scope and Contents Note
+
+```json
+{
+  "jsonmodel_type": "note_multipart",
+  "type": "scopecontent",
+  "publish": true,
+  "subnotes": [
+    {
+      "jsonmodel_type": "note_text",
+      "content": "Promotional clip for episode 22 of the Ebony/Jet Celebrity Showcase series."
+    },
+    {
+      "jsonmodel_type": "note_definedlist",
+      "items": [
+        {
+          "jsonmodel_type": "note_definedlist_item",
+          "label": "Duration",
+          "value": "00:02:30"
+        }
+      ]
+    }
+  ]
+}
+```
+
+### Updated Extent
+
+```json
+{
+  "jsonmodel_type": "extent",
+  "portion": "whole",
+  "number": "1",
+  "extent_type": "2 inch videotape",
+  "physical_details": "SD video, color, sound"
+}
+```
+
+## How It Looks in ArchivesSpace UI
 
 ### Basic Information
 - **Level:** Item
@@ -143,63 +154,17 @@ These values are set by the scripts regardless of CSV content:
 - **Portion:** Whole
 - **Number:** 1
 - **Type:** 2 inch videotape
+- **Physical Details:** SD video, color, sound
 
-### Notes Section
+### Notes
 **Scope and Contents:**
-- Promotional clip for episode 22 of the Ebony/Jet Celebrity Showcase series.
+> Promotional clip for episode 22 of the Ebony/Jet Celebrity Showcase series.
+> 
+> Duration: 00:02:30
 
 **Physical Characteristics and Technical Requirements:**
-- Slight ringing present throughout. Hue is inconsistent; skin tones are redder in some sections.
+> Slight ringing present throughout. Hue is inconsistent; skin tones are redder in some sections.
 
 ### Instance
 - **Type:** Moving Images (Video)
 - **Top Container:** AV Case JPC_AV_00012
-
----
-
-## Updates Added Later by aspace-rename-directories.py
-
-During DAMS ingest, `aspace-rename-directories.py` extracts runtime from .mkv files via mediainfo and updates the archival object:
-
-### Duration (added to Scope and Contents note)
-
-A defined list subnote is appended to the existing Scope and Contents note:
-
-```json
-{
-  "jsonmodel_type": "note_multipart",
-  "type": "scopecontent",
-  "label": "",
-  "publish": true,
-  "subnotes": [
-    {
-      "jsonmodel_type": "note_text",
-      "content": "Promotional clip for episode 22 of the Ebony/Jet Celebrity Showcase series."
-    },
-    {
-      "jsonmodel_type": "note_definedlist",
-      "items": [
-        {
-          "jsonmodel_type": "note_definedlist_item",
-          "label": "Duration",
-          "value": "01:23:45"
-        }
-      ]
-    }
-  ]
-}
-```
-
-### Physical Details (added to Extent)
-
-The extent is updated with physical_details:
-
-```json
-{
-  "portion": "whole",
-  "number": "1",
-  "extent_type": "2 inch videotape",
-  "physical_details": "SD video, color, sound",
-  "jsonmodel_type": "extent"
-}
-```

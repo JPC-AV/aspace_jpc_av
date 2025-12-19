@@ -131,193 +131,9 @@ Fields marked with 📼 are embedded in the Matroska (.mkv) container as key:val
 
 ---
 
-## Example JSON Structures
+## Example JSON Structures for Potential Mappings
 
-### Active - Currently Mapped
-
-#### CATALOG_NUMBER → component_id
-
-```json
-{
-  "component_id": "JPC_AV_00012"
-}
-```
-
-#### CATALOG_NUMBER → Top Container
-
-```json
-{
-  "indicator": "JPC_AV_00012",
-  "type": "AV Case",
-  "repository": {
-    "ref": "/repositories/2"
-  }
-}
-```
-
-#### TITLE → title
-
-```json
-{
-  "title": "Ebony/Jet Celebrity Showcase, episode 22, promo"
-}
-```
-
-#### Creation or Recording Date → dates (creation)
-
-```json
-{
-  "dates": [
-    {
-      "jsonmodel_type": "date",
-      "date_type": "single",
-      "label": "creation",
-      "begin": "1982-08-01",
-      "expression": "1982-08-01"
-    }
-  ]
-}
-```
-
-#### Edit Date → dates (Edited)
-
-```json
-{
-  "dates": [
-    {
-      "jsonmodel_type": "date",
-      "date_type": "single",
-      "label": "Edited",
-      "begin": "1982-08-15",
-      "expression": "1982-08-15"
-    }
-  ]
-}
-```
-
-#### Broadcast Date → dates (broadcast)
-
-```json
-{
-  "dates": [
-    {
-      "jsonmodel_type": "date",
-      "date_type": "single",
-      "label": "broadcast",
-      "begin": "1982-09-01",
-      "expression": "1982-09-01"
-    }
-  ]
-}
-```
-
-#### Original Format → extent_type
-
-```json
-{
-  "extents": [
-    {
-      "jsonmodel_type": "extent",
-      "portion": "whole",
-      "number": "1",
-      "extent_type": "2 inch videotape"
-    }
-  ]
-}
-```
-
-#### ASpace Parent RefID → parent.ref
-
-```json
-{
-  "parent": {
-    "ref": "/repositories/2/archival_objects/12345"
-  }
-}
-```
-
-#### DESCRIPTION → Scope and Contents
-
-```json
-{
-  "jsonmodel_type": "note_multipart",
-  "type": "scopecontent",
-  "label": "",
-  "publish": true,
-  "subnotes": [
-    {
-      "jsonmodel_type": "note_text",
-      "content": "Promotional clip for episode 22 of the Ebony/Jet Celebrity Showcase series."
-    }
-  ]
-}
-```
-
-#### _TRANSFER_NOTES → Physical Characteristics and Technical Requirements
-
-```json
-{
-  "jsonmodel_type": "note_multipart",
-  "type": "phystech",
-  "label": "",
-  "publish": true,
-  "subnotes": [
-    {
-      "jsonmodel_type": "note_text",
-      "content": "Slight ringing present throughout. Hue is inconsistent; skin tones are redder in some sections."
-    }
-  ]
-}
-```
-
-#### Duration (via aspace-rename-directories.py)
-
-Duration is extracted from .mkv files via mediainfo and added as a defined list subnote to the Scope and Contents note:
-
-```json
-{
-  "jsonmodel_type": "note_multipart",
-  "type": "scopecontent",
-  "label": "",
-  "publish": true,
-  "subnotes": [
-    {
-      "jsonmodel_type": "note_text",
-      "content": "Promotional clip for episode 22 of the Ebony/Jet Celebrity Showcase series."
-    },
-    {
-      "jsonmodel_type": "note_definedlist",
-      "items": [
-        {
-          "jsonmodel_type": "note_definedlist_item",
-          "label": "Duration",
-          "value": "01:23:45"
-        }
-      ]
-    }
-  ]
-}
-```
-
-#### Physical Details (via aspace-rename-directories.py)
-
-Physical details are hardcoded and added to all extents:
-
-```json
-{
-  "jsonmodel_type": "extent",
-  "portion": "whole",
-  "number": "1",
-  "extent_type": "2 inch videotape",
-  "physical_details": "SD video, color, sound"
-}
-```
-
----
-
-### Potential - Not Currently Mapped
-
-#### Ephemera Description → Separated Materials
+### Ephemera Description → Separated Materials
 
 ```json
 {
@@ -334,7 +150,7 @@ Physical details are hardcoded and added to all extents:
 }
 ```
 
-#### EJS Season / Episode → Scope and Contents (Defined List)
+### EJS Season / Episode → Scope and Contents (Defined List)
 
 ```json
 {
@@ -362,7 +178,7 @@ Physical details are hardcoded and added to all extents:
 }
 ```
 
-#### ENCODED_BY → Processing Information
+### ENCODED_BY → Processing Information
 
 ```json
 {
@@ -379,7 +195,7 @@ Physical details are hardcoded and added to all extents:
 }
 ```
 
-#### DATE_DIGITIZED → Processing Information
+### DATE_DIGITIZED → Processing Information
 
 ```json
 {
