@@ -27,11 +27,18 @@ except ImportError:
     print("See creds_template.py in repo root for format.")
     sys.exit(1)
 
+# Import optional logs_dir (may not exist in older creds.py files)
+try:
+    from creds import logs_dir
+except ImportError:
+    logs_dir = ""
+
 # Initialize Colorama for cross-platform compatibility of colored terminal output
 init(autoreset=True)
 
-# Output Configuration
-OUTPUT_DIR = os.path.expanduser("~/aspace_rename_reports")
+# Output Configuration - use custom logs_dir if provided, otherwise default
+DEFAULT_OUTPUT_DIR = os.path.expanduser("~/aspace_rename_reports")
+OUTPUT_DIR = logs_dir if logs_dir else DEFAULT_OUTPUT_DIR
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 LOG_FILE = f"{OUTPUT_DIR}/rename_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
 

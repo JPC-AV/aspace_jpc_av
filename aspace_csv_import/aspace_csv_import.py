@@ -47,39 +47,40 @@ class Colors:
 if not sys.stdout.isatty():
     Colors.disable()
 
+
 def print_status(status: str, message: str, indent: int = 0):
     """Print a colorized status message."""
     indent_str = "  " * indent
     if status == "success":
-        symbol = f"{Colors.GREEN}✓{Colors.RESET}"
+        symbol = f"{Colors.GREEN}[OK]{Colors.RESET}"
     elif status == "created":
-        symbol = f"{Colors.GREEN}+{Colors.RESET}"
+        symbol = f"{Colors.GREEN}[+]{Colors.RESET}"
     elif status == "updated":
-        symbol = f"{Colors.BLUE}↻{Colors.RESET}"
+        symbol = f"{Colors.BLUE}[~]{Colors.RESET}"
     elif status == "unchanged":
-        symbol = f"{Colors.DIM}={Colors.RESET}"
+        symbol = f"{Colors.DIM}[=]{Colors.RESET}"
     elif status == "skipped":
-        symbol = f"{Colors.YELLOW}○{Colors.RESET}"
+        symbol = f"{Colors.YELLOW}[-]{Colors.RESET}"
     elif status == "error":
-        symbol = f"{Colors.RED}✗{Colors.RESET}"
+        symbol = f"{Colors.RED}[X]{Colors.RESET}"
     elif status == "warning":
-        symbol = f"{Colors.YELLOW}!{Colors.RESET}"
+        symbol = f"{Colors.YELLOW}[!]{Colors.RESET}"
     elif status == "info":
-        symbol = f"{Colors.CYAN}→{Colors.RESET}"
+        symbol = f"{Colors.CYAN}[>]{Colors.RESET}"
     else:
-        symbol = " "
+        symbol = "   "
     print(f"{indent_str}{symbol} {message}")
 
 def print_header(text: str):
     """Print a header line."""
     print(f"\n{Colors.BOLD}{Colors.CYAN}{text}{Colors.RESET}")
-    print(f"{Colors.DIM}{'─' * 60}{Colors.RESET}")
+    print(f"{Colors.DIM}{'-' * 60}{Colors.RESET}")
 
 def print_section(text: str):
     """Print a section divider."""
-    print(f"\n{Colors.DIM}{'─' * 60}{Colors.RESET}")
+    print(f"\n{Colors.DIM}{'-' * 60}{Colors.RESET}")
     print(f"{Colors.BOLD}{text}{Colors.RESET}")
-    print(f"{Colors.DIM}{'─' * 60}{Colors.RESET}")
+    print(f"{Colors.DIM}{'-' * 60}{Colors.RESET}")
 
 # ==============================
 # HELP MENU
@@ -89,9 +90,9 @@ def get_colored_help():
     """Generate a colored and formatted help message for the command line."""
     C = Colors  # Shorthand
     
-    help_text = "\n" + f"""{C.BOLD}{C.CYAN}╔══════════════════════════════════════════════════════════════════════════════╗
-║              ArchivesSpace CSV Import Script                                 ║
-╚══════════════════════════════════════════════════════════════════════════════╝{C.RESET}
+    help_text = "\n" + f"""{C.BOLD}{C.CYAN}===============================================================================
+              ArchivesSpace CSV Import Script                                 
+==============================================================================={C.RESET}
 
 {C.BOLD}DESCRIPTION{C.RESET}
     Imports item-level archival objects from CSV into ArchivesSpace:
@@ -120,16 +121,13 @@ def get_colored_help():
     {C.GREEN}${C.RESET} python3 aspace_csv_import.py -f data.csv --update-existing
     {C.GREEN}${C.RESET} python3 aspace_csv_import.py -f data.csv -u admin -p secret
 
-{C.BOLD}CSV COLUMNS{C.RESET}
-    {C.CYAN}Required:{C.RESET}  CATALOG_NUMBER, ASpace Parent RefID
-    {C.CYAN}Optional:{C.RESET}  TITLE, Creation or Recording Date, Edit Date, Broadcast Date,
-               Original Format, DESCRIPTION, _TRANSFER_NOTES
+{C.BOLD}CSV COLUMNS{C.RESET} {C.DIM}(all must be present in CSV header){C.RESET}
+    CATALOG_NUMBER, ASpace Parent RefID, TITLE, Creation or Recording Date,
+    Edit Date, Broadcast Date, Original Format, DESCRIPTION, _TRANSFER_NOTES
 
 {C.BOLD}OUTPUT{C.RESET}
-    Reports saved to: {C.CYAN}~/aspace_import_reports/{C.RESET}
-
-{C.BOLD}TARGET{C.RESET}
-    Repository: {C.CYAN}/repositories/2{C.RESET}  Resource: {C.CYAN}/resources/7{C.RESET}
+    Reports saved to: {C.CYAN}~/aspace_import_reports/{C.RESET} by default
+    {C.DIM}Can be changed by setting logs_dir in creds.py{C.RESET}
 """
     return help_text
 
@@ -153,14 +151,21 @@ except ImportError:
     RESOURCE_ID = None
     print("Warning: creds.py not found. See creds_template.py in repo root for format.")
 
+# Import optional logs_dir (may not exist in older creds.py files)
+try:
+    from creds import logs_dir
+except ImportError:
+    logs_dir = ""
+
 # Repository and Resource Configuration
 RESOURCE_URI = f"/repositories/{REPO_ID}/resources/{RESOURCE_ID}" if REPO_ID and RESOURCE_ID else None
 
 # CSV File Configuration
-CSV_FILE = "JPCA-AV_SOURCE-ASpace_CSV_exoort.csv"  # Input CSV file
+CSV_FILE = "JPCA-AV_SOURCE-ASpace_CSV_export.csv"  # Input CSV file
 
-# Output Configuration
-OUTPUT_DIR = os.path.expanduser("~/aspace_import_reports")
+# Output Configuration - use custom logs_dir if provided, otherwise default
+DEFAULT_OUTPUT_DIR = os.path.expanduser("~/aspace_import_reports")
+OUTPUT_DIR = logs_dir if logs_dir else DEFAULT_OUTPUT_DIR
 LOG_FILE = f"{OUTPUT_DIR}/csv_import_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
 CSV_REPORT = f"{OUTPUT_DIR}/import_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
 JSON_REPORT = f"{OUTPUT_DIR}/import_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
@@ -213,6 +218,82 @@ def setup_environment(dry_run: bool = False, csv_file: str = None):
     logging.info("=" * 60)
 
 # ==============================
+# CSV VALIDATION (UPFRONT)
+# ==============================
+
+def validate_csv_before_import(filename: str) -> Tuple[bool, List[str], List[str]]:
+    """Validate CSV file before attempting import.
+    
+    Returns:
+        Tuple of (is_valid, error_messages, warning_messages)
+    """
+    errors = []
+    warnings = []
+    
+    # All columns that map to ArchivesSpace fields - must be present
+    required_columns = [
+        "CATALOG_NUMBER",
+        "ASpace Parent RefID",
+        "TITLE",
+        "Creation or Recording Date",
+        "Edit Date",
+        "Broadcast Date",
+        "Original Format",
+        "DESCRIPTION",
+        "_TRANSFER_NOTES"
+    ]
+    
+    try:
+        with open(filename, 'r', encoding='utf-8-sig') as csvfile:
+            reader = csv.DictReader(csvfile)
+            headers = reader.fieldnames
+            
+            # Check for required columns
+            missing_columns = []
+            for col in required_columns:
+                if col not in headers:
+                    missing_columns.append(col)
+            
+            if missing_columns:
+                errors.append(f"Missing required columns: {', '.join(missing_columns)}")
+                return False, errors, warnings
+            
+            # Validate each row
+            catalog_numbers = set()
+            
+            for row_num, row in enumerate(reader, 1):
+                # Check catalog number
+                catalog_num = row.get('CATALOG_NUMBER', '').strip()
+                if not catalog_num:
+                    errors.append(f"Row {row_num}: Missing CATALOG_NUMBER")
+                elif catalog_num in catalog_numbers:
+                    errors.append(f"Row {row_num}: Duplicate CATALOG_NUMBER: {catalog_num}")
+                else:
+                    catalog_numbers.add(catalog_num)
+                
+                # Check parent ref_id
+                parent_ref = row.get('ASpace Parent RefID', '').strip()
+                if not parent_ref:
+                    errors.append(f"Row {row_num}: Missing ASpace Parent RefID")
+                
+                # Check dates
+                for date_field in ['Creation or Recording Date', 'Edit Date', 'Broadcast Date']:
+                    date_val = row.get(date_field, '').strip()
+                    if date_val:
+                        parsed = parse_date(date_val)
+                        if parsed is None:  # None means invalid, "" means empty
+                            errors.append(f"Row {row_num}: Invalid {date_field}: {date_val}")
+                
+                # Check title (warning only)
+                if not row.get('TITLE', '').strip():
+                    warnings.append(f"Row {row_num}: Empty TITLE (will use CATALOG_NUMBER)")
+    
+    except Exception as e:
+        errors.append(f"Error reading CSV: {str(e)}")
+    
+    return len(errors) == 0, errors, warnings
+
+# ==============================
 # ARCHIVESSPACE SESSION MANAGEMENT
 # ==============================
 
@@ -231,7 +312,8 @@ class ArchivesSpaceClient:
         try:
             response = requests.post(
                 f"{self.base_url}/users/{self.username}/login",
-                data={"password": self.password}
+                data={"password": self.password},
+                timeout=30
             )
             
             if response.status_code == 200:
@@ -255,7 +337,8 @@ class ArchivesSpaceClient:
         try:
             response = requests.post(
                 f"{self.base_url}/logout",
-                headers=self.headers
+                headers=self.headers,
+                timeout=30
             )
             
             if response.status_code == 200:
@@ -278,11 +361,11 @@ class ArchivesSpaceClient:
         
         try:
             if method == "GET":
-                response = requests.get(url, headers=self.headers)
+                response = requests.get(url, headers=self.headers, timeout=30)
             elif method == "POST":
-                response = requests.post(url, headers=self.headers, json=data)
+                response = requests.post(url, headers=self.headers, json=data, timeout=30)
             elif method == "PUT":
-                response = requests.put(url, headers=self.headers, json=data)
+                response = requests.put(url, headers=self.headers, json=data, timeout=30)
             else:
                 raise ValueError(f"Unsupported HTTP method: {method}")
             
@@ -359,8 +442,8 @@ class ArchivesSpaceClient:
             result = self.make_request("GET", endpoint)
             if result and 'enumeration_values' in result:
                 return [v['value'] for v in result['enumeration_values']]
-        except:
-            pass
+        except (requests.RequestException, KeyError, TypeError) as e:
+            logging.warning(f"Could not fetch extent types from API: {e}")
         return VALID_EXTENT_TYPES
     
     def validate_extent_type(self, extent_type: str) -> bool:
@@ -394,9 +477,13 @@ class ArchivesSpaceClient:
 # ==============================
 
 def parse_date(date_string: str) -> Optional[str]:
-    """Convert M/D/YYYY or similar formats to YYYY-MM-DD."""
+    """Convert M/D/YYYY or similar formats to YYYY-MM-DD.
+    
+    Returns:
+        Formatted date string, empty string if input was empty, or None if invalid.
+    """
     if not date_string or date_string.strip() == "":
-        return None
+        return ""  # Empty is OK, not an error
     
     date_string = date_string.strip()
     
@@ -415,16 +502,23 @@ def parse_date(date_string: str) -> Optional[str]:
         except ValueError:
             continue
     
-    logging.warning(f"Could not parse date: {date_string}")
+    # Invalid date - return None to signal error
     return None
 
-def create_date_objects(row: Dict) -> List[Dict]:
-    """Create ArchivesSpace date objects from CSV row."""
+def create_date_objects(row: Dict) -> Tuple[List[Dict], List[str]]:
+    """Create ArchivesSpace date objects from CSV row.
+    
+    Returns:
+        Tuple of (date objects list, error messages list)
+    """
     dates = []
+    errors = []
     
     if row.get('Creation or Recording Date'):
         date_str = parse_date(row['Creation or Recording Date'])
-        if date_str:
+        if date_str is None:
+            errors.append(f"Invalid Creation or Recording Date: {row['Creation or Recording Date']}")
+        elif date_str:  # Not empty string
             dates.append({
                 "date_type": "single",
                 "label": "creation",
@@ -435,7 +529,9 @@ def create_date_objects(row: Dict) -> List[Dict]:
     
     if row.get('Edit Date'):
         date_str = parse_date(row['Edit Date'])
-        if date_str:
+        if date_str is None:
+            errors.append(f"Invalid Edit Date: {row['Edit Date']}")
+        elif date_str:  # Not empty string
             dates.append({
                 "date_type": "single",
                 "label": "Edited",
@@ -446,7 +542,9 @@ def create_date_objects(row: Dict) -> List[Dict]:
     
     if row.get('Broadcast Date'):
         date_str = parse_date(row['Broadcast Date'])
-        if date_str:
+        if date_str is None:
+            errors.append(f"Invalid Broadcast Date: {row['Broadcast Date']}")
+        elif date_str:  # Not empty string
             dates.append({
                 "date_type": "single",
                 "label": "broadcast",
@@ -455,7 +553,7 @@ def create_date_objects(row: Dict) -> List[Dict]:
                 "jsonmodel_type": "date"
             })
     
-    return dates
+    return dates, errors
 
 # ==============================
 # EXTENT PROCESSING
@@ -581,7 +679,7 @@ def detect_changes(existing_obj: Dict, row: Dict) -> Dict[str, Tuple[Any, Any]]:
         changes['title'] = (existing_obj.get('title'), new_title)
     
     # Check dates
-    new_dates = create_date_objects(row)
+    new_dates, _ = create_date_objects(row)  # Errors checked elsewhere
     existing_dates = existing_obj.get('dates', [])
     
     # Simple comparison: just check if count differs or any begin dates differ
@@ -618,8 +716,13 @@ def detect_changes(existing_obj: Dict, row: Dict) -> Dict[str, Tuple[Any, Any]]:
 # ==============================
 
 def create_archival_object(row: Dict, client: ArchivesSpaceClient, 
-                          parent_uri: str, dry_run: bool = False) -> Optional[Dict]:
-    """Create an archival object from a CSV row."""
+                          parent_uri: str, dry_run: bool = False) -> Tuple[Optional[Dict], List[str]]:
+    """Create an archival object from a CSV row.
+    
+    Returns:
+        Tuple of (result dict or None, error messages list)
+    """
+    errors = []
     
     ao_data = {
         "jsonmodel_type": "archival_object",
@@ -638,7 +741,9 @@ def create_archival_object(row: Dict, client: ArchivesSpaceClient,
     if catalog_number:
         ao_data["component_id"] = catalog_number
     
-    dates = create_date_objects(row)
+    dates, date_errors = create_date_objects(row)
+    if date_errors:
+        return None, date_errors
     if dates:
         ao_data["dates"] = dates
     
@@ -657,24 +762,24 @@ def create_archival_object(row: Dict, client: ArchivesSpaceClient,
     
     if dry_run:
         logging.info(f"[DRY RUN] Would create archival object: {catalog_number}")
-        return {"uri": f"/dry_run/{catalog_number}", "dry_run": True}
+        return {"uri": f"/dry_run/{catalog_number}", "dry_run": True}, []
     else:
         endpoint = f"/repositories/{REPO_ID}/archival_objects"
         result = client.make_request("POST", endpoint, ao_data)
         
         if result:
             logging.info(f"Successfully created archival object: {catalog_number}")
-            return result
+            return result, []
         else:
             logging.error(f"Failed to create archival object: {catalog_number}")
-            return None
+            return None, ["Failed to create archival object via API"]
 
 def update_archival_object(row: Dict, client: ArchivesSpaceClient, 
-                          existing_uri: str, dry_run: bool = False) -> Tuple[Optional[Dict], Dict]:
+                          existing_uri: str, dry_run: bool = False) -> Tuple[Optional[Dict], Dict, List[str]]:
     """Update an existing archival object from a CSV row.
     
     Returns:
-        Tuple of (result dict or None, changes dict)
+        Tuple of (result dict or None, changes dict, error messages list)
     """
     
     catalog_number = row.get('CATALOG_NUMBER', '').strip()
@@ -682,21 +787,26 @@ def update_archival_object(row: Dict, client: ArchivesSpaceClient,
     existing_obj = client.make_request("GET", existing_uri)
     if not existing_obj:
         logging.error(f"Failed to retrieve existing object for update: {existing_uri}")
-        return None, {}
+        return None, {}, ["Failed to retrieve existing object"]
+    
+    # Check for date errors before proceeding
+    dates, date_errors = create_date_objects(row)
+    if date_errors:
+        return None, {}, date_errors
     
     # Detect what would change
     changes = detect_changes(existing_obj, row)
     
     if not changes:
         logging.info(f"No changes needed for: {catalog_number}")
-        return {"uri": existing_uri, "unchanged": True}, {}
+        return {"uri": existing_uri, "unchanged": True}, {}, []
     
     # Apply changes
     title = row.get('TITLE', '').strip()
     if title:
         existing_obj["title"] = title
     
-    dates = create_date_objects(row)
+    # Use dates already validated above
     if dates:
         existing_obj["dates"] = dates
     
@@ -706,23 +816,23 @@ def update_archival_object(row: Dict, client: ArchivesSpaceClient,
     
     new_notes = create_notes(row)
     if new_notes:
-        existing_note_types = {n['type'] for n in new_notes}
+        new_note_types = {n['type'] for n in new_notes}
         preserved_notes = [n for n in existing_obj.get('notes', []) 
-                          if n.get('type') not in existing_note_types]
+                          if n.get('type') not in new_note_types]
         existing_obj["notes"] = preserved_notes + new_notes
     
     if dry_run:
         logging.info(f"[DRY RUN] Would update archival object: {catalog_number} at {existing_uri}")
-        return {"uri": existing_uri, "dry_run": True, "updated": True}, changes
+        return {"uri": existing_uri, "dry_run": True, "updated": True}, changes, []
     else:
         result = client.make_request("POST", existing_uri, existing_obj)
         
         if result:
             logging.info(f"Successfully updated archival object: {catalog_number}")
-            return result, changes
+            return result, changes, []
         else:
             logging.error(f"Failed to update archival object: {catalog_number}")
-            return None, changes
+            return None, changes, ["Failed to update archival object via API"]
 
 # ==============================
 # CSV PROCESSING
@@ -776,7 +886,13 @@ def process_csv_row(row: Dict, row_num: int, client: ArchivesSpaceClient,
                 return result
                 
             elif duplicate_mode == 'update':
-                ao_result, changes = update_archival_object(row, client, existing_uri, dry_run)
+                ao_result, changes, errors = update_archival_object(row, client, existing_uri, dry_run)
+                
+                if errors:
+                    result["status"] = "error"
+                    result["message"] = "; ".join(errors)
+                    logging.error(f"Error updating {catalog_number}: {'; '.join(errors)}")
+                    return result
                 
                 if ao_result:
                     if ao_result.get('unchanged'):
@@ -815,9 +931,13 @@ def process_csv_row(row: Dict, row_num: int, client: ArchivesSpaceClient,
             result["message"] = f"Parent not found: {parent_ref_id}"
             return result
         
-        ao_result = create_archival_object(row, client, parent_uri, dry_run)
+        ao_result, errors = create_archival_object(row, client, parent_uri, dry_run)
         
-        if ao_result:
+        if errors:
+            result["status"] = "error"
+            result["message"] = "; ".join(errors)
+            logging.error(f"Error creating {catalog_number}: {'; '.join(errors)}")
+        elif ao_result:
             result["status"] = "created"
             result["uri"] = ao_result.get('uri', '')
             result["message"] = "Created successfully"
@@ -873,7 +993,7 @@ def process_csv_file(filename: str, client: ArchivesSpaceClient,
                         summary["updated"] += 1
                         print_status("updated", f"{catalog_num} - {result['message']}")
                         for field, (old, new) in result.get('changes', {}).items():
-                            print_status("info", f"{field}: {old} → {new}", indent=1)
+                            print_status("info", f"{field}: {old} --> {new}", indent=1)
                     elif result["status"] == "unchanged":
                         summary["unchanged"] += 1
                         print_status("unchanged", f"{catalog_num} - {result['message']}")
@@ -981,7 +1101,7 @@ def print_summary(summary: Dict, elapsed_time: str = None):
         print(f"\n  Processing Time: {elapsed_time}")
     
     print(f"\n  Reports: {OUTPUT_DIR}/")
-    print(f"{Colors.DIM}{'─' * 60}{Colors.RESET}\n")
+    print(f"{Colors.DIM}{'-' * 60}{Colors.RESET}\n")
 
 # ==============================
 # MAIN EXECUTION
@@ -1127,6 +1247,31 @@ def main():
     if not os.path.exists(csv_file):
         print_status("error", f"CSV file not found: {csv_file}")
         sys.exit(1)
+    
+    # Validate CSV before proceeding
+    print_section("VALIDATING CSV")
+    is_valid, val_errors, val_warnings = validate_csv_before_import(csv_file)
+    
+    if val_warnings:
+        for warning in val_warnings[:5]:
+            print_status("warning", warning)
+        if len(val_warnings) > 5:
+            print(f"         {Colors.DIM}... and {len(val_warnings) - 5} more warnings{Colors.RESET}")
+        print(f"\n  {Colors.DIM}Warnings don't need to be fixed - import will continue{Colors.RESET}")
+    
+    if not is_valid:
+        print_status("error", f"CSV validation failed with {len(val_errors)} error(s)")
+        print()
+        for error in val_errors[:10]:
+            print_status("error", error)
+        if len(val_errors) > 10:
+            print(f"         {Colors.DIM}... and {len(val_errors) - 10} more errors{Colors.RESET}")
+        print()
+        print(f"  {Colors.YELLOW}Fix these errors before importing.{Colors.RESET}")
+        print(f"  {Colors.DIM}Use: python3 csv_utils.py --validate {csv_file}{Colors.RESET}")
+        sys.exit(1)
+    
+    print_status("success", "CSV validation passed")
     
     # Initialize client
     client = ArchivesSpaceClient(username=username, password=password)

@@ -12,17 +12,90 @@ from datetime import datetime
 from typing import Dict, List, Set
 import os
 import argparse
+from pathlib import Path
 
-# Import settings from main script or use defaults
-ASPACE_URL = "https://api-aspace.jpcarchive.org"
-REPO_ID = "2"
+# ==============================
+# TERMINAL COLORS
+# ==============================
 
-# Try to import credentials from creds.py
+class Colors:
+    """ANSI color codes for terminal output."""
+    HEADER = '\033[95m'
+    BLUE = '\033[94m'
+    CYAN = '\033[96m'
+    GREEN = '\033[92m'
+    YELLOW = '\033[93m'
+    RED = '\033[91m'
+    BOLD = '\033[1m'
+    DIM = '\033[2m'
+    RESET = '\033[0m'
+    
+    @classmethod
+    def disable(cls):
+        """Disable colors (for non-TTY output)."""
+        cls.HEADER = ''
+        cls.BLUE = ''
+        cls.CYAN = ''
+        cls.GREEN = ''
+        cls.YELLOW = ''
+        cls.RED = ''
+        cls.BOLD = ''
+        cls.DIM = ''
+        cls.RESET = ''
+
+# Disable colors if not a TTY
+if not sys.stdout.isatty():
+    Colors.disable()
+
+
+def print_status(status: str, message: str, indent: int = 0):
+    """Print a colorized status message."""
+    indent_str = "  " * indent
+    if status == "success":
+        symbol = f"{Colors.GREEN}[OK]{Colors.RESET}"
+    elif status == "found":
+        symbol = f"{Colors.GREEN}[OK]{Colors.RESET}"
+    elif status == "error":
+        symbol = f"{Colors.RED}[X]{Colors.RESET}"
+    elif status == "not_found":
+        symbol = f"{Colors.RED}[X]{Colors.RESET}"
+    elif status == "warning":
+        symbol = f"{Colors.YELLOW}[!]{Colors.RESET}"
+    elif status == "info":
+        symbol = f"{Colors.CYAN}[>]{Colors.RESET}"
+    elif status == "skip":
+        symbol = f"{Colors.DIM}[-]{Colors.RESET}"
+    else:
+        symbol = "   "
+    print(f"{indent_str}{symbol} {message}")
+
+def print_header(text: str):
+    """Print a header line."""
+    print(f"\n{Colors.BOLD}{Colors.CYAN}{text}{Colors.RESET}")
+    print(f"{Colors.DIM}{'-' * 60}{Colors.RESET}")
+
+def print_section(text: str):
+    """Print a section divider."""
+    print(f"\n{Colors.DIM}{'-' * 60}{Colors.RESET}")
+    print(f"{Colors.BOLD}{text}{Colors.RESET}")
+    print(f"{Colors.DIM}{'-' * 60}{Colors.RESET}")
+
+# ==============================
+# CONFIGURATION
+# ==============================
+
+# Add parent directory to path for shared creds.py import
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+# Import settings from creds.py (in repo root)
 try:
-    from creds import user as ASPACE_USERNAME, password as ASPACE_PASSWORD
+    from creds import baseURL as ASPACE_URL, user as ASPACE_USERNAME, password as ASPACE_PASSWORD
+    from creds import repo_id as REPO_ID
 except ImportError:
+    ASPACE_URL = None
     ASPACE_USERNAME = None
     ASPACE_PASSWORD = None
+    REPO_ID = None
 
 # Try to import parse_date from main script
 try:
@@ -44,6 +117,46 @@ except ImportError:
         return None
 
 # ==============================
+# HELP MENU
+# ==============================
+
+
+def get_colored_help():
+    """Generate a colored and formatted help message for the command line."""
+    C = Colors
+    
+    help_text = f"""
+{C.BOLD}{C.CYAN}===============================================================================
+                    CSV Validation & Parent Lookup Utility                     
+==============================================================================={C.RESET}
+
+{C.BOLD}DESCRIPTION{C.RESET}
+    Validates CSV files and checks parent ref_ids before ArchivesSpace import:
+    {C.GREEN}1.{C.RESET} Validate CSV structure, dates, and duplicates
+    {C.GREEN}2.{C.RESET} Check parent ref_ids exist in ArchivesSpace
+
+{C.BOLD}USAGE{C.RESET}
+    {C.GREEN}${C.RESET} python3 csv_utils.py --validate FILE
+    {C.GREEN}${C.RESET} python3 csv_utils.py --parents FILE
+
+{C.BOLD}COMMANDS{C.RESET} {C.DIM}(mutually exclusive){C.RESET}
+    {C.CYAN}--validate FILE{C.RESET}           Check CSV structure and data quality
+    {C.CYAN}--parents FILE{C.RESET}            Check parent ref_ids exist in ArchivesSpace
+
+{C.BOLD}OPTIONS{C.RESET}
+    {C.CYAN}-u, --username USER{C.RESET}       ASpace username (or use creds.py)
+    {C.CYAN}-p, --password PASS{C.RESET}       ASpace password (or use creds.py)
+    {C.CYAN}-o, --output FILE{C.RESET}         Output file path (for --parents report)
+    {C.CYAN}--no-color{C.RESET}                Disable colored output
+
+{C.BOLD}EXAMPLES{C.RESET}
+    {C.GREEN}${C.RESET} python3 csv_utils.py --validate data.csv
+    {C.GREEN}${C.RESET} python3 csv_utils.py --parents data.csv
+    {C.GREEN}${C.RESET} python3 csv_utils.py --parents data.csv -u admin -p secret
+"""
+    return help_text
+
+# ==============================
 # VALIDATION FUNCTIONS
 # ==============================
 
@@ -53,18 +166,31 @@ def validate_csv_structure(filename: str) -> Dict:
         "valid": True,
         "errors": [],
         "warnings": [],
+        "warnings_note": "Warnings do not need to be fixed - import will still succeed",
         "statistics": {},
         "duplicate_ids": [],
         "missing_parents": []
     }
     
-    required_columns = ["CATALOG_NUMBER"]
-    expected_columns = [
-        "CATALOG_NUMBER", "TITLE", "Creation or Recording Date",
-        "Edit Date", "Broadcast Date", "EJS Season", "EJS Episode",
-        "Original Format", "ASpace Parent RefID", "Content TRT",
-        "DESCRIPTION", "ORIGINAL_MEDIA_TYPE"
+    # All columns that map to ArchivesSpace fields - must be present
+    required_columns = [
+        "CATALOG_NUMBER",
+        "ASpace Parent RefID",
+        "TITLE",
+        "Creation or Recording Date",
+        "Edit Date",
+        "Broadcast Date",
+        "Original Format",
+        "DESCRIPTION",
+        "_TRANSFER_NOTES"
     ]
+    
+    # Other columns we recognize but don't require
+    optional_columns = [
+        "EJS Season", "EJS Episode", "Content TRT", "ORIGINAL_MEDIA_TYPE"
+    ]
+    
+    expected_columns = required_columns + optional_columns
     
     try:
         with open(filename, 'r', encoding='utf-8-sig') as csvfile:
@@ -89,6 +215,7 @@ def validate_csv_structure(filename: str) -> Dict:
             total_rows = 0
             empty_titles = 0
             invalid_dates = 0
+            missing_parent_refs = 0
             
             for row_num, row in enumerate(reader, 1):
                 total_rows += 1
@@ -114,14 +241,17 @@ def validate_csv_structure(filename: str) -> Dict:
                     date_val = row.get(date_field, '').strip()
                     if date_val:
                         parsed = parse_date(date_val)
-                        if not parsed:
+                        if parsed is None:
                             invalid_dates += 1
                             row_errors.append(f"Row {row_num}: Invalid date in {date_field}: {date_val}")
                 
-                # Track parent refs
+                # Check parent ref_id (required for import)
                 parent_ref = row.get('ASpace Parent RefID', '').strip()
                 if parent_ref:
                     parent_refs.add(parent_ref)
+                else:
+                    missing_parent_refs += 1
+                    row_errors.append(f"Row {row_num}: Missing ASpace Parent RefID (required)")
                 
                 if row_errors:
                     rows_with_errors.extend(row_errors)
@@ -136,11 +266,18 @@ def validate_csv_structure(filename: str) -> Dict:
                 "duplicate_catalog_numbers": len(results["duplicate_ids"]),
                 "empty_titles": empty_titles,
                 "invalid_dates": invalid_dates,
+                "missing_parent_refs": missing_parent_refs,
                 "unique_parent_refs": len(parent_refs),
                 "parent_refs_list": list(parent_refs)
             }
             
             if results["duplicate_ids"]:
+                results["valid"] = False
+            
+            if missing_parent_refs > 0:
+                results["valid"] = False
+            
+            if invalid_dates > 0:
                 results["valid"] = False
                 
     except Exception as e:
@@ -151,15 +288,7 @@ def validate_csv_structure(filename: str) -> Dict:
 
 def check_parent_refs(parent_refs: List[str], url: str = None, username: str = None, 
                       password: str = None, repo_id: str = None) -> Dict[str, bool]:
-    """Check which parent ref_ids exist in ArchivesSpace.
-    
-    Args:
-        parent_refs: List of ref_ids to check
-        url: ArchivesSpace URL (uses default if not provided)
-        username: ArchivesSpace username (uses default if not provided)
-        password: ArchivesSpace password (uses default if not provided)
-        repo_id: Repository ID (uses default if not provided)
-    """
+    """Check which parent ref_ids exist in ArchivesSpace."""
     results = {}
     
     # Use provided credentials or fall back to defaults
@@ -170,25 +299,35 @@ def check_parent_refs(parent_refs: List[str], url: str = None, username: str = N
     
     # Check credentials
     if not aspace_user or not aspace_pass:
-        print("Error: No credentials available.")
-        print("Either copy creds_template.py to creds.py, or use -u and -p flags")
+        print_status("error", "No credentials available")
+        print(f"         Either add creds.py to repo root, or use {Colors.CYAN}-u{Colors.RESET} and {Colors.CYAN}-p{Colors.RESET} flags")
+        return results
+    
+    if not aspace_url:
+        print_status("error", "No ArchivesSpace URL configured in creds.py")
         return results
     
     # Authenticate
     try:
+        print_status("info", f"Connecting to {aspace_url}...")
         response = requests.post(
             f"{aspace_url}/users/{aspace_user}/login",
-            data={"password": aspace_pass}
+            data={"password": aspace_pass},
+            timeout=30
         )
         
         if response.status_code != 200:
-            print(f"Failed to authenticate with ArchivesSpace at {aspace_url}")
+            print_status("error", f"Authentication failed: {response.status_code}")
             return results
-            
+        
+        print_status("success", "Authenticated")
         session = response.json()['session']
         headers = {"X-ArchivesSpace-Session": session}
         
         # Check each parent ref
+        print_status("info", f"Checking {len(parent_refs)} parent ref_ids...")
+        print()
+        
         for ref_id in parent_refs:
             if not ref_id:
                 continue
@@ -202,16 +341,23 @@ def check_parent_refs(parent_refs: List[str], url: str = None, username: str = N
                 "page_size": 1
             }
             
-            response = requests.get(search_url, headers=headers, params=params)
+            response = requests.get(search_url, headers=headers, params=params, timeout=30)
             
             if response.status_code == 200:
                 data = response.json()
-                results[ref_id] = data.get('total_hits', 0) > 0
+                found = data.get('total_hits', 0) > 0
+                results[ref_id] = found
+                
+                if found:
+                    print_status("found", f"{ref_id}")
+                else:
+                    print_status("not_found", f"{ref_id} {Colors.RED}NOT FOUND{Colors.RESET}")
             else:
                 results[ref_id] = False
+                print_status("error", f"{ref_id} - API error: {response.status_code}")
                 
     except Exception as e:
-        print(f"Error checking parent refs: {str(e)}")
+        print_status("error", f"Error checking parent refs: {str(e)}")
     
     return results
 
@@ -226,7 +372,8 @@ def generate_parent_lookup_report(csv_file: str, output_file: str = None,
     if not output_file:
         output_file = os.path.join(report_dir, f"parent_lookup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
     
-    print(f"Analyzing CSV file: {csv_file}")
+    print_header("Parent Ref ID Lookup")
+    print(f"  CSV File: {csv_file}")
     
     # Get unique parent refs from CSV
     parent_refs = set()
@@ -237,10 +384,10 @@ def generate_parent_lookup_report(csv_file: str, output_file: str = None,
             if ref:
                 parent_refs.add(ref)
     
-    print(f"Found {len(parent_refs)} unique parent ref_ids")
+    print(f"  Found: {Colors.CYAN}{len(parent_refs)}{Colors.RESET} unique parent ref_ids")
     
     if parent_refs:
-        print("Checking parent ref_ids in ArchivesSpace...")
+        print_section("Checking ArchivesSpace")
         ref_status = check_parent_refs(list(parent_refs), url, username, password, repo_id)
         
         # Write report
@@ -259,187 +406,178 @@ def generate_parent_lookup_report(csv_file: str, output_file: str = None,
                 
                 writer.writerow([ref, exists, status])
         
-        print(f"Parent lookup report saved: {output_file}")
-        
         # Summary
         found = sum(1 for v in ref_status.values() if v)
         not_found = sum(1 for v in ref_status.values() if v is False)
-        print(f"\nSummary:")
-        print(f"  Found: {found}")
-        print(f"  Not Found: {not_found}")
-        if not_found > 0:
-            print(f"  WARNING: {not_found} parent ref_ids not found in ArchivesSpace!")
-
-def fix_common_issues(input_file: str, output_file: str = None):
-    """Create a cleaned version of the CSV with common issues fixed."""
-    
-    if not output_file:
-        base, ext = os.path.splitext(input_file)
-        output_file = f"{base}_cleaned{ext}"
-    
-    rows_fixed = 0
-    changes_made = []
-    
-    with open(input_file, 'r', encoding='utf-8-sig') as infile:
-        reader = csv.DictReader(infile)
-        fieldnames = reader.fieldnames
         
-        with open(output_file, 'w', newline='', encoding='utf-8') as outfile:
-            writer = csv.DictWriter(outfile, fieldnames=fieldnames)
-            writer.writeheader()
-            
-            for row_num, row in enumerate(reader, 1):
-                original = dict(row)
-                
-                # Fix catalog number (remove spaces, ensure uppercase)
-                if row.get('CATALOG_NUMBER'):
-                    cleaned = row['CATALOG_NUMBER'].strip().upper()
-                    if cleaned != row['CATALOG_NUMBER']:
-                        row['CATALOG_NUMBER'] = cleaned
-                        changes_made.append(f"Row {row_num}: Fixed catalog number format")
-                
-                # Fix dates (try to parse and reformat)
-                for date_field in ['Creation or Recording Date', 'Edit Date', 'Broadcast Date']:
-                    date_val = row.get(date_field, '').strip()
-                    if date_val:
-                        # Try to parse various formats
-                        parsed = parse_date(date_val)
-                        if parsed:
-                            # Keep original format for now
-                            pass
-                        else:
-                            # Try to fix common issues
-                            # Remove extra spaces, fix separators
-                            date_val = date_val.replace(' ', '').replace('-', '/')
-                            row[date_field] = date_val
-                
-                # Trim all fields
-                for key in row:
-                    if row[key]:
-                        row[key] = row[key].strip()
-                
-                # Track if we made changes
-                if row != original:
-                    rows_fixed += 1
-                
-                writer.writerow(row)
+        print_section("Summary")
+        print(f"  {Colors.GREEN}Found:{Colors.RESET}     {found}")
+        print(f"  {Colors.RED}Not Found:{Colors.RESET} {not_found}")
+        
+        if not_found > 0:
+            print()
+            print_status("warning", f"{Colors.YELLOW}{not_found} parent ref_ids not found in ArchivesSpace!{Colors.RESET}")
+            print(f"         These must be created before import will succeed.")
+        else:
+            print()
+            print_status("success", "All parent ref_ids found - ready for import!")
+        
+        print(f"\n  Report saved: {Colors.CYAN}{output_file}{Colors.RESET}")
+        print(f"{Colors.DIM}{'-' * 60}{Colors.RESET}\n")
+
+def run_validation(csv_file: str):
+    """Run CSV validation and display results."""
     
-    print(f"Cleaned CSV saved: {output_file}")
-    print(f"Rows with fixes: {rows_fixed}")
-    if changes_made:
-        print("Changes made:")
-        for change in changes_made[:10]:  # Show first 10 changes
-            print(f"  {change}")
-        if len(changes_made) > 10:
-            print(f"  ... and {len(changes_made) - 10} more")
+    print_header("CSV Validation")
+    print(f"  File: {csv_file}")
+    
+    results = validate_csv_structure(csv_file)
+    
+    # Print validation result
+    if results['valid']:
+        print(f"\n  Result: {Colors.GREEN}{Colors.BOLD}PASSED{Colors.RESET}")
+    else:
+        print(f"\n  Result: {Colors.RED}{Colors.BOLD}FAILED{Colors.RESET}")
+    
+    # Statistics
+    print_section("Statistics")
+    stats = results['statistics']
+    print(f"  Total Rows:           {stats.get('total_rows', 0)}")
+    print(f"  Unique Catalog #s:    {stats.get('unique_catalog_numbers', 0)}")
+    print(f"  Duplicate Catalog #s: {Colors.RED if stats.get('duplicate_catalog_numbers', 0) > 0 else ''}{stats.get('duplicate_catalog_numbers', 0)}{Colors.RESET}")
+    print(f"  Missing Parent Refs:  {Colors.RED if stats.get('missing_parent_refs', 0) > 0 else ''}{stats.get('missing_parent_refs', 0)}{Colors.RESET}")
+    print(f"  Invalid Dates:        {Colors.RED if stats.get('invalid_dates', 0) > 0 else ''}{stats.get('invalid_dates', 0)}{Colors.RESET}")
+    print(f"  Unique Parent Refs:   {stats.get('unique_parent_refs', 0)}")
+    print(f"  Empty Titles:         {stats.get('empty_titles', 0)} {Colors.DIM}(will use catalog #){Colors.RESET}" if stats.get('empty_titles', 0) > 0 else f"  Empty Titles:         0")
+    
+    # Errors
+    if results['errors']:
+        print_section(f"Errors ({len(results['errors'])})")
+        for error in results['errors'][:10]:
+            print_status("error", error)
+        if len(results['errors']) > 10:
+            print(f"         {Colors.DIM}... and {len(results['errors']) - 10} more errors{Colors.RESET}")
+    
+    # Warnings
+    if results['warnings']:
+        print_section(f"Warnings ({len(results['warnings'])})")
+        print(f"  {Colors.DIM}These don't need to be fixed - import will still succeed{Colors.RESET}\n")
+        for warning in results['warnings'][:10]:
+            print_status("warning", warning)
+        if len(results['warnings']) > 10:
+            print(f"         {Colors.DIM}... and {len(results['warnings']) - 10} more warnings{Colors.RESET}")
+    
+    # Duplicates
+    if results['duplicate_ids']:
+        print_section("Duplicate Catalog Numbers")
+        for dup in results['duplicate_ids']:
+            print_status("error", dup)
+    
+    # Save detailed report
+    report_dir = os.path.expanduser("~/aspace_import_reports/csv_validation")
+    os.makedirs(report_dir, exist_ok=True)
+    report_file = os.path.join(report_dir, f"validation_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
+    with open(report_file, 'w') as f:
+        json.dump(results, f, indent=2)
+    
+    print(f"\n  Detailed report: {Colors.CYAN}{report_file}{Colors.RESET}")
+    print(f"{Colors.DIM}{'-' * 60}{Colors.RESET}\n")
 
 # ==============================
-# MAIN UTILITY FUNCTIONS
+# MAIN EXECUTION
 # ==============================
 
 def main():
     """Main utility function."""
     
-    if len(sys.argv) < 2:
-        print("CSV Import Utility")
-        print("==================")
-        print("\nUsage:")
-        print("  python csv_utils.py validate <csv_file>")
-        print("  python csv_utils.py parents <csv_file> -u <username> -p <password> [--url <url>]")
-        print("  python csv_utils.py clean <csv_file> [output_file]")
-        print("\nCommands:")
-        print("  validate - Check CSV structure and data")
-        print("  parents  - Check parent ref_ids in ArchivesSpace")
-        print("  clean    - Fix common issues and create cleaned CSV")
-        print("\nFor parents command options:")
-        print("  python csv_utils.py parents -h")
-        sys.exit(1)
+    # Custom ArgumentParser for cleaner usage and colored errors
+    class CustomArgumentParser(argparse.ArgumentParser):
+        def format_usage(self):
+            C = Colors
+            usage = f"\nusage: {self.prog} [--validate | --parents] FILE [options]\n"
+            help_hint = f"       {C.DIM}Use -h or --help for detailed information{C.RESET}\n"
+            return usage + help_hint
+        
+        def format_help(self):
+            return get_colored_help()
+        
+        def error(self, message):
+            self.print_usage(sys.stderr)
+            self.exit(2, f"\n{Colors.RED}error: {message}{Colors.RESET}\n")
     
-    command = sys.argv[1]
+    parser = CustomArgumentParser(
+        description=get_colored_help(),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        add_help=False,
+        usage=argparse.SUPPRESS
+    )
     
-    if command == "validate":
-        if len(sys.argv) < 3:
-            print("Error: Please specify CSV file")
+    parser.add_argument(
+        '-h', '--help',
+        action='help',
+        default=argparse.SUPPRESS,
+        help=argparse.SUPPRESS
+    )
+    
+    # Command group (mutually exclusive)
+    command_group = parser.add_mutually_exclusive_group()
+    command_group.add_argument(
+        '--validate',
+        metavar='FILE',
+        help=argparse.SUPPRESS
+    )
+    command_group.add_argument(
+        '--parents',
+        metavar='FILE',
+        help=argparse.SUPPRESS
+    )
+    
+    # Options
+    parser.add_argument(
+        '-u', '--username',
+        help=argparse.SUPPRESS
+    )
+    parser.add_argument(
+        '-p', '--password',
+        help=argparse.SUPPRESS
+    )
+    parser.add_argument(
+        '-o', '--output',
+        help=argparse.SUPPRESS
+    )
+    parser.add_argument(
+        '--no-color',
+        action='store_true',
+        help=argparse.SUPPRESS
+    )
+    
+    args = parser.parse_args()
+    
+    # Handle color disable
+    if args.no_color:
+        Colors.disable()
+    
+    # Check that a command was provided
+    if not args.validate and not args.parents:
+        parser.error("one of --validate or --parents is required")
+    
+    # Run the appropriate command
+    if args.validate:
+        if not os.path.exists(args.validate):
+            print_status("error", f"File not found: {args.validate}")
             sys.exit(1)
+        run_validation(args.validate)
         
-        csv_file = sys.argv[2]
-        print(f"Validating CSV file: {csv_file}")
-        print("=" * 60)
-        
-        results = validate_csv_structure(csv_file)
-        
-        # Print results
-        print(f"\nValidation Result: {'PASSED' if results['valid'] else 'FAILED'}")
-        print("\nStatistics:")
-        for key, value in results['statistics'].items():
-            if key != 'parent_refs_list':  # Don't print the full list
-                print(f"  {key}: {value}")
-        
-        if results['errors']:
-            print(f"\nErrors ({len(results['errors'])}):")
-            for error in results['errors'][:10]:  # Show first 10 errors
-                print(f"  - {error}")
-            if len(results['errors']) > 10:
-                print(f"  ... and {len(results['errors']) - 10} more errors")
-        
-        if results['warnings']:
-            print(f"\nWarnings ({len(results['warnings'])}):")
-            for warning in results['warnings'][:10]:  # Show first 10 warnings
-                print(f"  - {warning}")
-            if len(results['warnings']) > 10:
-                print(f"  ... and {len(results['warnings']) - 10} more warnings")
-        
-        if results['duplicate_ids']:
-            print(f"\nDuplicate Catalog Numbers:")
-            for dup in results['duplicate_ids']:
-                print(f"  - {dup}")
-        
-        # Save detailed report
-        report_dir = os.path.expanduser("~/aspace_import_reports/csv_validation")
-        os.makedirs(report_dir, exist_ok=True)
-        report_file = os.path.join(report_dir, f"validation_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
-        with open(report_file, 'w') as f:
-            json.dump(results, f, indent=2)
-        print(f"\nDetailed report saved: {report_file}")
-        
-    elif command == "parents":
-        # Use argparse for the parents command
-        parent_parser = argparse.ArgumentParser(
-            prog='csv_utils.py parents',
-            description='Check parent ref_ids exist in ArchivesSpace'
-        )
-        parent_parser.add_argument('csv_file', help='CSV file to check')
-        parent_parser.add_argument('-u', '--username', help='ArchivesSpace username')
-        parent_parser.add_argument('-p', '--password', help='ArchivesSpace password')
-        parent_parser.add_argument('--url', help='ArchivesSpace URL')
-        parent_parser.add_argument('--repo-id', help='Repository ID')
-        parent_parser.add_argument('-o', '--output', help='Output file path')
-        
-        # Parse remaining args (skip 'parents' command)
-        parent_args = parent_parser.parse_args(sys.argv[2:])
-        
+    elif args.parents:
+        if not os.path.exists(args.parents):
+            print_status("error", f"File not found: {args.parents}")
+            sys.exit(1)
         generate_parent_lookup_report(
-            parent_args.csv_file,
-            output_file=parent_args.output,
-            url=parent_args.url,
-            username=parent_args.username,
-            password=parent_args.password,
-            repo_id=parent_args.repo_id
+            args.parents,
+            output_file=args.output,
+            username=args.username,
+            password=args.password
         )
-        
-    elif command == "clean":
-        if len(sys.argv) < 3:
-            print("Error: Please specify CSV file")
-            sys.exit(1)
-        
-        input_file = sys.argv[2]
-        output_file = sys.argv[3] if len(sys.argv) > 3 else None
-        fix_common_issues(input_file, output_file)
-        
-    else:
-        print(f"Error: Unknown command '{command}'")
-        print("Use 'validate', 'parents', or 'clean'")
-        sys.exit(1)
 
 if __name__ == "__main__":
     main()
