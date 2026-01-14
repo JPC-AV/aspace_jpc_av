@@ -123,7 +123,7 @@ def get_colored_help():
 
 {C.BOLD}CSV COLUMNS{C.RESET} {C.DIM}(all must be present in CSV header){C.RESET}
     CATALOG_NUMBER, ASpace Parent RefID, TITLE, Creation or Recording Date,
-    Edit Date, Broadcast Date, Original Format, DESCRIPTION, _TRANSFER_NOTES
+    Edit Date, Broadcast Date, Original Format, DESCRIPTION, ASpace PhysTech Note
 
 {C.BOLD}OUTPUT{C.RESET}
     Reports saved to: {C.CYAN}~/aspace_import_reports/{C.RESET} by default
@@ -240,7 +240,7 @@ def validate_csv_before_import(filename: str) -> Tuple[bool, List[str], List[str
         "Broadcast Date",
         "Original Format",
         "DESCRIPTION",
-        "_TRANSFER_NOTES"
+        "ASpace PhysTech Note"
     ]
     
     try:
@@ -602,16 +602,16 @@ def create_notes(row: Dict) -> List[Dict]:
             "publish": True
         })
     
-    # Physical Characteristics and Technical Requirements note from _TRANSFER_NOTES
-    transfer_notes = row.get('_TRANSFER_NOTES', '').strip()
-    if transfer_notes:
+    # Physical Characteristics and Technical Requirements note from ASpace PhysTech Note
+    phystech_note = row.get('ASpace PhysTech Note', '').strip()
+    if phystech_note:
         notes.append({
             "jsonmodel_type": "note_multipart",
             "type": "phystech",
             "label": "",
             "subnotes": [{
                 "jsonmodel_type": "note_text",
-                "content": transfer_notes
+                "content": phystech_note
             }],
             "publish": True
         })

@@ -182,7 +182,7 @@ def validate_csv_structure(filename: str) -> Dict:
         "Broadcast Date",
         "Original Format",
         "DESCRIPTION",
-        "_TRANSFER_NOTES"
+        "ASpace PhysTech Note"
     ]
     
     # Other columns we recognize but don't require
