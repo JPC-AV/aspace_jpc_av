@@ -9,11 +9,16 @@
 
 2. **Credentials configured** - copy `creds_template.py` to `creds.py` and add your credentials
 
-3. **CSV file prepared** with required columns:
-   - `CATALOG_NUMBER` (required, must be unique)
-   - `ASpace Parent RefID` (required)
-   - `Original Format` (required, must match ASpace dropdown)
-   - `TITLE`, `DESCRIPTION`, dates (optional)
+3. **CSV file prepared** with required columns (all must be present):
+   - `CATALOG_NUMBER`
+   - `ASpace Parent RefID`
+   - `Original Format`
+   - `TITLE`
+   - `DESCRIPTION`
+   - `ASpace PhysTech Note`
+   - `Creation or Recording Date`
+   - `Edit Date`
+   - `Broadcast Date`
 
 ## Step 1: Validate CSV Structure
 
@@ -90,7 +95,7 @@ Check generated reports in `~/aspace_import_reports/`:
 
 After digitization, run `aspace-rename-directories.py` to:
 1. Extract exact duration from .mkv files via mediainfo
-2. Add Duration to Scope and Contents note (as a defined list)
+2. Add Duration to Physical Characteristics and Technical Requirements note (as a defined list)
 3. Add physical details to extent ("SD video, color, sound")
 4. Rename directories to include ASpace ref_id
 5. Optionally rename .mkv files with `--rename-mkv` flag

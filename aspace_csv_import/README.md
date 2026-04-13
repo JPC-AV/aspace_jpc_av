@@ -323,13 +323,6 @@ python check_extent_types.py your_file.csv  # Validate CSV values
 | "Missing Parent RefID" | Add parent ref_id to CSV (required field) |
 | "Invalid extent type" | Check Original Format matches ASpace dropdown exactly |
 
-## API Configuration
-
-The script connects to:
-- **API URL**: https://api-aspace.jpcarchive.org
-- **Repository ID**: 2
-- **Resource ID**: 7
-
 ## Version History
 
 - **v2.0** (2024): Major update

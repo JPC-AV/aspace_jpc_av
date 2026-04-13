@@ -14,14 +14,14 @@
 | Broadcast Date | `dates[]` (label: broadcast) | 1982-09-01 | Converted from M/D/YYYY |
 | Original Format | `extents[].extent_type` | 2 inch videotape | Must match ASpace dropdown exactly |
 | DESCRIPTION | Scope and Contents note (note_text) | Promotional clip for episode... | |
-| _TRANSFER_NOTES | Physical Characteristics note (note_text) | Slight ringing present... | Note type: phystech |
+| ASpace PhysTech Note | Physical Characteristics note (note_text) | Slight ringing present... | Note type: phystech. May contain content from `_TRANSFER_NOTES`, `_PRE_TRANSFER_NOTES`, both, or neither. Assembled and edited by staff before import. Only written when content is present. |
 | ASpace Parent RefID | `parent.ref` | /repositories/2/archival_objects/12345 | **Required** |
 
 ### Data from MKV Files (via aspace-rename-directories.py)
 
 | Source | Maps To | Example | Notes |
 |--------|---------|---------|-------|
-| MKV duration (mediainfo) | Scope and Contents note (note_definedlist) | Duration: 01:23:45 | Added to existing note or creates new one |
+| MKV duration (mediainfo) | Physical Characteristics and Technical Requirements note (note_definedlist) | Duration: 01:23:45 | Added to existing phystech note or creates new one |
 
 ### Hardcoded Values (via aspace_csv_import.py)
 
@@ -163,7 +163,7 @@
 }
 ```
 
-### _TRANSFER_NOTES → Physical Characteristics and Technical Requirements
+### ASpace PhysTech Note → Physical Characteristics and Technical Requirements
 
 ```json
 {
@@ -180,20 +180,22 @@
 }
 ```
 
+> **Note:** This note is only created when the `ASpace PhysTech Note` column contains content. The column may be populated from `_TRANSFER_NOTES`, `_PRE_TRANSFER_NOTES`, both, or neither — content is assembled and edited by staff before import.
+
 ### Duration (via aspace-rename-directories.py)
 
-Duration is extracted from .mkv files via mediainfo and added as a defined list subnote to the Scope and Contents note:
+Duration is extracted from .mkv files via mediainfo and added as a defined list subnote to the Physical Characteristics and Technical Requirements note:
 
 ```json
 {
   "jsonmodel_type": "note_multipart",
-  "type": "scopecontent",
+  "type": "phystech",
   "label": "",
   "publish": true,
   "subnotes": [
     {
       "jsonmodel_type": "note_text",
-      "content": "Promotional clip for episode 22 of the Ebony/Jet Celebrity Showcase series."
+      "content": "Slight ringing present throughout. Hue is inconsistent; skin tones are redder in some sections."
     },
     {
       "jsonmodel_type": "note_definedlist",
@@ -208,6 +210,8 @@ Duration is extracted from .mkv files via mediainfo and added as a defined list 
   ]
 }
 ```
+
+> **Note:** Duration is appended to the existing phystech note if one exists (preserving any text subnotes), or creates a new phystech note if none is present.
 
 ### Physical Details (via aspace-rename-directories.py)
 

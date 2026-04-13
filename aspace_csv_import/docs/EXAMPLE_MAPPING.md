@@ -13,7 +13,7 @@ Broadcast Date: [empty]
 Original Format: 2 inch videotape
 ASpace Parent RefID: abc123def456
 DESCRIPTION: Promotional clip for episode 22 of the Ebony/Jet Celebrity Showcase series.
-_TRANSFER_NOTES: Slight ringing present throughout. Hue is inconsistent; skin tones are redder in some sections.
+ASpace PhysTech Note: Slight ringing present throughout. Hue is inconsistent; skin tones are redder in some sections.
 ```
 
 ## Step 1: aspace_csv_import.py Creates the Record
@@ -99,20 +99,20 @@ After digitization, this script extracts runtime from the .mkv file and updates 
 
 ### Updates Made
 
-1. **Duration** added to Scope and Contents note as a defined list
+1. **Duration** added to Physical Characteristics and Technical Requirements note as a defined list
 2. **Physical details** added to extent
 
-### Updated Scope and Contents Note
+### Updated Physical Characteristics and Technical Requirements Note
 
 ```json
 {
   "jsonmodel_type": "note_multipart",
-  "type": "scopecontent",
+  "type": "phystech",
   "publish": true,
   "subnotes": [
     {
       "jsonmodel_type": "note_text",
-      "content": "Promotional clip for episode 22 of the Ebony/Jet Celebrity Showcase series."
+      "content": "Slight ringing present throughout. Hue is inconsistent; skin tones are redder in some sections."
     },
     {
       "jsonmodel_type": "note_definedlist",
@@ -159,11 +159,11 @@ After digitization, this script extracts runtime from the .mkv file and updates 
 ### Notes
 **Scope and Contents:**
 > Promotional clip for episode 22 of the Ebony/Jet Celebrity Showcase series.
-> 
-> Duration: 00:02:30
 
 **Physical Characteristics and Technical Requirements:**
 > Slight ringing present throughout. Hue is inconsistent; skin tones are redder in some sections.
+>
+> Duration: 00:02:30
 
 ### Instance
 - **Type:** Moving Images (Video)

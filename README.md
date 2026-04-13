@@ -57,7 +57,7 @@ More detailed descriptions of each file and usage in directory-specific README.m
 Both scripts generate logs and reports:
 
 - **aspace_csv_import** creates logs and reports in `~/aspace_import_reports/`
-- **aspace_rename_directories** outputs to the terminal (use `--verbose` for detailed logging)
+- **aspace_rename_directories** creates logs in `~/aspace_rename_reports/`
 
 Log files include timestamps, actions taken, and any errors encountered.
 
@@ -109,7 +109,7 @@ See [aspace_csv_import/README.md](aspace_csv_import/README.md) for full document
 
 ### aspace_rename_directories
 
-Processes digitized video directories to extract runtime from MKV files, update ArchivesSpace records with duration and physical details, and rename directories with ref_ids.
+Processes digitized video directories to extract runtime from MKV files via `mediainfo`, update ArchivesSpace records with duration (added as a Defined List subnote to the Physical Characteristics and Technical Requirements note) and physical details, and rename directories with ref_ids.
 
 ```bash
 cd aspace_rename_directories

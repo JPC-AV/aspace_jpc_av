@@ -13,13 +13,13 @@
 | **Original Format** | `extent_type` | ✅ Active |
 | **ASpace Parent RefID** | `parent.ref` | ✅ Active |
 | **DESCRIPTION** 📼 | Scope and Contents note | ✅ Active |
-| **_TRANSFER_NOTES** 📼 | Physical Characteristics and Technical Requirements note (phystech) | ✅ Active |
+| **ASpace PhysTech Note** | Physical Characteristics and Technical Requirements note (phystech) | ✅ Active. May contain content from `_TRANSFER_NOTES`, `_PRE_TRANSFER_NOTES`, both, or neither. Assembled and edited by staff before import. Only written when content is present. |
 
 ## Fields Handled by aspace-rename-directories.py
 
 | Field | Source | Maps To |
 |-------|--------|---------|
-| **Duration** | Extracted from .mkv via mediainfo | Scope and Contents note > Defined List > "Duration" |
+| **Duration** | Extracted from .mkv via mediainfo | Physical Characteristics and Technical Requirements note > Defined List > "Duration" |
 | **Physical Details** | Hardcoded | `extents[].physical_details` = "SD video, color, sound" |
 
 ### Matroska Container Tags 📼
@@ -104,7 +104,7 @@ Fields marked with 📼 are embedded in the Matroska (.mkv) container as key:val
 | **Problem Record Notes** | (empty) | Internal tracking: QC |
 | **Problem Tape** | (empty) | Internal tracking: QC |
 | **Reason For Not Digitizing** | (empty) | Internal tracking: QC |
-| **ASpace File Type** | "Edited footage", "Raw footage", "Promo footage" | Internal tracking: workflow |
+| **ASpace File Type** | "Edited", "Raw", "Promo" | Internal tracking: workflow |
 | **ASpace Item Record Created** | "No", "Yes" | Internal tracking: workflow |
 | **ASpace Item Record Published** | (empty) | Internal tracking: workflow |
 | **ASpace Parent Record Created** | (empty) | Internal tracking: workflow |
