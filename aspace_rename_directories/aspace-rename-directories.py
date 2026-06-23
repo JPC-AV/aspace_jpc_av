@@ -97,7 +97,8 @@ class ArchivesSpaceClient:
         try:
             response = requests.post(
                 f"{self.base_url}/users/{self.username}/login",
-                data={"password": self.password}
+                data={"password": self.password},
+                timeout=30
             )
             
             if response.status_code == 200:
@@ -121,7 +122,8 @@ class ArchivesSpaceClient:
         try:
             response = requests.post(
                 f"{self.base_url}/logout",
-                headers=self.headers
+                headers=self.headers,
+                timeout=30
             )
             
             if response.status_code == 200:
@@ -203,7 +205,9 @@ def get_video_duration(file_path):
     Args:
         file_path (str): The path to the video file.
     Returns:
-        str: Video duration in hh:mm:ss format, or "00:00:00" if extraction fails.
+        str: Video duration in hh:mm:ss format, or None if extraction fails.
+        Callers must treat None as a hard failure and never write it to a record —
+        a bogus 00:00:00 is worse than no value.
     """
     try:
         # Run the mediainfo command as a subprocess and capture its output
@@ -216,18 +220,19 @@ def get_video_duration(file_path):
         # Check if the command executed successfully (return code 0)
         if result.returncode != 0:
             logging.error(f"Error running mediainfo: {result.stderr}")
-            return "00:00:00"  # Default duration on failure
+            return None  # extraction failed
 
         # Parse the output line by line to find the "Duration" field
         for line in result.stdout.splitlines():
             match = re.search(r"Duration\s+:\s+(\d{2}:\d{2}:\d{2})", line)  # Regex for hh:mm:ss
             if match:
                 return match.group(1)  # Return the captured duration
-        return "00:00:00"  # Default if no duration is found
+        logging.error(f"No hh:mm:ss Duration field found in mediainfo output for: {file_path}")
+        return None  # no parseable duration
     except Exception as e:
         # Handle unexpected exceptions and log an error
         logging.error(f"Error extracting duration: {e}")
-        return "00:00:00"  # Default duration
+        return None  # extraction failed
 
 def get_refid(query, repository, resource, baseURL, headers):
     """
@@ -267,12 +272,13 @@ def get_refid(query, repository, resource, baseURL, headers):
         }
     )
     
-    # Construct the search query URL - using wildcard search but filtering by component_id
-    search_query = f"/repositories/2/search?q=*&page=1&filter={filter}"
-    
+    # Construct the search query URL - using wildcard search but filtering by component_id.
+    # Use the configured repository path rather than a hardcoded /repositories/2.
+    search_query = f"{repository}/search?q=*&page=1&filter={filter}"
+
     try:
         # Send a GET request to the ArchivesSpace API and parse the JSON response
-        response = requests.get(baseURL + search_query, headers=headers).json()
+        response = requests.get(baseURL + search_query, headers=headers, timeout=30).json()
 
         # Check if results are present
         if response.get("results"):
@@ -302,13 +308,18 @@ def get_refid(query, repository, resource, baseURL, headers):
         logging.error(f"Error fetching RefID for Component Unique Identifier '{query}': {e}")
         return None, None
 
-def modify_scopecontent_note(data, runtime):
+def modify_phystech_note(data, runtime):
     """
-    Add a Duration defined list to the existing Scope and Contents note.
-    If no scopecontent note exists, creates one with just the duration.
-    
-    Creates the structure: Scope and Contents note > subnotes > Defined List > Item (Label: "Duration", Value: runtime)
-    
+    Add a Duration defined list to the Physical Characteristics and Technical
+    Requirements (phystech) note. If no phystech note exists, creates one with
+    just the duration; existing text/other subnotes are preserved.
+
+    Creates the structure: phystech note > subnotes > Defined List > Item (Label: "Duration", Value: runtime)
+
+    Forward-facing only: this targets the phystech note. It deliberately does NOT
+    remediate any Duration entry left in a scopecontent note by older runs — that
+    cleanup is handled separately.
+
     Args:
         data (dict): The original archival object JSON data.
         runtime (str): The video runtime in hh:mm:ss format.
@@ -321,57 +332,56 @@ def modify_scopecontent_note(data, runtime):
         "label": "Duration",
         "value": runtime
     }
-    
+
     # Create the defined list structure
     duration_defined_list = {
         "jsonmodel_type": "note_definedlist",
         "items": [duration_item]
     }
-    
+
     # Initialize notes array if it doesn't exist
     if "notes" not in data:
         data["notes"] = []
-    
-    # Find existing Scope and Contents note
-    existing_scope_note = None
-    existing_scope_index = None
-    for i, note in enumerate(data["notes"]):
-        if note.get("type") == "scopecontent" and note.get("jsonmodel_type") == "note_multipart":
-            existing_scope_note = note
-            existing_scope_index = i
+
+    # Find existing phystech note
+    existing_phystech_note = None
+    for note in data["notes"]:
+        if note.get("type") == "phystech" and note.get("jsonmodel_type") == "note_multipart":
+            existing_phystech_note = note
             break
-    
-    if existing_scope_note is not None:
-        # Scope and Contents note exists - add/update Duration defined list in subnotes
-        logging.info("Found existing Scope and Contents note - adding Duration defined list")
-        
+
+    if existing_phystech_note is not None:
+        # phystech note exists - add/update Duration defined list in subnotes,
+        # preserving any existing text (or other) subnotes.
+        logging.info("Found existing Physical Characteristics and Technical Requirements note - adding Duration defined list")
+
         # Ensure subnotes array exists
-        if "subnotes" not in existing_scope_note:
-            existing_scope_note["subnotes"] = []
-        
+        if "subnotes" not in existing_phystech_note:
+            existing_phystech_note["subnotes"] = []
+
         # Remove any existing Duration defined list (to allow re-running without duplicates)
-        existing_scope_note["subnotes"] = [
-            subnote for subnote in existing_scope_note["subnotes"]
+        existing_phystech_note["subnotes"] = [
+            subnote for subnote in existing_phystech_note["subnotes"]
             if not (
                 subnote.get("jsonmodel_type") == "note_definedlist" and
                 any(item.get("label") == "Duration" for item in subnote.get("items", []))
             )
         ]
-        
+
         # Append the new Duration defined list
-        existing_scope_note["subnotes"].append(duration_defined_list)
-        logging.info(f"Added Duration defined list to Scope and Contents note: {runtime}")
+        existing_phystech_note["subnotes"].append(duration_defined_list)
+        logging.info(f"Added Duration defined list to Physical Characteristics and Technical Requirements note: {runtime}")
     else:
-        # No Scope and Contents note exists - create a new one with just the duration
-        logging.info("No existing Scope and Contents note found - creating new one")
-        scope_note = {
+        # No phystech note exists - create a new one with just the duration
+        logging.info("No existing Physical Characteristics and Technical Requirements note found - creating new one")
+        phystech_note = {
             "jsonmodel_type": "note_multipart",
-            "type": "scopecontent",
+            "type": "phystech",
             "subnotes": [duration_defined_list]
         }
-        data["notes"].append(scope_note)
-        logging.info(f"Created new Scope and Contents note with Duration: {runtime}")
-    
+        data["notes"].append(phystech_note)
+        logging.info(f"Created new Physical Characteristics and Technical Requirements note with Duration: {runtime}")
+
     return data
 
 def set_extent_physical_details(data):
@@ -426,7 +436,7 @@ def rename_and_update_directories(repository, resource, baseURL, headers,
         # Validate target directory
         if not target_dir or not os.path.isdir(target_dir):
             logging.error(f"Target directory does not exist: {target_dir}")
-            return
+            return 1  # pre-loop setup failure
         working_dir = os.path.abspath(target_dir)
         logging.info(f"Working directory: {working_dir}")
     
@@ -480,101 +490,144 @@ def rename_and_update_directories(repository, resource, baseURL, headers,
     
     if not directory_list:
         logging.warning("No matching directories found to process.")
-        return
-    
+        return 0  # nothing to do is not a failure
+
     logging.info(f"Found {len(directory_list)} directories to process:")
     for directory in directory_list:
         logging.info(f"  - {directory}")
     log_spacing()
 
+    # Honest tallies so the summary and exit code reflect what actually happened.
+    counters = {"selected": len(directory_list), "processed": 0, "updated": 0,
+                "dir_renamed": 0, "mkv_renamed": 0, "skipped": 0, "failed": 0}
+
     # Process each directory
     for directory in directory_list:
-        if use_single_mode:
-            dir_path = os.path.join(parent_dirs[directory], directory)
-        else:
-            dir_path = os.path.join(working_dir, directory)
+        parent_path = parent_dirs[directory] if use_single_mode else working_dir
+        dir_path = os.path.join(parent_path, directory)
+        counters["processed"] += 1
         try:
             logging.info(f"Processing directory: {directory}")
 
-            # Step 1: Get RefID and Archival Object ID (needed for both rename and update)
+            # Step 1: Resolve the ArchivesSpace record (needed for both rename and update)
             refid, archival_object_id = get_refid(directory, repository, resource, baseURL, headers)
             if not refid or not archival_object_id:
-                logging.warning(f"No matching archival object found for directory: {directory}. Skipping.")
+                logging.error(f"No matching archival object found for directory: {directory}. Skipping.")
+                counters["failed"] += 1
                 continue
 
             logging.info(f"RefID: {refid}, Archival Object ID: {archival_object_id}")
 
-            # Step 2: Find the .mkv file and extract its runtime
-            mkv_files = [f for f in os.listdir(dir_path) if f.endswith(".mkv")]
-            if not mkv_files:
-                logging.warning(f"No .mkv file found in directory: {directory}. Skipping.")
-                continue
+            # Step 2: Locate the content .mkv if we'll need it (duration and/or mkv rename).
+            # Rename-only mode (--no-update) does NOT require an .mkv or mediainfo.
+            need_mkv = (not no_update) or (rename_mkv and not no_rename)
+            mkv_filename = None
+            if need_mkv:
+                mkv_files = [f for f in os.listdir(dir_path)
+                             if f.endswith(".mkv") and "_refid_" not in f]
+                if not mkv_files:
+                    logging.error(f"No .mkv file found in directory: {directory}. Skipping.")
+                    counters["failed"] += 1
+                    continue
+                mkv_filename = mkv_files[0]
 
-            mkv_filename = mkv_files[0]
-            mkv_path = os.path.join(dir_path, mkv_filename)
-            video_duration = get_video_duration(mkv_path)
-            logging.info(f"Extracted runtime: {video_duration} for file: {mkv_filename}")
-            
-            if verbose:
-                logging.debug(f"Full MKV path: {mkv_path}")
+            # Step 3: Precompute rename targets and collision-check BEFORE any write,
+            # so a rename can never half-complete after the record was already updated.
+            dir_target = None
+            mkv_target_name = None
+            if not no_rename:
+                dir_target = os.path.join(parent_path, f"{directory}_refid_{refid}")
+                if os.path.exists(dir_target):
+                    logging.error(f"Target directory already exists, refusing to overwrite: "
+                                  f"{os.path.basename(dir_target)}. Skipping.")
+                    counters["failed"] += 1
+                    continue
+                if rename_mkv and mkv_filename:
+                    base, ext = os.path.splitext(mkv_filename)
+                    mkv_target_name = f"{base}_refid_{refid}{ext}"
+                    if os.path.exists(os.path.join(dir_path, mkv_target_name)):
+                        logging.error(f"Target .mkv already exists, refusing to overwrite: "
+                                      f"{mkv_target_name}. Skipping.")
+                        counters["failed"] += 1
+                        continue
 
-            # Step 3: Update ASpace record (unless --no-update)
+            # Step 4: Extract runtime (only when updating the record). A failed/unparseable
+            # read returns None — never write a bogus 00:00:00. Skip the whole directory so
+            # it keeps its original name and is retried later.
+            video_duration = None
+            if not no_update:
+                mkv_path = os.path.join(dir_path, mkv_filename)
+                if verbose:
+                    logging.debug(f"Full MKV path: {mkv_path}")
+                video_duration = get_video_duration(mkv_path)
+                if video_duration is None:
+                    logging.error(f"Could not extract a valid runtime from {mkv_filename}. "
+                                  f"Skipping directory (no update, no rename).")
+                    counters["failed"] += 1
+                    continue
+                logging.info(f"Extracted runtime: {video_duration} for file: {mkv_filename}")
+
+            # Step 5: Update ASpace record (unless --no-update)
             if not no_update:
                 if dry_run:
                     logging.info(f"{Fore.YELLOW}[DRY RUN]{Style.RESET_ALL} Would update ASpace record with duration: {video_duration}")
                     logging.info(f"{Fore.YELLOW}[DRY RUN]{Style.RESET_ALL} Would set extent physical_details to: SD video, color, sound")
                 else:
-                    archival_object_data = fetch_archival_object(repository.strip("/repositories/"), archival_object_id, baseURL, headers)
+                    archival_object_data = fetch_archival_object(REPO_ID, archival_object_id, baseURL, headers)
                     if not archival_object_data:
                         logging.error(f"Failed to fetch archival object for ID: {archival_object_id}. Skipping.")
+                        counters["failed"] += 1
                         continue
 
-                    updated_data = modify_scopecontent_note(archival_object_data, video_duration)
+                    updated_data = modify_phystech_note(archival_object_data, video_duration)
                     updated_data = set_extent_physical_details(updated_data)
-                    if not update_archival_object(repository.strip("/repositories/"), archival_object_id, updated_data, baseURL, headers):
+                    if not update_archival_object(REPO_ID, archival_object_id, updated_data, baseURL, headers):
                         logging.error(f"Failed to update archival object for ID: {archival_object_id}. Skipping.")
+                        counters["failed"] += 1
                         continue
+                    counters["updated"] += 1
 
-            # Step 4: Rename the directory (unless --no-rename)
+            # Step 6: Rename the directory (unless --no-rename). Target collision was
+            # already checked above.
             if not no_rename:
-                new_directory_name = f"{directory}_refid_{refid}"
-                # Use parent_dirs for --single mode, working_dir for normal mode
-                parent_path = parent_dirs[directory] if use_single_mode else working_dir
-                new_dir_path = os.path.join(parent_path, new_directory_name)
-                
                 if dry_run:
-                    logging.info(f"{Fore.YELLOW}[DRY RUN]{Style.RESET_ALL} Would rename directory: {directory} → {new_directory_name}")
+                    logging.info(f"{Fore.YELLOW}[DRY RUN]{Style.RESET_ALL} Would rename directory: {directory} → {os.path.basename(dir_target)}")
                 else:
-                    os.rename(dir_path, new_dir_path)
-                    logging.info(f"Directory renamed to: {new_directory_name}")
-                    # Update dir_path for potential mkv rename
-                    dir_path = new_dir_path
+                    os.rename(dir_path, dir_target)
+                    logging.info(f"Directory renamed to: {os.path.basename(dir_target)}")
+                    dir_path = dir_target  # mkv rename below operates on the renamed dir
+                    counters["dir_renamed"] += 1
 
-            # Step 5: Rename the .mkv file (if --rename-mkv flag is set)
-            if rename_mkv and not no_rename:
-                # Build new mkv filename with ref_id
-                mkv_base, mkv_ext = os.path.splitext(mkv_filename)
-                new_mkv_filename = f"{mkv_base}_refid_{refid}{mkv_ext}"
-                
-                # Use updated dir_path if directory was renamed
+            # Step 7: Rename the .mkv file (if --rename-mkv). Target collision was already checked.
+            if rename_mkv and not no_rename and mkv_target_name:
                 old_mkv_path = os.path.join(dir_path, mkv_filename)
-                new_mkv_path = os.path.join(dir_path, new_mkv_filename)
-                
+                new_mkv_path = os.path.join(dir_path, mkv_target_name)
                 if dry_run:
-                    logging.info(f"{Fore.YELLOW}[DRY RUN]{Style.RESET_ALL} Would rename .mkv: {mkv_filename} → {new_mkv_filename}")
+                    logging.info(f"{Fore.YELLOW}[DRY RUN]{Style.RESET_ALL} Would rename .mkv: {mkv_filename} → {mkv_target_name}")
                 else:
                     os.rename(old_mkv_path, new_mkv_path)
-                    logging.info(f".mkv file renamed to: {new_mkv_filename}")
+                    logging.info(f".mkv file renamed to: {mkv_target_name}")
+                    counters["mkv_renamed"] += 1
 
         except Exception as e:
             logging.error(f"An error occurred while processing directory {directory}: {e}")
+            counters["failed"] += 1
 
         log_spacing()  # Add spacing between directories
-    
+
     # Summary
     logging.info(f"{Fore.GREEN}Processing complete!{Style.RESET_ALL}")
+    logging.info(f"  Selected:     {counters['selected']}")
+    logging.info(f"  Processed:    {counters['processed']}")
+    logging.info(f"  Updated:      {counters['updated']}")
+    logging.info(f"  Dirs renamed: {counters['dir_renamed']}")
+    logging.info(f"  MKVs renamed: {counters['mkv_renamed']}")
+    failed_color = Fore.RED if counters["failed"] else Fore.GREEN
+    logging.info(f"{failed_color}  Failed:       {counters['failed']}{Style.RESET_ALL}")
     if dry_run:
         logging.info(f"{Fore.YELLOW}This was a DRY RUN - no actual changes were made{Style.RESET_ALL}")
+
+    return counters["failed"]
 
 def fetch_archival_object(repository_id, object_id, baseURL, headers):
     """
@@ -757,15 +810,18 @@ def main():
     client = ArchivesSpaceClient()
     if not client.login():
         logging.error("Authentication failed! Exiting the script.")
-        return  # Exit the function if authentication fails
+        sys.exit(1)  # pre-loop failure - nothing was processed
 
     # Log successful login
     log_spacing()  # Add spacing for log readability
 
+    # Default to a failure if processing raises before returning a count, so an
+    # unexpected crash can never look like a clean run.
+    failed_count = 1
     try:
         # Step 2: Process directories and perform updates
         logging.info("Starting to process directories...")
-        rename_and_update_directories(
+        failed_count = rename_and_update_directories(
             repository=repository,
             resource=resource,
             baseURL=client.base_url,
@@ -796,6 +852,9 @@ def main():
         log_spacing()
         logging.info(f"Processing Time: {elapsed_str}")
         logging.info(f"Log file: {LOG_FILE}")
+
+    # Non-zero exit when any directory failed, so automation/monitoring can detect it.
+    sys.exit(1 if failed_count else 0)
 
 if __name__ == "__main__":
     main()  # Run the main function

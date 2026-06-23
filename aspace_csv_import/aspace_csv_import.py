@@ -297,6 +297,15 @@ def validate_csv_before_import(filename: str) -> Tuple[bool, List[str], List[str
 # ARCHIVESSPACE SESSION MANAGEMENT
 # ==============================
 
+class DuplicateStop(Exception):
+    """Raised in --fail-on-duplicate mode to halt the import on the first duplicate.
+
+    A dedicated type so it is not swallowed by the broad per-row exception handler
+    and can be distinguished from ordinary row errors by process_csv_file.
+    """
+    pass
+
+
 class ArchivesSpaceClient:
     """Handles all ArchivesSpace API interactions."""
     
@@ -435,21 +444,49 @@ class ArchivesSpaceClient:
         logging.warning(f"Parent object not found with ref_id: {parent_ref_id}")
         return None
     
-    def get_extent_types(self) -> List[str]:
-        """Get list of valid extent types from ArchivesSpace."""
+    def get_extent_types(self) -> Optional[List[str]]:
+        """Get the list of valid extent types from ArchivesSpace.
+
+        Returns the controlled-vocabulary values, or None if they could not be
+        retrieved. Callers MUST treat None as fatal and abort — silently falling
+        back to a stale hard-coded list could let an extent type the live instance
+        no longer accepts slip into a record (fail closed, not open).
+        """
         try:
-            endpoint = "/config/enumerations/14"
-            result = self.make_request("GET", endpoint)
+            # Resolve the extent_extent_type enumeration by name — enumeration IDs
+            # are not stable across ArchivesSpace instances.
+            enums = self.make_request("GET", "/config/enumerations")
+            enum_id = None
+            if isinstance(enums, list):
+                for enum in enums:
+                    if enum.get('name') == 'extent_extent_type':
+                        enum_id = enum.get('id')
+                        break
+            # Guarded fallback to the conventional ID 14, but only if it really is
+            # the extent_extent_type enumeration on this instance.
+            if enum_id is None:
+                candidate = self.make_request("GET", "/config/enumerations/14")
+                if candidate and candidate.get('name') == 'extent_extent_type':
+                    enum_id = 14
+            if enum_id is None:
+                logging.error("Could not locate the 'extent_extent_type' enumeration in ArchivesSpace")
+                return None
+            result = self.make_request("GET", f"/config/enumerations/{enum_id}")
             if result and 'enumeration_values' in result:
-                return [v['value'] for v in result['enumeration_values']]
+                return [v['value'] for v in result['enumeration_values']] or None
         except (requests.RequestException, KeyError, TypeError) as e:
-            logging.warning(f"Could not fetch extent types from API: {e}")
-        return VALID_EXTENT_TYPES
-    
+            logging.error(f"Could not fetch extent types from API: {e}")
+        return None
+
     def validate_extent_type(self, extent_type: str) -> bool:
-        """Validate that an extent type exists in ArchivesSpace."""
-        if not hasattr(self, '_valid_extent_types'):
+        """Validate that an extent type exists in ArchivesSpace.
+
+        Fails closed: if the controlled vocabulary is unavailable, every extent
+        type is treated as invalid rather than assumed valid."""
+        if not getattr(self, '_valid_extent_types', None):
             self._valid_extent_types = self.get_extent_types()
+        if not self._valid_extent_types:
+            return False
         return extent_type in self._valid_extent_types
     
     def create_top_container(self, indicator: str) -> Optional[str]:
@@ -877,7 +914,7 @@ def process_csv_row(row: Dict, row_num: int, client: ArchivesSpaceClient,
             if duplicate_mode == 'fail':
                 result["status"] = "error"
                 result["message"] = f"Duplicate found: {catalog_number}"
-                raise Exception(f"Duplicate component ID: {catalog_number}")
+                raise DuplicateStop(f"Duplicate component ID: {catalog_number}")
                 
             elif duplicate_mode == 'skip':
                 result["status"] = "skipped"
@@ -949,11 +986,14 @@ def process_csv_row(row: Dict, row_num: int, client: ArchivesSpaceClient,
             result["message"] = "Failed to create"
             logging.error(f"Failed to create archival object: {catalog_number}")
             
+    except DuplicateStop:
+        # Must propagate to process_csv_file to halt the run; never swallow it here.
+        raise
     except Exception as e:
         result["status"] = "error"
         result["message"] = str(e)
         logging.error(f"Error processing row {row_num}: {str(e)}")
-    
+
     return result
 
 def process_csv_file(filename: str, client: ArchivesSpaceClient, 
@@ -1007,23 +1047,25 @@ def process_csv_file(filename: str, client: ArchivesSpaceClient,
                     if row_num % BATCH_SIZE == 0 and not dry_run:
                         time.sleep(1)
                         
+                except DuplicateStop as stop:
+                    # --fail-on-duplicate: record this row and stop processing, but
+                    # break (do not re-raise) so the caller still writes the reports.
+                    logging.error(f"Stopping import due to duplicate at row {row_num}")
+                    summary["failed"] += 1
+                    results.append({
+                        "row_number": row_num,
+                        "catalog_number": row.get('CATALOG_NUMBER', ''),
+                        "title": row.get('TITLE', ''),
+                        "status": "error",
+                        "message": str(stop),
+                        "uri": None
+                    })
+                    print_status("error", f"{row.get('CATALOG_NUMBER', '')} - {stop}")
+                    break
                 except Exception as row_error:
-                    if duplicate_mode == 'fail' and 'Duplicate component ID' in str(row_error):
-                        logging.error(f"Stopping import due to duplicate at row {row_num}")
-                        summary["failed"] += 1
-                        results.append({
-                            "row_number": row_num,
-                            "catalog_number": row.get('CATALOG_NUMBER', ''),
-                            "title": row.get('TITLE', ''),
-                            "status": "error",
-                            "message": str(row_error),
-                            "uri": None
-                        })
-                        raise
-                    else:
-                        logging.error(f"Unexpected error at row {row_num}: {str(row_error)}")
-                        summary["failed"] += 1
-                        results.append({
+                    logging.error(f"Unexpected error at row {row_num}: {str(row_error)}")
+                    summary["failed"] += 1
+                    results.append({
                             "row_number": row_num,
                             "catalog_number": row.get('CATALOG_NUMBER', ''),
                             "title": row.get('TITLE', ''),
@@ -1283,8 +1325,15 @@ def main():
         sys.exit(1)
     print_status("success", "Authenticated")
     
-    # Load extent types
+    # Load extent types (fail closed: abort if the live controlled vocabulary
+    # cannot be retrieved, rather than silently trusting a stale local list).
     extent_types = client.get_extent_types()
+    if not extent_types:
+        print_status("error", "Could not load the 'extent_extent_type' controlled vocabulary "
+                              "from ArchivesSpace. Aborting (run check_extent_types.py to diagnose).")
+        client.logout()
+        sys.exit(1)
+    client._valid_extent_types = extent_types  # cache so validate_extent_type does not refetch
     print_status("info", f"Loaded {len(extent_types)} valid extent types")
     
     print_section("PROCESSING RECORDS")
