@@ -159,7 +159,12 @@ def in_scope(archival_object):
 
 def update_archival_object(session, uri, archival_object):
     """Write a (full, already-modified) archival object back. Refuses to write
-    anything outside the configured resource. Returns True on success."""
+    if the payload's own uri doesn't match the endpoint, or if the object is not
+    in the configured resource. Returns True on success."""
+    payload_uri = archival_object.get("uri")
+    if payload_uri != uri:
+        print(f"REFUSING to write {uri}: payload uri {payload_uri!r} does not match endpoint")
+        return False
     if not in_scope(archival_object):
         print(f"REFUSING to write {uri}: not in {RESOURCE_URI} (scope lock)")
         return False

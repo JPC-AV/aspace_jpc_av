@@ -31,6 +31,7 @@ Usage:
 import argparse
 import sys
 
+import ui
 from aspace_session import (ASpaceSession, enumerate_archival_object_uris,
                             update_archival_object, RESOURCE_URI, WalkError)
 from dacs_dates import expression_for, is_blank, STYLES
@@ -78,29 +79,38 @@ def main():
                         help="Also list records skipped because the date yields no expression")
     args = parser.parse_args()
 
-    mode = "APPLY (writing changes)" if args.apply else "REPORT ONLY (no changes)"
-    print(f"Resource: {RESOURCE_URI}")
-    print(f"Style:    {args.style}")
-    print(f"Mode:     {mode}\n")
+    ui.banner("JPC-AV DATE EXPRESSIONS  ·  FILL EMPTY", "\U0001F4C5")
+    ui.section("\U0001F4CB  SCAN")
+    ui.stat("Resource", RESOURCE_URI, ui.CYAN)
+    ui.stat("Style", args.style, ui.CYAN)
+    ui.stat("Mode", "APPLY (writing changes)" if args.apply else "REPORT ONLY (no changes)",
+            ui.RED if args.apply else ui.GREEN)
 
     session = ASpaceSession()
     if not session.login():
         sys.exit(1)
 
     counts = {"scanned": 0, "records_to_fill": 0, "dates_to_fill": 0,
-              "filled": 0, "partial": 0, "missing_begin": 0, "failed": 0}
+              "filled": 0, "partial": 0, "missing_begin": 0,
+              "skipped_changed": 0, "read_failures": 0, "write_failures": 0}
+    # Store only the URIs to write. The apply phase re-fetches each one fresh
+    # (rather than reusing the planning copy) so a concurrent edit during the
+    # scan can't be clobbered by a stale full-object payload.
+    write_uris = []
     try:
+        # --- Phase 1: read + plan the entire resource. No writes happen here. ---
         try:
             uris = enumerate_archival_object_uris(session)
         except WalkError as e:
-            print(f"ERROR: {e}")
+            print(f"\n  {ui.RED}{ui.BOLD}ERROR: {e}{ui.RESET}\n")
             sys.exit(1)
-        print(f"Found {len(uris)} archival object(s) in the resource.\n")
+        ui.stat("Objects found", f"{len(uris):,}", ui.GREEN)
 
+        ui.section("\U0001F5D3️   RECORDS TO FILL")
         for uri in uris:
             ao = session.get(uri)
             if not ao:
-                counts["failed"] += 1
+                counts["read_failures"] += 1
                 continue
             counts["scanned"] += 1
 
@@ -108,51 +118,103 @@ def main():
             if partials:
                 counts["partial"] += len(partials)
                 if args.verbose:
-                    print(f"  (skip) {ao.get('ref_id')} [{ao.get('level')}] "
-                          f"{ao.get('title')} — non-full begin: {', '.join(partials)}")
+                    ui.line(f"{ui.YELLOW}(skip){ui.RESET} {ui.DIM}[{ao.get('level')}] "
+                            f"{ao.get('title')} — non-full begin: {', '.join(partials)}{ui.RESET}")
             if missing:
                 counts["missing_begin"] += len(missing)
                 if args.verbose:
-                    print(f"  (anomaly) {ao.get('ref_id')} [{ao.get('level')}] "
-                          f"{ao.get('title')} — blank expression AND blank begin: "
-                          f"{', '.join(missing)}")
+                    ui.line(f"{ui.RED}(anomaly){ui.RESET} {ui.DIM}[{ao.get('level')}] "
+                            f"{ao.get('title')} — blank expression AND blank begin: "
+                            f"{', '.join(missing)}{ui.RESET}")
             if not fills:
                 continue
 
-            # Report this record: ref_id, level, title
             counts["records_to_fill"] += 1
             counts["dates_to_fill"] += len(fills)
-            print(f"{ao.get('ref_id')}  [{ao.get('level')}]  {ao.get('title')}")
+            ui.line(f"{ui.WHITE}{ui.BOLD}{ao.get('title')}{ui.RESET}  "
+                    f"{ui.DIM}[{ao.get('level')}] {ao.get('ref_id')}{ui.RESET}")
             for _, begin, proposed in fills:
-                print(f"    {begin}  ->  \"{proposed}\"")
+                ui.line(f"    {ui.DIM}{begin}{ui.RESET}  {ui.ARROW}  {ui.GREEN}\"{proposed}\"{ui.RESET}")
+            write_uris.append(uri)
 
-            if args.apply:
-                for idx, _, proposed in fills:
-                    ao["dates"][idx]["expression"] = proposed
-                if update_archival_object(session, uri, ao):
-                    counts["filled"] += len(fills)
-                    print("    written")
-                else:
-                    counts["failed"] += 1
-                    print("    FAILED to write")
+        # --- Phase 2: apply, only after a clean and COMPLETE read pass. ---
+        if args.apply:
+            if counts["read_failures"]:
+                ui.section(f"{ui.STOP}  WRITES SKIPPED")
+                ui.line(f"{ui.RED}Refusing to apply: {counts['read_failures']} record(s) could not "
+                        f"be read,{ui.RESET}")
+                ui.line(f"{ui.RED}so the resource was not fully planned. No changes written.{ui.RESET}")
+            elif write_uris:
+                ui.section("✍️   APPLYING")
+                total = len(write_uris)
+                for n, uri in enumerate(write_uris, 1):
+                    # Re-fetch fresh and re-plan on the current state so a concurrent
+                    # edit during the scan is never overwritten by a stale payload
+                    # (and we post with a current lock_version).
+                    fresh = session.get(uri)
+                    if not fresh:
+                        counts["write_failures"] += 1
+                        print()
+                        ui.line(f"{ui.RED}{ui.BOLD}Could not re-fetch {uri} during apply — "
+                                f"stopping; no further writes.{ui.RESET}")
+                        break
+                    fresh_fills, _, _ = plan_fills(fresh, args.style)
+                    if not fresh_fills:
+                        # The record changed since the scan (already filled, or its
+                        # begin is no longer a full date) — skip rather than clobber.
+                        counts["skipped_changed"] += 1
+                        ui.progress_bar(n, total)
+                        continue
+                    for idx, _, proposed in fresh_fills:
+                        fresh["dates"][idx]["expression"] = proposed
+                    if update_archival_object(session, uri, fresh):
+                        counts["filled"] += len(fresh_fills)
+                        ui.progress_bar(n, total)
+                    else:
+                        # Stop on the first write failure rather than plowing ahead.
+                        counts["write_failures"] += 1
+                        print()
+                        ui.line(f"{ui.RED}{ui.BOLD}FAILED to write {uri} — stopping; "
+                                f"no further writes.{ui.RESET}")
+                        break
+                print()
     finally:
         session.logout()
 
-    print("\n--- Summary ---")
-    print(f"  Scanned objects:        {counts['scanned']}")
-    print(f"  Records w/ empty expr:  {counts['records_to_fill']}")
-    print(f"  Date subrecords to fill:{counts['dates_to_fill']}")
-    if args.apply:
-        print(f"  Expressions written:    {counts['filled']}")
-    print(f"  Skipped (non-full date):{counts['partial']}")
-    print(f"  Anomaly (no begin date):{counts['missing_begin']}")
-    print(f"  Failed:                 {counts['failed']}")
-    if counts["partial"] or counts["missing_begin"]:
-        print("  (re-run with --verbose to list skipped/anomaly records)")
-    if not args.apply and counts["records_to_fill"]:
-        print("\nReport only — re-run with --apply to write these expressions.")
+    failed = bool(counts["read_failures"] or counts["write_failures"])
 
-    sys.exit(1 if counts["failed"] else 0)
+    ui.section("\U0001F4CA  SUMMARY")
+    ui.stat("Scanned objects", f"{counts['scanned']:,}")
+    ui.stat("Records w/ empty expr", f"{counts['records_to_fill']:,}", ui.CYAN)
+    ui.stat("Date subrecords to fill", f"{counts['dates_to_fill']:,}", ui.CYAN)
+    if args.apply:
+        ui.stat("Expressions written", f"{counts['filled']:,}", ui.GREEN)
+        ui.stat("Skipped (changed in scan)", f"{counts['skipped_changed']:,}",
+                ui.YELLOW if counts["skipped_changed"] else ui.DIM)
+    ui.stat("Skipped (non-full date)", f"{counts['partial']:,}",
+            ui.YELLOW if counts["partial"] else ui.DIM)
+    ui.stat("Anomaly (no begin date)", f"{counts['missing_begin']:,}",
+            ui.YELLOW if counts["missing_begin"] else ui.DIM)
+    ui.stat("Read failures", f"{counts['read_failures']:,}",
+            ui.RED if counts["read_failures"] else ui.DIM)
+    ui.stat("Write failures", f"{counts['write_failures']:,}",
+            ui.RED if counts["write_failures"] else ui.DIM)
+    if counts["partial"] or counts["missing_begin"]:
+        ui.line(f"{ui.DIM}(re-run with --verbose to list skipped/anomaly records){ui.RESET}")
+    if args.apply and counts["read_failures"]:
+        ui.line(f"{ui.YELLOW}NOTE: writes were skipped because the read pass was incomplete.{ui.RESET}")
+
+    if args.apply and not failed:
+        ui.done_banner([f"{ui.CHECK}  COMPLETE",
+                        f"Filled {counts['filled']} expression(s) "
+                        f"across {counts['records_to_fill']} record(s)"])
+    elif not args.apply and counts["records_to_fill"]:
+        print()
+        ui.line(f"{ui.BOLD}Report only{ui.RESET} — re-run with {ui.GREEN}--apply{ui.RESET} "
+                f"to write these expressions.")
+        print()
+
+    sys.exit(1 if failed else 0)
 
 
 if __name__ == "__main__":

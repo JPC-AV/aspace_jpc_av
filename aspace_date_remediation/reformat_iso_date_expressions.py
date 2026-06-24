@@ -24,6 +24,7 @@ Usage:
 import argparse
 import sys
 
+import ui
 from aspace_session import (ASpaceSession, enumerate_archival_object_uris,
                             update_archival_object, RESOURCE_URI, WalkError)
 from dacs_dates import iso_to_dacs, is_iso_expression
@@ -59,28 +60,37 @@ def main():
                         help="Also list ISO-looking expressions that were NOT converted")
     args = parser.parse_args()
 
-    mode = "APPLY (writing changes)" if args.apply else "REPORT ONLY (no changes)"
-    print(f"Resource: {RESOURCE_URI}")
-    print(f"Mode:     {mode}\n")
+    ui.banner("JPC-AV DATE EXPRESSIONS  ·  REFORMAT ISO", "\U0001F4C5")
+    ui.section("\U0001F4CB  SCAN")
+    ui.stat("Resource", RESOURCE_URI, ui.CYAN)
+    ui.stat("Mode", "APPLY (writing changes)" if args.apply else "REPORT ONLY (no changes)",
+            ui.RED if args.apply else ui.GREEN)
 
     session = ASpaceSession()
     if not session.login():
         sys.exit(1)
 
     counts = {"scanned": 0, "records_to_reformat": 0, "dates_to_reformat": 0,
-              "reformatted": 0, "anomalies": 0, "failed": 0}
+              "reformatted": 0, "anomalies": 0, "skipped_changed": 0,
+              "read_failures": 0, "write_failures": 0}
+    # Store only the URIs to write. The apply phase re-fetches each one fresh
+    # (rather than reusing the planning copy) so a concurrent edit during the
+    # scan can't be clobbered by a stale full-object payload.
+    write_uris = []
     try:
+        # --- Phase 1: read + plan the entire resource. No writes happen here. ---
         try:
             uris = enumerate_archival_object_uris(session)
         except WalkError as e:
-            print(f"ERROR: {e}")
+            print(f"\n  {ui.RED}{ui.BOLD}ERROR: {e}{ui.RESET}\n")
             sys.exit(1)
-        print(f"Found {len(uris)} archival object(s) in the resource.\n")
+        ui.stat("Objects found", f"{len(uris):,}", ui.GREEN)
 
+        ui.section("\U0001F5D3️   EXPRESSIONS TO REFORMAT")
         for uri in uris:
             ao = session.get(uri)
             if not ao:
-                counts["failed"] += 1
+                counts["read_failures"] += 1
                 continue
             counts["scanned"] += 1
 
@@ -88,42 +98,95 @@ def main():
             if anomalies:
                 counts["anomalies"] += len(anomalies)
                 if args.verbose:
-                    print(f"  (skip) {ao.get('ref_id')} [{ao.get('level')}] "
-                          f"{ao.get('title')} — ISO-looking, not converted: {', '.join(anomalies)}")
+                    ui.line(f"{ui.YELLOW}(skip){ui.RESET} {ui.DIM}[{ao.get('level')}] "
+                            f"{ao.get('title')} — ISO-looking, not converted: "
+                            f"{', '.join(anomalies)}{ui.RESET}")
             if not reformats:
                 continue
 
-            # Report this record: ref_id, level, title
             counts["records_to_reformat"] += 1
             counts["dates_to_reformat"] += len(reformats)
-            print(f"{ao.get('ref_id')}  [{ao.get('level')}]  {ao.get('title')}")
+            ui.line(f"{ui.WHITE}{ui.BOLD}{ao.get('title')}{ui.RESET}  "
+                    f"{ui.DIM}[{ao.get('level')}] {ao.get('ref_id')}{ui.RESET}")
             for _, old_expr, new_expr in reformats:
-                print(f"    \"{old_expr}\"  ->  \"{new_expr}\"")
+                ui.line(f"    {ui.DIM}\"{old_expr}\"{ui.RESET}  {ui.ARROW}  "
+                        f"{ui.GREEN}\"{new_expr}\"{ui.RESET}")
+            write_uris.append(uri)
 
-            if args.apply:
-                for idx, _, new_expr in reformats:
-                    ao["dates"][idx]["expression"] = new_expr
-                if update_archival_object(session, uri, ao):
-                    counts["reformatted"] += len(reformats)
-                    print("    written")
-                else:
-                    counts["failed"] += 1
-                    print("    FAILED to write")
+        # --- Phase 2: apply, only after a clean and COMPLETE read pass. ---
+        if args.apply:
+            if counts["read_failures"]:
+                ui.section(f"{ui.STOP}  WRITES SKIPPED")
+                ui.line(f"{ui.RED}Refusing to apply: {counts['read_failures']} record(s) could not "
+                        f"be read,{ui.RESET}")
+                ui.line(f"{ui.RED}so the resource was not fully planned. No changes written.{ui.RESET}")
+            elif write_uris:
+                ui.section("✍️   APPLYING")
+                total = len(write_uris)
+                for n, uri in enumerate(write_uris, 1):
+                    # Re-fetch fresh and re-plan on the current state so a concurrent
+                    # edit during the scan is never overwritten by a stale payload
+                    # (and we post with a current lock_version).
+                    fresh = session.get(uri)
+                    if not fresh:
+                        counts["write_failures"] += 1
+                        print()
+                        ui.line(f"{ui.RED}{ui.BOLD}Could not re-fetch {uri} during apply — "
+                                f"stopping; no further writes.{ui.RESET}")
+                        break
+                    fresh_reformats, _ = plan_reformats(fresh)
+                    if not fresh_reformats:
+                        # The expression changed since the scan (no longer a bare ISO
+                        # date) — skip rather than clobber.
+                        counts["skipped_changed"] += 1
+                        ui.progress_bar(n, total)
+                        continue
+                    for idx, _, new_expr in fresh_reformats:
+                        fresh["dates"][idx]["expression"] = new_expr
+                    if update_archival_object(session, uri, fresh):
+                        counts["reformatted"] += len(fresh_reformats)
+                        ui.progress_bar(n, total)
+                    else:
+                        # Stop on the first write failure rather than plowing ahead.
+                        counts["write_failures"] += 1
+                        print()
+                        ui.line(f"{ui.RED}{ui.BOLD}FAILED to write {uri} — stopping; "
+                                f"no further writes.{ui.RESET}")
+                        break
+                print()
     finally:
         session.logout()
 
-    print("\n--- Summary ---")
-    print(f"  Scanned objects:           {counts['scanned']}")
-    print(f"  Records w/ ISO expression: {counts['records_to_reformat']}")
-    print(f"  Date subrecords to change: {counts['dates_to_reformat']}")
-    if args.apply:
-        print(f"  Expressions rewritten:     {counts['reformatted']}")
-    print(f"  Anomalies (not converted): {counts['anomalies']}")
-    print(f"  Failed:                    {counts['failed']}")
-    if not args.apply and counts["records_to_reformat"]:
-        print("\nReport only — re-run with --apply to rewrite these expressions.")
+    failed = bool(counts["read_failures"] or counts["write_failures"])
 
-    sys.exit(1 if counts["failed"] else 0)
+    ui.section("\U0001F4CA  SUMMARY")
+    ui.stat("Scanned objects", f"{counts['scanned']:,}")
+    ui.stat("Records w/ ISO expression", f"{counts['records_to_reformat']:,}", ui.CYAN)
+    ui.stat("Date subrecords to change", f"{counts['dates_to_reformat']:,}", ui.CYAN)
+    if args.apply:
+        ui.stat("Expressions rewritten", f"{counts['reformatted']:,}", ui.GREEN)
+        ui.stat("Skipped (changed in scan)", f"{counts['skipped_changed']:,}",
+                ui.YELLOW if counts["skipped_changed"] else ui.DIM)
+    ui.stat("Anomalies (not converted)", f"{counts['anomalies']:,}",
+            ui.YELLOW if counts["anomalies"] else ui.DIM)
+    ui.stat("Read failures", f"{counts['read_failures']:,}",
+            ui.RED if counts["read_failures"] else ui.DIM)
+    ui.stat("Write failures", f"{counts['write_failures']:,}",
+            ui.RED if counts["write_failures"] else ui.DIM)
+    if args.apply and counts["read_failures"]:
+        ui.line(f"{ui.YELLOW}NOTE: writes were skipped because the read pass was incomplete.{ui.RESET}")
+
+    if args.apply and not failed:
+        ui.done_banner([f"{ui.CHECK}  COMPLETE",
+                        f"Reformatted {counts['reformatted']} expression(s) "
+                        f"across {counts['records_to_reformat']} record(s)"])
+    elif not args.apply and counts["records_to_reformat"]:
+        print()
+        ui.line(f"{ui.BOLD}Report only{ui.RESET} — re-run with {ui.GREEN}--apply{ui.RESET} "
+                f"to rewrite these expressions.")
+        print()
+
+    sys.exit(1 if failed else 0)
 
 
 if __name__ == "__main__":
