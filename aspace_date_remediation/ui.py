@@ -36,12 +36,23 @@ _BANNER_W = 48
 
 
 def _clean(text):
-    """On a TTY, return text unchanged. Off-TTY (piped/redirected), strip any
-    non-ASCII glyphs/emoji so log files stay strict-ASCII; collapse whitespace."""
+    """For section/banner TITLES. On a TTY, unchanged. Off-TTY, strip non-ASCII
+    glyphs/emoji and collapse whitespace to a clean single-line label."""
     if sys.stdout.isatty():
         return text
     ascii_only = "".join(c for c in text if ord(c) < 128)
     return " ".join(ascii_only.split())
+
+
+def _ascii_inline(text):
+    """For BODY lines. On a TTY, unchanged. Off-TTY, transliterate the decorative
+    punctuation this script injects (dashes, arrow) to ASCII but PRESERVE
+    indentation and any non-ASCII in record data (titles/expressions)."""
+    if sys.stdout.isatty():
+        return text
+    for src, dst in (("—", "-"), ("–", "-"), ("→", "->")):
+        text = text.replace(src, dst)
+    return text
 
 
 def banner(title, emoji=""):
@@ -71,7 +82,7 @@ def stat(label, value, color=WHITE):
 
 def line(text=""):
     """A pipe-prefixed body line (text may contain its own color codes)."""
-    print(f"  {DIM}{PIPE}{RESET}  {text}")
+    print(f"  {DIM}{PIPE}{RESET}  {_ascii_inline(text)}")
 
 
 def progress_bar(done, total):
