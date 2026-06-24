@@ -79,3 +79,20 @@ def expression_for(begin, style):
     if style == "dacs":
         return dacs
     raise ValueError(f"unknown style: {style!r}")
+
+
+def date_identity(date):
+    """Identifying fields of a date subrecord, used to re-match the same entry
+    after a re-fetch (the embedded list index is not stable across edits)."""
+    return (date.get("date_type"), date.get("label"),
+            date.get("begin"), date.get("end"))
+
+
+def expression_unchanged(current, expected):
+    """True if a date's current expression still equals the planned 'old' value
+    captured during the scan: blank matches blank; otherwise exact (trimmed).
+    Used at apply time so a change is only written if the field is still in the
+    exact state the report showed."""
+    if is_blank(expected):
+        return is_blank(current)
+    return str(current or "").strip() == str(expected).strip()

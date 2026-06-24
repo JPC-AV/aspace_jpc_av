@@ -34,21 +34,24 @@ import sys
 import ui
 from aspace_session import (ASpaceSession, enumerate_archival_object_uris,
                             update_archival_object, RESOURCE_URI, WalkError)
-from dacs_dates import expression_for, is_blank, STYLES
+from dacs_dates import (expression_for, is_blank, STYLES,
+                        date_identity, expression_unchanged)
 
 
 def plan_fills(ao, style):
     """Return (fills, partials, missing) for one archival object, given the style.
 
     Considers only single dates whose expression is blank.
-    fills    = list of (date_index, begin, proposed_expression) ready to write
+    fills    = list of change dicts {identity, old_expression, new_expression,
+               begin} — each captures the exact target date and the value to
+               write, so apply can re-verify the old state before writing.
     partials = begin values that ARE present but yield no expression in either
                style (year-only / year-month / invalid date) — flagged, not touched
     missing  = labels of dates that have a blank expression AND a blank begin —
                an anomaly (a date subrecord with nothing to go on)
     """
     fills, partials, missing = [], [], []
-    for i, date in enumerate(ao.get("dates", [])):
+    for date in ao.get("dates", []):
         if date.get("date_type") != "single":
             continue
         if not is_blank(date.get("expression")):
@@ -59,7 +62,12 @@ def plan_fills(ao, style):
             continue
         proposed = expression_for(begin, style)
         if proposed:
-            fills.append((i, begin, proposed))
+            fills.append({
+                "identity": date_identity(date),
+                "old_expression": date.get("expression"),
+                "new_expression": proposed,
+                "begin": begin,
+            })
         else:
             partials.append(begin)
     return fills, partials, missing
@@ -93,10 +101,10 @@ def main():
     counts = {"scanned": 0, "records_to_fill": 0, "dates_to_fill": 0,
               "filled": 0, "partial": 0, "missing_begin": 0,
               "skipped_changed": 0, "read_failures": 0, "write_failures": 0}
-    # Store only the URIs to write. The apply phase re-fetches each one fresh
-    # (rather than reusing the planning copy) so a concurrent edit during the
-    # scan can't be clobbered by a stale full-object payload.
-    write_uris = []
+    # Store (uri, planned-changes) — NOT the full objects. The apply phase
+    # re-fetches each record fresh and writes only these reviewed changes, and
+    # only where the date's old state is still unchanged.
+    write_plan = []
     try:
         # --- Phase 1: read + plan the entire resource. No writes happen here. ---
         try:
@@ -133,9 +141,10 @@ def main():
             counts["dates_to_fill"] += len(fills)
             ui.line(f"{ui.WHITE}{ui.BOLD}{ao.get('title')}{ui.RESET}  "
                     f"{ui.DIM}[{ao.get('level')}] {ao.get('ref_id')}{ui.RESET}")
-            for _, begin, proposed in fills:
-                ui.line(f"    {ui.DIM}{begin}{ui.RESET}  {ui.ARROW}  {ui.GREEN}\"{proposed}\"{ui.RESET}")
-            write_uris.append(uri)
+            for ch in fills:
+                ui.line(f"    {ui.DIM}{ch['begin']}{ui.RESET}  {ui.ARROW}  "
+                        f"{ui.GREEN}\"{ch['new_expression']}\"{ui.RESET}")
+            write_plan.append((uri, fills))
 
         # --- Phase 2: apply, only after a clean and COMPLETE read pass. ---
         if args.apply:
@@ -144,13 +153,14 @@ def main():
                 ui.line(f"{ui.RED}Refusing to apply: {counts['read_failures']} record(s) could not "
                         f"be read,{ui.RESET}")
                 ui.line(f"{ui.RED}so the resource was not fully planned. No changes written.{ui.RESET}")
-            elif write_uris:
+            elif write_plan:
                 ui.section("✍️   APPLYING")
-                total = len(write_uris)
-                for n, uri in enumerate(write_uris, 1):
-                    # Re-fetch fresh and re-plan on the current state so a concurrent
-                    # edit during the scan is never overwritten by a stale payload
-                    # (and we post with a current lock_version).
+                total = len(write_plan)
+                for n, (uri, planned) in enumerate(write_plan, 1):
+                    # Re-fetch fresh (current data + lock_version), then write ONLY
+                    # the reviewed changes, and only to dates whose old state is
+                    # still exactly as the report showed. Anything that drifted is
+                    # skipped rather than overwritten with an unreviewed value.
                     fresh = session.get(uri)
                     if not fresh:
                         counts["write_failures"] += 1
@@ -158,17 +168,23 @@ def main():
                         ui.line(f"{ui.RED}{ui.BOLD}Could not re-fetch {uri} during apply — "
                                 f"stopping; no further writes.{ui.RESET}")
                         break
-                    fresh_fills, _, _ = plan_fills(fresh, args.style)
-                    if not fresh_fills:
-                        # The record changed since the scan (already filled, or its
-                        # begin is no longer a full date) — skip rather than clobber.
-                        counts["skipped_changed"] += 1
+                    fresh_dates = fresh.get("dates", [])
+                    applied = 0
+                    for ch in planned:
+                        idxs = [i for i, d in enumerate(fresh_dates)
+                                if date_identity(d) == ch["identity"]
+                                and expression_unchanged(d.get("expression"), ch["old_expression"])]
+                        if len(idxs) == 1:
+                            fresh_dates[idxs[0]]["expression"] = ch["new_expression"]
+                            applied += 1
+                        else:
+                            # Zero matches (changed/removed) or ambiguous (>1) — skip.
+                            counts["skipped_changed"] += 1
+                    if applied == 0:
                         ui.progress_bar(n, total)
                         continue
-                    for idx, _, proposed in fresh_fills:
-                        fresh["dates"][idx]["expression"] = proposed
                     if update_archival_object(session, uri, fresh):
-                        counts["filled"] += len(fresh_fills)
+                        counts["filled"] += applied
                         ui.progress_bar(n, total)
                     else:
                         # Stop on the first write failure rather than plowing ahead.

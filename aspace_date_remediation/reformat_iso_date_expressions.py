@@ -27,24 +27,31 @@ import sys
 import ui
 from aspace_session import (ASpaceSession, enumerate_archival_object_uris,
                             update_archival_object, RESOURCE_URI, WalkError)
-from dacs_dates import iso_to_dacs, is_iso_expression
+from dacs_dates import (iso_to_dacs, is_iso_expression,
+                        date_identity, expression_unchanged)
 
 
 def plan_reformats(ao):
     """Return (reformats, anomalies) for one archival object.
 
-    reformats = list of (date_index, old_expression, new_expression)
+    reformats = list of change dicts {identity, old_expression, new_expression}
+                — each captures the exact target date and its expected old (ISO)
+                value, so apply can re-verify before writing.
     anomalies = list of expressions that look ISO but cannot be converted
                 (invalid calendar date, or sitting on a non-single date_type)
     """
     reformats, anomalies = [], []
-    for i, date in enumerate(ao.get("dates", [])):
+    for date in ao.get("dates", []):
         expr = date.get("expression")
         if not is_iso_expression(expr):
             continue
         new_expr = iso_to_dacs(expr)
         if date.get("date_type") == "single" and new_expr:
-            reformats.append((i, expr.strip(), new_expr))
+            reformats.append({
+                "identity": date_identity(date),
+                "old_expression": expr.strip(),
+                "new_expression": new_expr,
+            })
         else:
             # ISO-looking expression we will not silently rewrite: a non-single
             # date_type, or a string that is not a real calendar date.
@@ -73,10 +80,10 @@ def main():
     counts = {"scanned": 0, "records_to_reformat": 0, "dates_to_reformat": 0,
               "reformatted": 0, "anomalies": 0, "skipped_changed": 0,
               "read_failures": 0, "write_failures": 0}
-    # Store only the URIs to write. The apply phase re-fetches each one fresh
-    # (rather than reusing the planning copy) so a concurrent edit during the
-    # scan can't be clobbered by a stale full-object payload.
-    write_uris = []
+    # Store (uri, planned-changes) — NOT the full objects. The apply phase
+    # re-fetches each record fresh and writes only these reviewed changes, and
+    # only where the date's old (ISO) expression is still unchanged.
+    write_plan = []
     try:
         # --- Phase 1: read + plan the entire resource. No writes happen here. ---
         try:
@@ -108,10 +115,10 @@ def main():
             counts["dates_to_reformat"] += len(reformats)
             ui.line(f"{ui.WHITE}{ui.BOLD}{ao.get('title')}{ui.RESET}  "
                     f"{ui.DIM}[{ao.get('level')}] {ao.get('ref_id')}{ui.RESET}")
-            for _, old_expr, new_expr in reformats:
-                ui.line(f"    {ui.DIM}\"{old_expr}\"{ui.RESET}  {ui.ARROW}  "
-                        f"{ui.GREEN}\"{new_expr}\"{ui.RESET}")
-            write_uris.append(uri)
+            for ch in reformats:
+                ui.line(f"    {ui.DIM}\"{ch['old_expression']}\"{ui.RESET}  {ui.ARROW}  "
+                        f"{ui.GREEN}\"{ch['new_expression']}\"{ui.RESET}")
+            write_plan.append((uri, reformats))
 
         # --- Phase 2: apply, only after a clean and COMPLETE read pass. ---
         if args.apply:
@@ -120,13 +127,14 @@ def main():
                 ui.line(f"{ui.RED}Refusing to apply: {counts['read_failures']} record(s) could not "
                         f"be read,{ui.RESET}")
                 ui.line(f"{ui.RED}so the resource was not fully planned. No changes written.{ui.RESET}")
-            elif write_uris:
+            elif write_plan:
                 ui.section("✍️   APPLYING")
-                total = len(write_uris)
-                for n, uri in enumerate(write_uris, 1):
-                    # Re-fetch fresh and re-plan on the current state so a concurrent
-                    # edit during the scan is never overwritten by a stale payload
-                    # (and we post with a current lock_version).
+                total = len(write_plan)
+                for n, (uri, planned) in enumerate(write_plan, 1):
+                    # Re-fetch fresh (current data + lock_version), then write ONLY
+                    # the reviewed changes, and only to dates whose old (ISO)
+                    # expression is still exactly as the report showed. Anything
+                    # that drifted is skipped rather than overwritten.
                     fresh = session.get(uri)
                     if not fresh:
                         counts["write_failures"] += 1
@@ -134,17 +142,23 @@ def main():
                         ui.line(f"{ui.RED}{ui.BOLD}Could not re-fetch {uri} during apply — "
                                 f"stopping; no further writes.{ui.RESET}")
                         break
-                    fresh_reformats, _ = plan_reformats(fresh)
-                    if not fresh_reformats:
-                        # The expression changed since the scan (no longer a bare ISO
-                        # date) — skip rather than clobber.
-                        counts["skipped_changed"] += 1
+                    fresh_dates = fresh.get("dates", [])
+                    applied = 0
+                    for ch in planned:
+                        idxs = [i for i, d in enumerate(fresh_dates)
+                                if date_identity(d) == ch["identity"]
+                                and expression_unchanged(d.get("expression"), ch["old_expression"])]
+                        if len(idxs) == 1:
+                            fresh_dates[idxs[0]]["expression"] = ch["new_expression"]
+                            applied += 1
+                        else:
+                            # Zero matches (changed/removed) or ambiguous (>1) — skip.
+                            counts["skipped_changed"] += 1
+                    if applied == 0:
                         ui.progress_bar(n, total)
                         continue
-                    for idx, _, new_expr in fresh_reformats:
-                        fresh["dates"][idx]["expression"] = new_expr
                     if update_archival_object(session, uri, fresh):
-                        counts["reformatted"] += len(fresh_reformats)
+                        counts["reformatted"] += applied
                         ui.progress_bar(n, total)
                     else:
                         # Stop on the first write failure rather than plowing ahead.

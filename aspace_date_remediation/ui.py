@@ -35,8 +35,20 @@ else:
 _BANNER_W = 48
 
 
+def _clean(text):
+    """On a TTY, return text unchanged. Off-TTY (piped/redirected), strip any
+    non-ASCII glyphs/emoji so log files stay strict-ASCII; collapse whitespace."""
+    if sys.stdout.isatty():
+        return text
+    ascii_only = "".join(c for c in text if ord(c) < 128)
+    return " ".join(ascii_only.split())
+
+
 def banner(title, emoji=""):
     """Background-blue title block."""
+    if not sys.stdout.isatty():
+        emoji = ""
+    title = _clean(title)
     print()
     h = f"  {BG_BLUE}{WHITE}{BOLD}"
     inner = f"   {emoji}  {title}".ljust(_BANNER_W)
@@ -47,6 +59,7 @@ def banner(title, emoji=""):
 
 
 def section(title):
+    title = _clean(title)
     print(f"\n  {CYAN}{BOLD}{SEP}{RESET}")
     print(f"  {CYAN}{BOLD}{title}{RESET}")
     print(f"  {CYAN}{BOLD}{SEP}{RESET}")
