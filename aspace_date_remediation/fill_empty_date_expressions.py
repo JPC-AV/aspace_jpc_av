@@ -33,7 +33,8 @@ import sys
 
 import ui
 from aspace_session import (ASpaceSession, enumerate_archival_object_uris,
-                            update_archival_object, RESOURCE_URI, WalkError)
+                            fetch_objects_batched, update_archival_object,
+                            RESOURCE_URI, WalkError)
 from dacs_dates import (expression_for, is_blank, STYLES,
                         date_identity, expression_unchanged)
 
@@ -73,18 +74,71 @@ def plan_fills(ao, style):
     return fills, partials, missing
 
 
+def colored_help():
+    C, B, R, G, Y, W, M, D = (ui.CYAN, ui.BOLD, ui.RESET, ui.GREEN,
+                              ui.YELLOW, ui.WHITE, ui.MAGENTA, ui.DIM)
+    return "\n" + (
+        f"{B}{C}╔══════════════════════════════════════════════════════════════════════════════╗\n"
+        f"║          ArchivesSpace Date Expressions — Fill Empty                         ║\n"
+        f"╚══════════════════════════════════════════════════════════════════════════════╝{R}\n"
+        "\n"
+        f"{B}{W}DESCRIPTION{R}\n"
+        f"    Walks every archival object in the AV resource and fills {Y}blank{R} date\n"
+        f"    expressions on single dates, formatted from the ISO {Y}begin{R} date.\n"
+        f"    {G}Report-only by default{R}; nothing is written without {Y}--apply{R}.\n"
+        "\n"
+        f"{B}{W}USAGE{R}\n"
+        f"    {G}${R} python3 fill_empty_date_expressions.py --style {{iso,dacs}} [options]\n"
+        "\n"
+        f"{B}{W}OPTIONS{R}\n"
+        f"    {C}--style {{iso,dacs}}{R}  {Y}(required){R}  iso = {M}1982-08-01{R}, dacs = {M}1982 August 1{R}\n"
+        f"    {C}--apply{R}              Write the expressions (default: report only)\n"
+        f"    {C}--verbose{R}            Also list skipped / anomaly records\n"
+        f"    {C}--batch{R}              Bulk-read via id_set (faster; verify counts first)\n"
+        f"    {C}--batch-size N{R}       Objects per batch with --batch (default 100)\n"
+        f"    {C}-h, --help{R}           Show this help\n"
+        "\n"
+        f"{B}{W}EXAMPLES{R}\n"
+        f"    {G}${R} python3 fill_empty_date_expressions.py --style dacs            {D}# report{R}\n"
+        f"    {G}${R} python3 fill_empty_date_expressions.py --style dacs --apply    {D}# write{R}\n"
+        f"    {G}${R} python3 fill_empty_date_expressions.py --style iso  --batch    {D}# bulk report{R}\n"
+        "\n"
+        f"{B}{W}SAFETY{R}\n"
+        f"    {D}Only single dates with a complete YYYY-MM-DD begin are filled.{R}\n"
+        f"    {D}--apply re-fetches each record fresh and writes only reviewed changes{R}\n"
+        f"    {D}whose old state is unchanged; drifted records are skipped.{R}\n"
+        "\n"
+        f"{B}{W}TARGET{R}\n"
+        f"    Resource: {C}{RESOURCE_URI}{R}\n"
+        "\n"
+        f"{B}{W}EXIT{R}\n"
+        f"    {G}0{R} clean    {Y}3{R} completed with skips (re-run)    {ui.RED}1{R} read/write failure\n"
+    )
+
+
+def options_block():
+    C, R, Y = ui.CYAN, ui.RESET, ui.YELLOW
+    return (
+        "\n"
+        f"  {C}--style {{iso,dacs}}{R}  {Y}(required){R}  iso=1982-08-01, dacs=1982 August 1\n"
+        f"  {C}--apply{R}              Write the expressions (default: report only)\n"
+        f"  {C}--verbose{R}            Also list skipped / anomaly records\n"
+        f"  {C}--batch{R}              Bulk-read via id_set (verify counts first)\n"
+        f"  {C}--batch-size N{R}       Objects per batch with --batch (default 100)\n"
+    )
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Fill empty date expressions in the AV resource")
-    parser.add_argument("--style", choices=STYLES, required=True,
-                        help="Expression format to write: 'iso' copies the ISO begin date "
-                             "verbatim (e.g. 1982-08-01); 'dacs' writes the DACS form "
-                             "(e.g. 1982 August 1). Both fill only complete YYYY-MM-DD "
-                             "begins; non-full begins are flagged, not written. "
-                             "Required — no default.")
-    parser.add_argument("--apply", action="store_true",
-                        help="Write the expressions (default: report only)")
-    parser.add_argument("--verbose", action="store_true",
-                        help="Also list records skipped because the date yields no expression")
+    parser = ui.make_cli_parser(
+        description=colored_help(),
+        usage_line="fill_empty_date_expressions.py --style {iso,dacs} [options]",
+        options_block=options_block(),
+    )
+    parser.add_argument("--style", choices=STYLES, required=True, help=argparse.SUPPRESS)
+    parser.add_argument("--apply", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--verbose", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--batch", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--batch-size", type=int, default=100, help=argparse.SUPPRESS)
     args = parser.parse_args()
 
     ui.banner("JPC-AV DATE EXPRESSIONS  ·  FILL EMPTY", "\U0001F4C5")
@@ -114,14 +168,9 @@ def main():
             sys.exit(1)
         ui.stat("Objects found", f"{len(uris):,}", ui.GREEN)
 
-        ui.section("\U0001F5D3️   RECORDS TO FILL")
-        for uri in uris:
-            ao = session.get(uri)
-            if not ao:
-                counts["read_failures"] += 1
-                continue
+        def handle(ao):
+            """Plan one archival object: report it and queue its writes."""
             counts["scanned"] += 1
-
             fills, partials, missing = plan_fills(ao, args.style)
             if partials:
                 counts["partial"] += len(partials)
@@ -135,8 +184,7 @@ def main():
                             f"{ao.get('title')} — blank expression AND blank begin: "
                             f"{', '.join(missing)}{ui.RESET}")
             if not fills:
-                continue
-
+                return
             counts["records_to_fill"] += 1
             counts["dates_to_fill"] += len(fills)
             ui.line(f"{ui.WHITE}{ui.BOLD}{ao.get('title')}{ui.RESET}  "
@@ -144,7 +192,30 @@ def main():
             for ch in fills:
                 ui.line(f"    {ui.DIM}{ch['begin']}{ui.RESET}  {ui.ARROW}  "
                         f"{ui.GREEN}\"{ch['new_expression']}\"{ui.RESET}")
-            write_plan.append((uri, fills))
+            write_plan.append((ao.get("uri"), fills))
+
+        ui.section("\U0001F5D3️   RECORDS TO FILL")
+        if args.batch:
+            try:
+                objects = fetch_objects_batched(session, uris, args.batch_size,
+                                                progress=ui.scan_tick)
+            except WalkError as e:
+                ui.scan_done()
+                print(f"\n  {ui.RED}{ui.BOLD}ERROR: {e}{ui.RESET}\n")
+                sys.exit(1)
+            ui.scan_done()
+            for ao in objects:
+                handle(ao)
+        else:
+            total = len(uris)
+            for n, uri in enumerate(uris, 1):
+                ao = session.get(uri)
+                ui.scan_tick(n, total)
+                if not ao:
+                    counts["read_failures"] += 1
+                    continue
+                handle(ao)
+            ui.scan_done()
 
         # --- Phase 2: apply, only after a clean and COMPLETE read pass. ---
         if args.apply:
@@ -220,17 +291,30 @@ def main():
     if args.apply and counts["read_failures"]:
         ui.line(f"{ui.YELLOW}NOTE: writes were skipped because the read pass was incomplete.{ui.RESET}")
 
+    skipped = counts["skipped_changed"]
     if args.apply and not failed:
-        ui.done_banner([f"{ui.CHECK}  COMPLETE",
-                        f"Filled {counts['filled']} expression(s) "
-                        f"across {counts['records_to_fill']} record(s)"])
+        if skipped:
+            # Not everything reviewed was applied (records drifted between scan
+            # and apply). Safe, but NOT a clean "COMPLETE" — flag it and exit 3.
+            print()
+            ui.line(f"{ui.YELLOW}{ui.BOLD}Completed with skips.{ui.RESET}")
+            ui.line(f"{ui.YELLOW}{skipped} reviewed change(s) were skipped because the record "
+                    f"changed since the scan.{ui.RESET}")
+            ui.line(f"{ui.YELLOW}Re-run the report to review them, then --apply again.{ui.RESET}")
+            print()
+        else:
+            ui.done_banner([f"{ui.CHECK}  COMPLETE",
+                            f"Filled {counts['filled']} expression(s) "
+                            f"across {counts['records_to_fill']} record(s)"])
     elif not args.apply and counts["records_to_fill"]:
         print()
         ui.line(f"{ui.BOLD}Report only{ui.RESET} — re-run with {ui.GREEN}--apply{ui.RESET} "
                 f"to write these expressions.")
         print()
 
-    sys.exit(1 if failed else 0)
+    # Exit: 1 = read/write failure; 3 = applied but some reviewed changes were
+    # skipped due to drift (re-run recommended); 0 = clean.
+    sys.exit(1 if failed else (3 if (args.apply and skipped) else 0))
 
 
 if __name__ == "__main__":

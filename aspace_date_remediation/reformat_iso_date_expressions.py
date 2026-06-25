@@ -26,7 +26,8 @@ import sys
 
 import ui
 from aspace_session import (ASpaceSession, enumerate_archival_object_uris,
-                            update_archival_object, RESOURCE_URI, WalkError)
+                            fetch_objects_batched, update_archival_object,
+                            RESOURCE_URI, WalkError)
 from dacs_dates import (iso_to_dacs, is_iso_expression,
                         date_identity, expression_unchanged)
 
@@ -59,12 +60,69 @@ def plan_reformats(ao):
     return reformats, anomalies
 
 
+def colored_help():
+    C, B, R, G, Y, W, M, D = (ui.CYAN, ui.BOLD, ui.RESET, ui.GREEN,
+                              ui.YELLOW, ui.WHITE, ui.MAGENTA, ui.DIM)
+    return "\n" + (
+        f"{B}{C}╔══════════════════════════════════════════════════════════════════════════════╗\n"
+        f"║          ArchivesSpace Date Expressions — Reformat ISO                       ║\n"
+        f"╚══════════════════════════════════════════════════════════════════════════════╝{R}\n"
+        "\n"
+        f"{B}{W}DESCRIPTION{R}\n"
+        f"    Walks every archival object in the AV resource and rewrites date\n"
+        f"    expressions stored as bare ISO ({M}1982-08-01{R}) into DACS form\n"
+        f"    ({M}1982 August 1{R}) on single dates; begin/end are left untouched.\n"
+        f"    {G}Report-only by default{R}; nothing is written without {Y}--apply{R}.\n"
+        "\n"
+        f"{B}{W}USAGE{R}\n"
+        f"    {G}${R} python3 reformat_iso_date_expressions.py [options]\n"
+        "\n"
+        f"{B}{W}OPTIONS{R}\n"
+        f"    {C}--apply{R}              Rewrite the expressions (default: report only)\n"
+        f"    {C}--verbose{R}            Also list ISO-looking expressions NOT converted\n"
+        f"    {C}--batch{R}              Bulk-read via id_set (faster; verify counts first)\n"
+        f"    {C}--batch-size N{R}       Objects per batch with --batch (default 100)\n"
+        f"    {C}-h, --help{R}           Show this help\n"
+        "\n"
+        f"{B}{W}EXAMPLES{R}\n"
+        f"    {G}${R} python3 reformat_iso_date_expressions.py              {D}# report{R}\n"
+        f"    {G}${R} python3 reformat_iso_date_expressions.py --apply      {D}# write{R}\n"
+        f"    {G}${R} python3 reformat_iso_date_expressions.py --batch      {D}# bulk report{R}\n"
+        "\n"
+        f"{B}{W}SAFETY{R}\n"
+        f"    {D}Only single dates whose expression is a complete ISO date are touched.{R}\n"
+        f"    {D}--apply re-fetches each record fresh and rewrites only reviewed changes{R}\n"
+        f"    {D}whose old expression is unchanged; drifted records are skipped.{R}\n"
+        "\n"
+        f"{B}{W}TARGET{R}\n"
+        f"    Resource: {C}{RESOURCE_URI}{R}\n"
+        "\n"
+        f"{B}{W}EXIT{R}\n"
+        f"    {G}0{R} clean    {Y}3{R} completed with skips (re-run)    {ui.RED}1{R} read/write failure\n"
+    )
+
+
+def options_block():
+    C, R = ui.CYAN, ui.RESET
+    return (
+        "\n"
+        f"  {C}--apply{R}              Rewrite the expressions (default: report only)\n"
+        f"  {C}--verbose{R}            Also list ISO-looking expressions NOT converted\n"
+        f"  {C}--batch{R}              Bulk-read via id_set (verify counts first)\n"
+        f"  {C}--batch-size N{R}       Objects per batch with --batch (default 100)\n"
+    )
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Reformat ISO date expressions to DACS form in the AV resource")
-    parser.add_argument("--apply", action="store_true",
-                        help="Write the reformatted expressions (default: report only)")
-    parser.add_argument("--verbose", action="store_true",
-                        help="Also list ISO-looking expressions that were NOT converted")
+    parser = ui.make_cli_parser(
+        description=colored_help(),
+        usage_line="reformat_iso_date_expressions.py [options]",
+        options_block=options_block(),
+    )
+    parser.add_argument("--apply", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--verbose", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--batch", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--batch-size", type=int, default=100, help=argparse.SUPPRESS)
     args = parser.parse_args()
 
     ui.banner("JPC-AV DATE EXPRESSIONS  ·  REFORMAT ISO", "\U0001F4C5")
@@ -93,14 +151,9 @@ def main():
             sys.exit(1)
         ui.stat("Objects found", f"{len(uris):,}", ui.GREEN)
 
-        ui.section("\U0001F5D3️   EXPRESSIONS TO REFORMAT")
-        for uri in uris:
-            ao = session.get(uri)
-            if not ao:
-                counts["read_failures"] += 1
-                continue
+        def handle(ao):
+            """Plan one archival object: report it and queue its writes."""
             counts["scanned"] += 1
-
             reformats, anomalies = plan_reformats(ao)
             if anomalies:
                 counts["anomalies"] += len(anomalies)
@@ -109,8 +162,7 @@ def main():
                             f"{ao.get('title')} — ISO-looking, not converted: "
                             f"{', '.join(anomalies)}{ui.RESET}")
             if not reformats:
-                continue
-
+                return
             counts["records_to_reformat"] += 1
             counts["dates_to_reformat"] += len(reformats)
             ui.line(f"{ui.WHITE}{ui.BOLD}{ao.get('title')}{ui.RESET}  "
@@ -118,7 +170,30 @@ def main():
             for ch in reformats:
                 ui.line(f"    {ui.DIM}\"{ch['old_expression']}\"{ui.RESET}  {ui.ARROW}  "
                         f"{ui.GREEN}\"{ch['new_expression']}\"{ui.RESET}")
-            write_plan.append((uri, reformats))
+            write_plan.append((ao.get("uri"), reformats))
+
+        ui.section("\U0001F5D3️   EXPRESSIONS TO REFORMAT")
+        if args.batch:
+            try:
+                objects = fetch_objects_batched(session, uris, args.batch_size,
+                                                progress=ui.scan_tick)
+            except WalkError as e:
+                ui.scan_done()
+                print(f"\n  {ui.RED}{ui.BOLD}ERROR: {e}{ui.RESET}\n")
+                sys.exit(1)
+            ui.scan_done()
+            for ao in objects:
+                handle(ao)
+        else:
+            total = len(uris)
+            for n, uri in enumerate(uris, 1):
+                ao = session.get(uri)
+                ui.scan_tick(n, total)
+                if not ao:
+                    counts["read_failures"] += 1
+                    continue
+                handle(ao)
+            ui.scan_done()
 
         # --- Phase 2: apply, only after a clean and COMPLETE read pass. ---
         if args.apply:
@@ -190,17 +265,30 @@ def main():
     if args.apply and counts["read_failures"]:
         ui.line(f"{ui.YELLOW}NOTE: writes were skipped because the read pass was incomplete.{ui.RESET}")
 
+    skipped = counts["skipped_changed"]
     if args.apply and not failed:
-        ui.done_banner([f"{ui.CHECK}  COMPLETE",
-                        f"Reformatted {counts['reformatted']} expression(s) "
-                        f"across {counts['records_to_reformat']} record(s)"])
+        if skipped:
+            # Not everything reviewed was applied (records drifted between scan
+            # and apply). Safe, but NOT a clean "COMPLETE" — flag it and exit 3.
+            print()
+            ui.line(f"{ui.YELLOW}{ui.BOLD}Completed with skips.{ui.RESET}")
+            ui.line(f"{ui.YELLOW}{skipped} reviewed change(s) were skipped because the record "
+                    f"changed since the scan.{ui.RESET}")
+            ui.line(f"{ui.YELLOW}Re-run the report to review them, then --apply again.{ui.RESET}")
+            print()
+        else:
+            ui.done_banner([f"{ui.CHECK}  COMPLETE",
+                            f"Reformatted {counts['reformatted']} expression(s) "
+                            f"across {counts['records_to_reformat']} record(s)"])
     elif not args.apply and counts["records_to_reformat"]:
         print()
         ui.line(f"{ui.BOLD}Report only{ui.RESET} — re-run with {ui.GREEN}--apply{ui.RESET} "
                 f"to rewrite these expressions.")
         print()
 
-    sys.exit(1 if failed else 0)
+    # Exit: 1 = read/write failure; 3 = applied but some reviewed changes were
+    # skipped due to drift (re-run recommended); 0 = clean.
+    sys.exit(1 if failed else (3 if (args.apply and skipped) else 0))
 
 
 if __name__ == "__main__":

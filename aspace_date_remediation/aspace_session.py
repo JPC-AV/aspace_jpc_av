@@ -38,12 +38,15 @@ class ASpaceSession:
 
     def __init__(self):
         self.base_url = ASPACE_URL
-        self.headers = {}
         self.session_token = None
+        # One persistent HTTP connection reused for every call (keep-alive),
+        # so we don't pay a fresh TCP+TLS handshake on each of the hundreds of
+        # per-record requests — a big saving over a high-latency VPN link.
+        self.http = requests.Session()
 
     def login(self):
         try:
-            resp = requests.post(
+            resp = self.http.post(
                 f"{self.base_url}/users/{ASPACE_USER}/login",
                 data={"password": ASPACE_PASSWORD},
                 timeout=TIMEOUT,
@@ -63,14 +66,15 @@ class ASpaceSession:
             print("Authentication failed: 200 response but no session token in body")
             return False
         self.session_token = token
-        self.headers = {"X-ArchivesSpace-Session": token}
+        # Carry the session header on the persistent connection for all calls.
+        self.http.headers["X-ArchivesSpace-Session"] = token
         return True
 
     def logout(self):
         if not self.session_token:
             return
         try:
-            requests.post(f"{self.base_url}/logout", headers=self.headers, timeout=TIMEOUT)
+            self.http.post(f"{self.base_url}/logout", timeout=TIMEOUT)
         except requests.RequestException:
             pass
 
@@ -78,8 +82,7 @@ class ASpaceSession:
         """GET and return parsed JSON, or None on any non-200/transport error.
         params are encoded by requests (so search filters are escaped safely)."""
         try:
-            resp = requests.get(f"{self.base_url}{endpoint}", headers=self.headers,
-                                 params=params, timeout=TIMEOUT)
+            resp = self.http.get(f"{self.base_url}{endpoint}", params=params, timeout=TIMEOUT)
         except requests.RequestException as e:
             print(f"GET {endpoint} failed: {e}")
             return None
@@ -95,8 +98,7 @@ class ASpaceSession:
     def post(self, endpoint, data):
         """POST JSON and return parsed response, or None on failure."""
         try:
-            resp = requests.post(f"{self.base_url}{endpoint}", headers=self.headers,
-                                 json=data, timeout=TIMEOUT)
+            resp = self.http.post(f"{self.base_url}{endpoint}", json=data, timeout=TIMEOUT)
         except requests.RequestException as e:
             print(f"POST {endpoint} failed: {e}")
             return None
@@ -149,6 +151,61 @@ def enumerate_archival_object_uris(session):
             break
         page += 1
     return uris
+
+
+def fetch_objects_batched(session, uris, batch_size=100, progress=None):
+    """Fetch full archival objects in bulk via the id_set endpoint, far fewer
+    round-trips than one GET per record.
+
+    Fails CLOSED: raises WalkError unless every batch returns EXACTLY the set of
+    archival objects requested, all within the configured resource. That covers
+    short responses, duplicates, missing-plus-extra, and wrong-resource objects —
+    so the caller never proceeds on a partial or mismatched read. `progress(done,
+    total)` is called after each batch.
+
+    NOTE: opt-in. Verify the returned count matches a plain per-record scan on
+    your ArchivesSpace instance before trusting it for --apply.
+    """
+    if not isinstance(batch_size, int) or batch_size < 1:
+        raise WalkError(f"batch_size must be a positive integer, got {batch_size!r}")
+
+    def _id_of(uri):
+        return int(str(uri).rstrip("/").rsplit("/", 1)[-1])
+
+    ids = []
+    for u in uris:
+        try:
+            ids.append(_id_of(u))
+        except ValueError:
+            raise WalkError(f"unexpected archival_object uri (cannot extract id): {u}")
+
+    objects = []
+    for start in range(0, len(ids), batch_size):
+        chunk = ids[start:start + batch_size]
+        resp = session.get(
+            f"/repositories/{REPO_ID}/archival_objects",
+            params={"id_set": ",".join(str(i) for i in chunk)},
+        )
+        if not isinstance(resp, list):
+            raise WalkError(f"id_set batch did not return a list ({type(resp).__name__}); "
+                            f"read incomplete (failing closed, no changes applied)")
+        # Verify the response is EXACTLY the requested objects, all in-resource —
+        # a same-length-but-wrong response must not slip through.
+        try:
+            returned_ids = [_id_of(o.get("uri")) for o in resp]
+        except (ValueError, AttributeError):
+            raise WalkError("id_set batch returned an object without a valid uri; failing closed")
+        if len(returned_ids) != len(chunk) or set(returned_ids) != set(chunk):
+            raise WalkError(f"id_set batch did not return exactly the requested objects "
+                            f"(requested {len(chunk)}, got {len(resp)}); failing closed")
+        out_of_scope = [o.get("uri") for o in resp if not in_scope(o)]
+        if out_of_scope:
+            raise WalkError(f"id_set batch returned object(s) outside {RESOURCE_URI}: "
+                            f"{out_of_scope[:3]}; failing closed")
+        objects.extend(resp)
+        if progress:
+            progress(min(start + batch_size, len(ids)), len(ids))
+    return objects
 
 
 def in_scope(archival_object):
