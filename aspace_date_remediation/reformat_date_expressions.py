@@ -158,10 +158,14 @@ def main():
     counts = {"scanned": 0, "records_to_reformat": 0, "dates_to_reformat": 0,
               "reformatted": 0, "skipped_changed": 0,
               "read_failures": 0, "write_failures": 0}
-    # Per-object review buckets (members collected for --list-buckets). With
-    # records_to_reformat these reconcile to scanned.
-    buckets = {"no_dates": [], "non_single": [], "empty_expr": [],
-               "other": [], "already_in_style": []}
+    # Mutually-exclusive reconciliation of objects with nothing to reformat:
+    # records_to_reformat + sum(buckets) == scanned. Used for the summary math.
+    buckets = {"no_dates": 0, "non_single": 0, "empty_expr": 0,
+               "other": 0, "already_in_style": 0}
+    # Independent review memberships for --list-buckets: a record is added to a
+    # category if it has ANY such date, even if it was also reformatted (so a
+    # record with one fixable date + one year-only date is still listed).
+    review = {"no_dates": [], "non_single": [], "empty_expr": [], "other": []}
     write_plan = []  # [(uri, [change,...])] — apply re-fetches fresh
     try:
         # --- Phase 1: read + plan the entire resource. No writes happen here. ---
@@ -174,10 +178,25 @@ def main():
 
         def handle(ao):
             counts["scanned"] += 1
+            member = (ao.get("ref_id"), ao.get("level"), ao.get("title"))
+            dates = ao.get("dates", [])
+            singles = [d for d in dates if d.get("date_type") == "single"]
+            # Independent review memberships (collected for EVERY record, so a
+            # record that is reformatted but also has a year-only/range/other
+            # date is still surfaced by --list-buckets).
+            if not dates:
+                review["no_dates"].append(member)
+            if any(d.get("date_type") != "single" for d in dates):
+                review["non_single"].append(member)
+            if any(is_blank(d.get("expression")) for d in singles):
+                review["empty_expr"].append(member)
+            if any(not is_blank(d.get("expression")) and parse_single_date(d.get("expression")) is None
+                   for d in singles):
+                review["other"].append(member)
+
             changes = plan_reformats(ao, args.style)
             if not changes:
-                buckets[classify_idle(ao)].append(
-                    (ao.get("ref_id"), ao.get("level"), ao.get("title")))
+                buckets[classify_idle(ao)] += 1  # mutually-exclusive reconciliation
                 return
             counts["records_to_reformat"] += 1
             counts["dates_to_reformat"] += len(changes)
@@ -259,7 +278,7 @@ def main():
         session.logout()
 
     failed = bool(counts["read_failures"] or counts["write_failures"])
-    nothing = sum(len(v) for v in buckets.values())
+    nothing = sum(buckets.values())
 
     ui.section("\U0001F4CA  SUMMARY")
     ui.stat("Scanned objects", f"{counts['scanned']:,}")
@@ -267,9 +286,9 @@ def main():
     ui.stat("Date subrecords to change", f"{counts['dates_to_reformat']:,}", ui.CYAN)
     # Reconcile the rest: scanned = records_to_reformat + nothing-to-reformat.
     ui.stat("Nothing to reformat", f"{nothing:,}", ui.DIM)
-    ui.line(f"{ui.DIM}  already {args.style} {len(buckets['already_in_style'])} "
-            f"· no dates {len(buckets['no_dates'])} · non-single {len(buckets['non_single'])} "
-            f"· empty {len(buckets['empty_expr'])} · other {len(buckets['other'])}{ui.RESET}")
+    ui.line(f"{ui.DIM}  already {args.style} {buckets['already_in_style']} "
+            f"· no dates {buckets['no_dates']} · non-single {buckets['non_single']} "
+            f"· empty {buckets['empty_expr']} · other {buckets['other']}{ui.RESET}")
     if args.apply:
         ui.stat("Expressions rewritten", f"{counts['reformatted']:,}", ui.GREEN)
         ui.stat("Skipped (changed in scan)", f"{counts['skipped_changed']:,}",
@@ -280,15 +299,17 @@ def main():
             ui.RED if counts["write_failures"] else ui.DIM)
     if args.apply and counts["read_failures"]:
         ui.line(f"{ui.YELLOW}NOTE: writes were skipped because the read pass was incomplete.{ui.RESET}")
-    if not args.list_buckets and any(buckets[b] for b in ("no_dates", "non_single", "empty_expr", "other")):
+    if not args.list_buckets and any(review.values()):
         ui.line(f"{ui.DIM}(re-run with --list-buckets to list the review records){ui.RESET}")
 
-    # --list-buckets: enumerate the review buckets (not already-in-style / not changed)
+    # --list-buckets: enumerate the INDEPENDENT review memberships. A record may
+    # appear here even though it was reformatted (if it also has a review-worthy
+    # date), so these counts can exceed the mutually-exclusive summary buckets.
     if args.list_buckets:
-        ui.list_members("NO DATES", buckets["no_dates"])
-        ui.list_members("NON-SINGLE DATES ONLY", buckets["non_single"])
-        ui.list_members("EMPTY EXPRESSION (fill territory)", buckets["empty_expr"])
-        ui.list_members("OTHER — non-blank, unparseable expression", buckets["other"])
+        ui.list_members("NO DATES", review["no_dates"])
+        ui.list_members("NON-SINGLE DATE PRESENT", review["non_single"])
+        ui.list_members("EMPTY EXPRESSION (fill territory)", review["empty_expr"])
+        ui.list_members("OTHER — non-blank, unparseable expression", review["other"])
 
     skipped = counts["skipped_changed"]
     if args.apply and not failed:
