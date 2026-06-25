@@ -137,6 +137,7 @@ def main():
     parser.add_argument("--style", choices=STYLES, required=True, help=argparse.SUPPRESS)
     parser.add_argument("--apply", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--verbose", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--list-buckets", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--batch", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--batch-size", type=int, default=100, help=argparse.SUPPRESS)
     args = parser.parse_args()
@@ -155,6 +156,10 @@ def main():
     counts = {"scanned": 0, "records_to_fill": 0, "dates_to_fill": 0,
               "filled": 0, "partial": 0, "missing_begin": 0,
               "skipped_changed": 0, "read_failures": 0, "write_failures": 0}
+    # Per-object review buckets (members collected for --list-buckets). With
+    # records_to_fill these reconcile to scanned.
+    buckets = {"no_dates": [], "non_single": [], "has_expression": [],
+               "empty_unfillable": []}
     # Store (uri, planned-changes) — NOT the full objects. The apply phase
     # re-fetches each record fresh and writes only these reviewed changes, and
     # only where the date's old state is still unchanged.
@@ -184,6 +189,21 @@ def main():
                             f"{ao.get('title')} — blank expression AND blank begin: "
                             f"{', '.join(missing)}{ui.RESET}")
             if not fills:
+                # Classify why there's nothing to fill, so the totals reconcile
+                # (one mutually-exclusive bucket per object).
+                dates = ao.get("dates", [])
+                singles = [d for d in dates if d.get("date_type") == "single"]
+                if not dates:
+                    bucket = "no_dates"
+                elif not singles:
+                    bucket = "non_single"
+                elif any(is_blank(d.get("expression")) for d in singles):
+                    # has a blank single-date expression, but begin isn't a full
+                    # date (year-only / blank) so it can't be filled
+                    bucket = "empty_unfillable"
+                else:
+                    bucket = "has_expression"
+                buckets[bucket].append((ao.get("ref_id"), ao.get("level"), ao.get("title")))
                 return
             counts["records_to_fill"] += 1
             counts["dates_to_fill"] += len(fills)
@@ -270,10 +290,17 @@ def main():
 
     failed = bool(counts["read_failures"] or counts["write_failures"])
 
+    nothing = sum(len(v) for v in buckets.values())
+
     ui.section("\U0001F4CA  SUMMARY")
     ui.stat("Scanned objects", f"{counts['scanned']:,}")
     ui.stat("Records w/ empty expr", f"{counts['records_to_fill']:,}", ui.CYAN)
     ui.stat("Date subrecords to fill", f"{counts['dates_to_fill']:,}", ui.CYAN)
+    # Reconcile the rest: scanned = records_to_fill + nothing-to-fill.
+    ui.stat("Nothing to fill", f"{nothing:,}", ui.DIM)
+    ui.line(f"{ui.DIM}  has expression {len(buckets['has_expression'])} "
+            f"· no dates {len(buckets['no_dates'])} · non-single {len(buckets['non_single'])} "
+            f"· empty/year-only {len(buckets['empty_unfillable'])}{ui.RESET}")
     if args.apply:
         ui.stat("Expressions written", f"{counts['filled']:,}", ui.GREEN)
         ui.stat("Skipped (changed in scan)", f"{counts['skipped_changed']:,}",
@@ -288,8 +315,18 @@ def main():
             ui.RED if counts["write_failures"] else ui.DIM)
     if counts["partial"] or counts["missing_begin"]:
         ui.line(f"{ui.DIM}(re-run with --verbose to list skipped/anomaly records){ui.RESET}")
+    review = buckets["no_dates"] or buckets["non_single"] or buckets["empty_unfillable"]
+    if not args.list_buckets and review:
+        ui.line(f"{ui.DIM}(re-run with --list-buckets to list the review records){ui.RESET}")
     if args.apply and counts["read_failures"]:
         ui.line(f"{ui.YELLOW}NOTE: writes were skipped because the read pass was incomplete.{ui.RESET}")
+
+    # --list-buckets: enumerate the review buckets (not the already-has-expression
+    # bucket, which is the expected/fine case).
+    if args.list_buckets:
+        ui.list_members("NO DATES", buckets["no_dates"])
+        ui.list_members("NON-SINGLE DATES ONLY", buckets["non_single"])
+        ui.list_members("EMPTY EXPRESSION / YEAR-ONLY (can't fill)", buckets["empty_unfillable"])
 
     skipped = counts["skipped_changed"]
     if args.apply and not failed:

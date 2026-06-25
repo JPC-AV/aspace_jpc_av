@@ -81,6 +81,16 @@ def stat(label, value, color=WHITE):
     print(f"  {DIM}{PIPE}{RESET}  {label:<26} {color}{BOLD}{value}{RESET}")
 
 
+def list_members(label, members):
+    """Print a review-bucket section: a header with the count, then one line per
+    member. `members` is a list of (ref_id, level, title). No-op when empty."""
+    if not members:
+        return
+    section(f"{label}  ({len(members)})")
+    for ref_id, level, title in members:
+        line(f"{title}  {DIM}[{level}] {ref_id}{RESET}")
+
+
 def line(text=""):
     """A pipe-prefixed body line (text may contain its own color codes)."""
     print(f"  {DIM}{PIPE}{RESET}  {_ascii_inline(text)}")

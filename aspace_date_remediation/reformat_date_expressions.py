@@ -1,24 +1,27 @@
 #!/usr/bin/env python3
-"""Remediation script 2 of 2 — reformat ISO-style date EXPRESSIONS.
+"""Remediation script 2 of 2 — normalize date EXPRESSIONS to a chosen style.
 
 Walks every archival object in the configured AV resource (resource_id in
-creds.py), finds single-date subrecords whose `expression` was left as a bare
-ISO string (e.g. "1982-08-01" — what the scripted imports produced), and
-rewrites it to the DACS form "1982 August 1". The structured begin/end fields
-are untouched.
+creds.py) and rewrites single-date `expression` strings to the style chosen with
+--style: ISO (1982-08-01) or DACS (1982 August 1). It converts any full
+single-date expression that is currently in the *other* style and leaves ones
+already in the target style alone. The structured begin/end fields are untouched.
+
+Bidirectional:
+  --style dacs   ISO -> DACS   (1982-08-01      -> "1982 August 1")
+  --style iso    DACS -> ISO   ("1982 August 1" -> 1982-08-01)
 
 Default is REPORT ONLY. Nothing is written without --apply.
 
-Source of truth here is the expression string itself (not begin): we reformat
-exactly what is displayed. Scope: date_type == "single" with an expression that
-is a complete ISO date. Empty expressions are script 1's job; year-only /
-year-month / range expressions are left alone. An expression that looks ISO but
-is not a real date (e.g. 2020-02-30) is flagged, not converted.
+Scope: date_type == "single" with a complete expression in one of the two
+formats. Empty expressions are script 1's job (fill); year-only / year-month /
+free-text expressions can't be parsed and are reported under "other".
 
 Usage:
-  python3 reformat_iso_date_expressions.py            # report what would change
-  python3 reformat_iso_date_expressions.py --apply    # rewrite the expressions
-  python3 reformat_iso_date_expressions.py --verbose   # also list anomalies
+  python3 reformat_date_expressions.py --style dacs                 # report (ISO->DACS)
+  python3 reformat_date_expressions.py --style iso                  # report (DACS->ISO)
+  python3 reformat_date_expressions.py --style dacs --apply         # rewrite
+  python3 reformat_date_expressions.py --style dacs --list-buckets  # list review buckets
 """
 
 import argparse
@@ -28,36 +31,46 @@ import ui
 from aspace_session import (ASpaceSession, enumerate_archival_object_uris,
                             fetch_objects_batched, update_archival_object,
                             RESOURCE_URI, WalkError)
-from dacs_dates import (iso_to_dacs, is_iso_expression,
+from dacs_dates import (parse_single_date, render_single_date, is_blank, STYLES,
                         date_identity, expression_unchanged)
 
 
-def plan_reformats(ao):
-    """Return (reformats, anomalies) for one archival object.
-
-    reformats = list of change dicts {identity, old_expression, new_expression}
-                — each captures the exact target date and its expected old (ISO)
-                value, so apply can re-verify before writing.
-    anomalies = list of expressions that look ISO but cannot be converted
-                (invalid calendar date, or sitting on a non-single date_type)
-    """
-    reformats, anomalies = [], []
+def plan_reformats(ao, style):
+    """Return a list of change dicts {identity, old_expression, new_expression}
+    for single dates whose full expression is not already in the target style."""
+    changes = []
     for date in ao.get("dates", []):
-        expr = date.get("expression")
-        if not is_iso_expression(expr):
+        if date.get("date_type") != "single":
             continue
-        new_expr = iso_to_dacs(expr)
-        if date.get("date_type") == "single" and new_expr:
-            reformats.append({
+        expr = date.get("expression")
+        if is_blank(expr):
+            continue  # empty expression is fill's job, not reformat's
+        parsed = parse_single_date(expr)
+        if parsed is None:
+            continue  # not a full ISO/DACS date (year-month, free text) — "other"
+        target = render_single_date(parsed, style)
+        if target != str(expr).strip():
+            changes.append({
                 "identity": date_identity(date),
-                "old_expression": expr.strip(),
-                "new_expression": new_expr,
+                "old_expression": str(expr).strip(),
+                "new_expression": target,
             })
-        else:
-            # ISO-looking expression we will not silently rewrite: a non-single
-            # date_type, or a string that is not a real calendar date.
-            anomalies.append(expr.strip())
-    return reformats, anomalies
+    return changes
+
+
+def classify_idle(ao):
+    """Bucket an object that has nothing to reformat (mutually exclusive)."""
+    dates = ao.get("dates", [])
+    singles = [d for d in dates if d.get("date_type") == "single"]
+    if not dates:
+        return "no_dates"
+    if not singles:
+        return "non_single"
+    if any(is_blank(d.get("expression")) for d in singles):
+        return "empty_expr"
+    if any(parse_single_date(d.get("expression")) is None for d in singles):
+        return "other"  # non-blank but unparseable (year-month / free text)
+    return "already_in_style"
 
 
 def colored_help():
@@ -65,32 +78,35 @@ def colored_help():
                               ui.YELLOW, ui.WHITE, ui.MAGENTA, ui.DIM)
     return "\n" + (
         f"{B}{C}╔══════════════════════════════════════════════════════════════════════════════╗\n"
-        f"║          ArchivesSpace Date Expressions — Reformat ISO                       ║\n"
+        f"║          ArchivesSpace Date Expressions — Reformat                           ║\n"
         f"╚══════════════════════════════════════════════════════════════════════════════╝{R}\n"
         "\n"
         f"{B}{W}DESCRIPTION{R}\n"
-        f"    Walks every archival object in the AV resource and rewrites date\n"
-        f"    expressions stored as bare ISO ({M}1982-08-01{R}) into DACS form\n"
-        f"    ({M}1982 August 1{R}) on single dates; begin/end are left untouched.\n"
+        f"    Walks every archival object in the AV resource and normalizes single-date\n"
+        f"    expressions to the chosen --style; begin/end are left untouched.\n"
+        f"      {C}--style dacs{R}   {M}1982-08-01{R} {D}->{R} {M}1982 August 1{R}\n"
+        f"      {C}--style iso{R}    {M}1982 August 1{R} {D}->{R} {M}1982-08-01{R}\n"
         f"    {G}Report-only by default{R}; nothing is written without {Y}--apply{R}.\n"
         "\n"
         f"{B}{W}USAGE{R}\n"
-        f"    {G}${R} python3 reformat_iso_date_expressions.py [options]\n"
+        f"    {G}${R} python3 reformat_date_expressions.py --style {{iso,dacs}} [options]\n"
         "\n"
         f"{B}{W}OPTIONS{R}\n"
+        f"    {C}--style {{iso,dacs}}{R}  {Y}(required){R}  target format for expressions\n"
         f"    {C}--apply{R}              Rewrite the expressions (default: report only)\n"
-        f"    {C}--verbose{R}            Also list ISO-looking expressions NOT converted\n"
+        f"    {C}--verbose{R}            (reserved; report already lists changes)\n"
+        f"    {C}--list-buckets{R}       After the summary, list the review buckets' records\n"
         f"    {C}--batch{R}              Bulk-read via id_set (faster; verify counts first)\n"
         f"    {C}--batch-size N{R}       Objects per batch with --batch (default 100)\n"
         f"    {C}-h, --help{R}           Show this help\n"
         "\n"
         f"{B}{W}EXAMPLES{R}\n"
-        f"    {G}${R} python3 reformat_iso_date_expressions.py              {D}# report{R}\n"
-        f"    {G}${R} python3 reformat_iso_date_expressions.py --apply      {D}# write{R}\n"
-        f"    {G}${R} python3 reformat_iso_date_expressions.py --batch      {D}# bulk report{R}\n"
+        f"    {G}${R} python3 reformat_date_expressions.py --style dacs              {D}# report{R}\n"
+        f"    {G}${R} python3 reformat_date_expressions.py --style dacs --apply      {D}# write{R}\n"
+        f"    {G}${R} python3 reformat_date_expressions.py --style dacs --list-buckets\n"
         "\n"
         f"{B}{W}SAFETY{R}\n"
-        f"    {D}Only single dates whose expression is a complete ISO date are touched.{R}\n"
+        f"    {D}Only single dates already in a full ISO/DACS form are converted.{R}\n"
         f"    {D}--apply re-fetches each record fresh and rewrites only reviewed changes{R}\n"
         f"    {D}whose old expression is unchanged; drifted records are skipped.{R}\n"
         "\n"
@@ -103,11 +119,12 @@ def colored_help():
 
 
 def options_block():
-    C, R = ui.CYAN, ui.RESET
+    C, R, Y = ui.CYAN, ui.RESET, ui.YELLOW
     return (
         "\n"
+        f"  {C}--style {{iso,dacs}}{R}  {Y}(required){R}  target format for expressions\n"
         f"  {C}--apply{R}              Rewrite the expressions (default: report only)\n"
-        f"  {C}--verbose{R}            Also list ISO-looking expressions NOT converted\n"
+        f"  {C}--list-buckets{R}       List the review buckets' records after the summary\n"
         f"  {C}--batch{R}              Bulk-read via id_set (verify counts first)\n"
         f"  {C}--batch-size N{R}       Objects per batch with --batch (default 100)\n"
     )
@@ -116,18 +133,21 @@ def options_block():
 def main():
     parser = ui.make_cli_parser(
         description=colored_help(),
-        usage_line="reformat_iso_date_expressions.py [options]",
+        usage_line="reformat_date_expressions.py --style {iso,dacs} [options]",
         options_block=options_block(),
     )
+    parser.add_argument("--style", choices=STYLES, required=True, help=argparse.SUPPRESS)
     parser.add_argument("--apply", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--verbose", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--list-buckets", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--batch", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--batch-size", type=int, default=100, help=argparse.SUPPRESS)
     args = parser.parse_args()
 
-    ui.banner("JPC-AV DATE EXPRESSIONS  ·  REFORMAT ISO", "\U0001F4C5")
+    ui.banner(f"JPC-AV DATE EXPRESSIONS  ·  REFORMAT → {args.style.upper()}", "\U0001F4C5")
     ui.section("\U0001F4CB  SCAN")
     ui.stat("Resource", RESOURCE_URI, ui.CYAN)
+    ui.stat("Style", args.style, ui.CYAN)
     ui.stat("Mode", "APPLY (writing changes)" if args.apply else "REPORT ONLY (no changes)",
             ui.RED if args.apply else ui.GREEN)
 
@@ -136,12 +156,13 @@ def main():
         sys.exit(1)
 
     counts = {"scanned": 0, "records_to_reformat": 0, "dates_to_reformat": 0,
-              "reformatted": 0, "anomalies": 0, "skipped_changed": 0,
+              "reformatted": 0, "skipped_changed": 0,
               "read_failures": 0, "write_failures": 0}
-    # Store (uri, planned-changes) — NOT the full objects. The apply phase
-    # re-fetches each record fresh and writes only these reviewed changes, and
-    # only where the date's old (ISO) expression is still unchanged.
-    write_plan = []
+    # Per-object review buckets (members collected for --list-buckets). With
+    # records_to_reformat these reconcile to scanned.
+    buckets = {"no_dates": [], "non_single": [], "empty_expr": [],
+               "other": [], "already_in_style": []}
+    write_plan = []  # [(uri, [change,...])] — apply re-fetches fresh
     try:
         # --- Phase 1: read + plan the entire resource. No writes happen here. ---
         try:
@@ -152,25 +173,20 @@ def main():
         ui.stat("Objects found", f"{len(uris):,}", ui.GREEN)
 
         def handle(ao):
-            """Plan one archival object: report it and queue its writes."""
             counts["scanned"] += 1
-            reformats, anomalies = plan_reformats(ao)
-            if anomalies:
-                counts["anomalies"] += len(anomalies)
-                if args.verbose:
-                    ui.line(f"{ui.YELLOW}(skip){ui.RESET} {ui.DIM}[{ao.get('level')}] "
-                            f"{ao.get('title')} — ISO-looking, not converted: "
-                            f"{', '.join(anomalies)}{ui.RESET}")
-            if not reformats:
+            changes = plan_reformats(ao, args.style)
+            if not changes:
+                buckets[classify_idle(ao)].append(
+                    (ao.get("ref_id"), ao.get("level"), ao.get("title")))
                 return
             counts["records_to_reformat"] += 1
-            counts["dates_to_reformat"] += len(reformats)
+            counts["dates_to_reformat"] += len(changes)
             ui.line(f"{ui.WHITE}{ui.BOLD}{ao.get('title')}{ui.RESET}  "
                     f"{ui.DIM}[{ao.get('level')}] {ao.get('ref_id')}{ui.RESET}")
-            for ch in reformats:
+            for ch in changes:
                 ui.line(f"    {ui.DIM}\"{ch['old_expression']}\"{ui.RESET}  {ui.ARROW}  "
                         f"{ui.GREEN}\"{ch['new_expression']}\"{ui.RESET}")
-            write_plan.append((ao.get("uri"), reformats))
+            write_plan.append((ao.get("uri"), changes))
 
         ui.section("\U0001F5D3️   EXPRESSIONS TO REFORMAT")
         if args.batch:
@@ -206,10 +222,8 @@ def main():
                 ui.section("✍️   APPLYING")
                 total = len(write_plan)
                 for n, (uri, planned) in enumerate(write_plan, 1):
-                    # Re-fetch fresh (current data + lock_version), then write ONLY
-                    # the reviewed changes, and only to dates whose old (ISO)
-                    # expression is still exactly as the report showed. Anything
-                    # that drifted is skipped rather than overwritten.
+                    # Re-fetch fresh, then write ONLY the reviewed changes, and only
+                    # to dates whose old expression is still exactly as reported.
                     fresh = session.get(uri)
                     if not fresh:
                         counts["write_failures"] += 1
@@ -227,7 +241,6 @@ def main():
                             fresh_dates[idxs[0]]["expression"] = ch["new_expression"]
                             applied += 1
                         else:
-                            # Zero matches (changed/removed) or ambiguous (>1) — skip.
                             counts["skipped_changed"] += 1
                     if applied == 0:
                         ui.progress_bar(n, total)
@@ -236,7 +249,6 @@ def main():
                         counts["reformatted"] += applied
                         ui.progress_bar(n, total)
                     else:
-                        # Stop on the first write failure rather than plowing ahead.
                         counts["write_failures"] += 1
                         print()
                         ui.line(f"{ui.RED}{ui.BOLD}FAILED to write {uri} — stopping; "
@@ -247,29 +259,40 @@ def main():
         session.logout()
 
     failed = bool(counts["read_failures"] or counts["write_failures"])
+    nothing = sum(len(v) for v in buckets.values())
 
     ui.section("\U0001F4CA  SUMMARY")
     ui.stat("Scanned objects", f"{counts['scanned']:,}")
-    ui.stat("Records w/ ISO expression", f"{counts['records_to_reformat']:,}", ui.CYAN)
+    ui.stat("Records to reformat", f"{counts['records_to_reformat']:,}", ui.CYAN)
     ui.stat("Date subrecords to change", f"{counts['dates_to_reformat']:,}", ui.CYAN)
+    # Reconcile the rest: scanned = records_to_reformat + nothing-to-reformat.
+    ui.stat("Nothing to reformat", f"{nothing:,}", ui.DIM)
+    ui.line(f"{ui.DIM}  already {args.style} {len(buckets['already_in_style'])} "
+            f"· no dates {len(buckets['no_dates'])} · non-single {len(buckets['non_single'])} "
+            f"· empty {len(buckets['empty_expr'])} · other {len(buckets['other'])}{ui.RESET}")
     if args.apply:
         ui.stat("Expressions rewritten", f"{counts['reformatted']:,}", ui.GREEN)
         ui.stat("Skipped (changed in scan)", f"{counts['skipped_changed']:,}",
                 ui.YELLOW if counts["skipped_changed"] else ui.DIM)
-    ui.stat("Anomalies (not converted)", f"{counts['anomalies']:,}",
-            ui.YELLOW if counts["anomalies"] else ui.DIM)
     ui.stat("Read failures", f"{counts['read_failures']:,}",
             ui.RED if counts["read_failures"] else ui.DIM)
     ui.stat("Write failures", f"{counts['write_failures']:,}",
             ui.RED if counts["write_failures"] else ui.DIM)
     if args.apply and counts["read_failures"]:
         ui.line(f"{ui.YELLOW}NOTE: writes were skipped because the read pass was incomplete.{ui.RESET}")
+    if not args.list_buckets and any(buckets[b] for b in ("no_dates", "non_single", "empty_expr", "other")):
+        ui.line(f"{ui.DIM}(re-run with --list-buckets to list the review records){ui.RESET}")
+
+    # --list-buckets: enumerate the review buckets (not already-in-style / not changed)
+    if args.list_buckets:
+        ui.list_members("NO DATES", buckets["no_dates"])
+        ui.list_members("NON-SINGLE DATES ONLY", buckets["non_single"])
+        ui.list_members("EMPTY EXPRESSION (fill territory)", buckets["empty_expr"])
+        ui.list_members("OTHER — non-blank, unparseable expression", buckets["other"])
 
     skipped = counts["skipped_changed"]
     if args.apply and not failed:
         if skipped:
-            # Not everything reviewed was applied (records drifted between scan
-            # and apply). Safe, but NOT a clean "COMPLETE" — flag it and exit 3.
             print()
             ui.line(f"{ui.YELLOW}{ui.BOLD}Completed with skips.{ui.RESET}")
             ui.line(f"{ui.YELLOW}{skipped} reviewed change(s) were skipped because the record "

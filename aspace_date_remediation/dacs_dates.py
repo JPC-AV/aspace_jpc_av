@@ -22,6 +22,47 @@ MONTHS = [
 # values deliberately do NOT match — per scope, those are left for manual review.
 ISO_FULL = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")
 
+# A complete DACS single date, 'YYYY Month D' (e.g. 1982 August 1).
+DACS_FULL = re.compile(r"^(\d{4})\s+([A-Za-z]+)\s+(\d{1,2})$")
+_MONTH_INDEX = {name.lower(): i + 1 for i, name in enumerate(MONTHS)}
+
+
+def parse_single_date(value):
+    """Parse a complete single-date expression in EITHER ISO ('1982-08-01') or
+    DACS ('1982 August 1') form to a (year, month, day) tuple. Returns None for
+    anything that is not a real, complete date in one of those two forms
+    (blank, year-only, year-month, free text, or an impossible calendar date)."""
+    if not value:
+        return None
+    s = str(value).strip()
+    m = ISO_FULL.match(s)
+    if m:
+        year, month, day = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    else:
+        m = DACS_FULL.match(s)
+        if not m:
+            return None
+        month = _MONTH_INDEX.get(m.group(2).lower())
+        if not month:
+            return None
+        year, day = int(m.group(1)), int(m.group(3))
+    try:
+        datetime(year, month, day)  # reject impossible dates (e.g. Feb 30)
+    except ValueError:
+        return None
+    return (year, month, day)
+
+
+def render_single_date(ymd, style):
+    """Render a (year, month, day) tuple in the requested style:
+    'iso' -> '1982-08-01', 'dacs' -> '1982 August 1'."""
+    year, month, day = ymd
+    if style == "iso":
+        return f"{year:04d}-{month:02d}-{day:02d}"
+    if style == "dacs":
+        return f"{year} {MONTHS[month - 1]} {day}"
+    raise ValueError(f"unknown style: {style!r}")
+
 
 def iso_to_dacs(value):
     """Convert a full ISO date 'YYYY-MM-DD' to a DACS expression 'YYYY Month D'.
