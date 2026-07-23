@@ -355,11 +355,19 @@ class ArchivesSpaceClient:
             logging.warning(f"Logout error: {str(e)}")
             return False
     
-    def make_request(self, method: str, endpoint: str, data: Dict = None, 
+    def make_request(self, method: str, endpoint: str, data: Dict = None,
                      retry_count: int = 0) -> Optional[Dict]:
-        """Make API request with retry logic."""
+        """Make API request. Automatic retries are limited to reads.
+
+        Only GETs are retried on failure. A POST/PUT that times out or errors
+        may already have been committed server-side, so blindly retrying it can
+        create duplicate records — writes fail fast instead and the row is
+        reported as an error. The one exception is a 412 (expired session):
+        the request was rejected outright, so re-authenticating and retrying is
+        safe for any method.
+        """
         url = f"{self.base_url}{endpoint}"
-        
+
         try:
             if method == "GET":
                 response = requests.get(url, headers=self.headers, timeout=30)
@@ -367,48 +375,61 @@ class ArchivesSpaceClient:
                 response = requests.post(url, headers=self.headers, json=data, timeout=30)
             elif method == "PUT":
                 response = requests.put(url, headers=self.headers, json=data, timeout=30)
+            elif method == "DELETE":
+                response = requests.delete(url, headers=self.headers, timeout=30)
             else:
                 raise ValueError(f"Unsupported HTTP method: {method}")
-            
+
             if response.status_code in [200, 201]:
                 return response.json()
             elif response.status_code == 412 and retry_count < RETRY_ATTEMPTS:
+                # Rejected before processing - safe to retry any method after re-auth
                 logging.warning("Session expired, re-authenticating...")
                 if self.login():
                     time.sleep(RETRY_DELAY)
                     return self.make_request(method, endpoint, data, retry_count + 1)
+                return None
             else:
                 logging.error(f"API request failed: {method} {endpoint}")
                 logging.error(f"Status: {response.status_code}")
                 logging.error(f"Response: {response.text}")
-                
-                if retry_count < RETRY_ATTEMPTS:
+
+                if method == "GET" and retry_count < RETRY_ATTEMPTS:
                     time.sleep(RETRY_DELAY)
                     return self.make_request(method, endpoint, data, retry_count + 1)
-                    
+
                 return None
-                
+
         except Exception as e:
             logging.error(f"Request error: {str(e)}")
-            if retry_count < RETRY_ATTEMPTS:
+            if method == "GET" and retry_count < RETRY_ATTEMPTS:
                 time.sleep(RETRY_DELAY)
                 return self.make_request(method, endpoint, data, retry_count + 1)
             return None
     
-    def check_component_unique_id(self, component_id: str) -> Tuple[bool, Optional[str]]:
-        """Check if a component unique identifier already exists."""
+    def check_component_unique_id(self, component_id: str) -> Tuple[Optional[bool], Optional[str]]:
+        """Check if a component unique identifier already exists.
+
+        Returns (True, uri) on a hit, (False, None) only when a SUCCESSFUL
+        search reported zero hits, and (None, None) when the search itself
+        failed or returned a malformed response. Callers must treat None as
+        "could not verify" and abort the row — falling through to the create
+        path on a failed check is how duplicates get made (fail closed).
+        """
         search_params = {
             "q": f"component_id:{component_id}",
             "type[]": "archival_object",
             "page": 1,
             "page_size": 10
         }
-        
+
         endpoint = f"/repositories/{REPO_ID}/search"
-        result = self.make_request("GET", 
+        result = self.make_request("GET",
                                    f"{endpoint}?{self._build_query_string(search_params)}")
-        
-        if result and result.get('total_hits', 0) > 0:
+
+        if not isinstance(result, dict) or 'total_hits' not in result:
+            return None, None  # search failed - duplicate status unknown
+        if result.get('total_hits', 0) > 0:
             uri = result['results'][0].get('uri', None)
             return True, uri
         return False, None
@@ -481,6 +502,38 @@ class ArchivesSpaceClient:
             return False
         return extent_type in self._valid_extent_types
     
+    def find_top_container(self, indicator: str) -> Optional[str]:
+        """Find an existing 'AV Case' top container with this exact indicator.
+
+        Returns its uri, None when a successful search found no match, or the
+        sentinel "ERROR" when the search (or a candidate fetch) failed - callers
+        must not create a container on "ERROR", or reruns after transient
+        failures will accumulate duplicates (fail closed). Note: a container
+        created moments ago may not be indexed yet (Solr lag), so reuse is
+        best-effort; the delete-on-failure compensation covers the rest.
+        """
+        search_params = {
+            "q": f'"{indicator}"',
+            "type[]": "top_container",
+            "page": 1,
+            "page_size": 10
+        }
+        endpoint = f"/repositories/{REPO_ID}/search"
+        result = self.make_request("GET",
+                                   f"{endpoint}?{self._build_query_string(search_params)}")
+        if not isinstance(result, dict) or 'total_hits' not in result:
+            return "ERROR"
+        for hit in result.get('results', []):
+            uri = hit.get('uri')
+            if not uri:
+                continue
+            record = self.make_request("GET", uri)
+            if record is None:
+                return "ERROR"  # can't verify the candidate - don't guess
+            if record.get('indicator') == indicator and record.get('type') == 'AV Case':
+                return uri
+        return None
+
     def create_top_container(self, indicator: str) -> Optional[str]:
         """Create a new top container."""
         container_data = {
@@ -488,13 +541,18 @@ class ArchivesSpaceClient:
             "type": "AV Case",
             "repository": {"ref": f"/repositories/{REPO_ID}"}
         }
-        
+
         endpoint = f"/repositories/{REPO_ID}/top_containers"
         result = self.make_request("POST", endpoint, container_data)
-        
+
         if result:
             return result['uri']
         return None
+
+    def delete_record(self, uri: str) -> bool:
+        """Delete a record (used to clean up a just-created top container when
+        the archival object it was made for fails to create)."""
+        return self.make_request("DELETE", uri) is not None
     
     def _build_query_string(self, params: Dict) -> str:
         """Build URL query string from parameters."""
@@ -651,30 +709,41 @@ def create_notes(row: Dict) -> List[Dict]:
 # INSTANCE PROCESSING
 # ==============================
 
-def create_instances(row: Dict, client: ArchivesSpaceClient) -> List[Dict]:
-    """Create ArchivesSpace instance objects from CSV row."""
-    instances = []
-    
+def create_instances(row: Dict, client: ArchivesSpaceClient) -> Tuple[List[Dict], Optional[str], List[str]]:
+    """Build the instance list for a CSV row, reusing an existing top container
+    when one with this indicator already exists (e.g. from an earlier partial
+    run) instead of creating a duplicate.
+
+    Returns (instances, created_container_uri, errors). created_container_uri
+    is set only when this call CREATED the container, so the caller can delete
+    it again if the archival object fails to create. Any errors mean the row
+    must not proceed.
+    """
     catalog_number = row.get(col.CATALOG, '').strip()
     if not catalog_number:
-        return instances
-    
-    container_uri = client.create_top_container(catalog_number)
-    
+        return [], None, []
+
+    created_uri = None
+    container_uri = client.find_top_container(catalog_number)
+    if container_uri == "ERROR":
+        return [], None, ["Top container lookup failed - row not processed (retry later)"]
     if container_uri:
-        instance = {
-            "instance_type": "Moving Images (Video)",
-            "jsonmodel_type": "instance",
-            "sub_container": {
-                "jsonmodel_type": "sub_container",
-                "top_container": {"ref": container_uri}
-            }
-        }
-        instances.append(instance)
+        logging.info(f"Reusing existing top container for {catalog_number}: {container_uri}")
     else:
-        logging.warning(f"Failed to create top container for {catalog_number}")
-    
-    return instances
+        container_uri = client.create_top_container(catalog_number)
+        if not container_uri:
+            return [], None, [f"Failed to create top container for {catalog_number}"]
+        created_uri = container_uri
+
+    instance = {
+        "instance_type": "Moving Images (Video)",
+        "jsonmodel_type": "instance",
+        "sub_container": {
+            "jsonmodel_type": "sub_container",
+            "top_container": {"ref": container_uri}
+        }
+    }
+    return [instance], created_uri, []
 
 # ==============================
 # CHANGE DETECTION
@@ -694,50 +763,67 @@ def get_note_content(notes: List[Dict], note_type: str) -> Optional[str]:
                 return note['content']
     return None
 
+def _note_preview(value: Optional[str]) -> Optional[str]:
+    """Truncate a note value for change-report display."""
+    if value and len(value) > 40:
+        return value[:40] + '...'
+    return value
+
+
 def detect_changes(existing_obj: Dict, row: Dict) -> Dict[str, Tuple[Any, Any]]:
     """Compare existing object with CSV data and return changes.
-    
+
+    Blank CSV cells mean "leave the existing value alone", never "clear it" -
+    so a field is only flagged as changed when the CSV actually provides a
+    value. This mirrors what update_archival_object applies; keep the two in
+    sync or the script will report updates it did not make.
+
     Returns:
         Dict mapping field names to (old_value, new_value) tuples
     """
     changes = {}
-    
+
     # Check title
     new_title = row.get(col.TITLE, '').strip()
     if new_title and existing_obj.get('title') != new_title:
         changes['title'] = (existing_obj.get('title'), new_title)
-    
-    # Check dates
+
+    # Check dates (only when the CSV provides at least one date)
     new_dates, _ = create_date_objects(row)  # Errors checked elsewhere
     existing_dates = existing_obj.get('dates', [])
-    
+
     # Simple comparison: just check if count differs or any begin dates differ
     existing_begins = {d.get('label'): d.get('begin') for d in existing_dates}
     new_begins = {d.get('label'): d.get('begin') for d in new_dates}
-    
-    if existing_begins != new_begins:
+
+    if new_begins and existing_begins != new_begins:
         changes['dates'] = (existing_begins, new_begins)
-    
-    # Check extents
+
+    # Check extents (only when the CSV provides one)
     new_extents = create_extent_objects(row)
     existing_extents = existing_obj.get('extents', [])
-    
+
     existing_extent_types = [e.get('extent_type') for e in existing_extents]
     new_extent_types = [e.get('extent_type') for e in new_extents]
-    
-    if existing_extent_types != new_extent_types:
+
+    if new_extent_types and existing_extent_types != new_extent_types:
         changes['extents'] = (existing_extent_types, new_extent_types)
-    
+
     # Check scopecontent note
     existing_notes = existing_obj.get('notes', [])
     existing_scope = get_note_content(existing_notes, 'scopecontent')
     new_description = row.get(col.DESCRIPTION, '').strip()
-    
+
     if new_description and existing_scope != new_description:
-        old_preview = (existing_scope[:40] + '...') if existing_scope and len(existing_scope) > 40 else existing_scope
-        new_preview = (new_description[:40] + '...') if len(new_description) > 40 else new_description
-        changes['description'] = (old_preview, new_preview)
-    
+        changes['description'] = (_note_preview(existing_scope), _note_preview(new_description))
+
+    # Check phystech note (imported on create, so update must track it too)
+    existing_phystech = get_note_content(existing_notes, 'phystech')
+    new_phystech = row.get(col.PHYSTECH, '').strip()
+
+    if new_phystech and existing_phystech != new_phystech:
+        changes['phystech'] = (_note_preview(existing_phystech), _note_preview(new_phystech))
+
     return changes
 
 # ==============================
@@ -784,29 +870,47 @@ def create_archival_object(row: Dict, client: ArchivesSpaceClient,
     if notes:
         ao_data["notes"] = notes
     
+    created_container_uri = None
     if not dry_run:
-        instances = create_instances(row, client)
+        instances, created_container_uri, instance_errors = create_instances(row, client)
+        if instance_errors:
+            return None, instance_errors
         if instances:
             ao_data["instances"] = instances
-    
+
     if dry_run:
         logging.info(f"[DRY RUN] Would create archival object: {catalog_number}")
         return {"uri": f"/dry_run/{catalog_number}", "dry_run": True}, []
     else:
         endpoint = f"/repositories/{REPO_ID}/archival_objects"
         result = client.make_request("POST", endpoint, ao_data)
-        
+
         if result:
             logging.info(f"Successfully created archival object: {catalog_number}")
             return result, []
         else:
             logging.error(f"Failed to create archival object: {catalog_number}")
-            return None, ["Failed to create archival object via API"]
+            errors = ["Failed to create archival object via API"]
+            # Compensation: remove the container this row just created so a
+            # rerun doesn't strand it (or make another one).
+            if created_container_uri:
+                if client.delete_record(created_container_uri):
+                    logging.info(f"Cleaned up unused top container: {created_container_uri}")
+                else:
+                    logging.warning(f"Orphaned top container left behind: {created_container_uri}")
+                    errors.append(f"Orphaned top container left behind: {created_container_uri}")
+            return None, errors
 
-def update_archival_object(row: Dict, client: ArchivesSpaceClient, 
+def update_archival_object(row: Dict, client: ArchivesSpaceClient,
                           existing_uri: str, dry_run: bool = False) -> Tuple[Optional[Dict], Dict, List[str]]:
     """Update an existing archival object from a CSV row.
-    
+
+    Replacement semantics: a non-blank CSV value REPLACES the corresponding
+    field wholesale (all dates, all extents, the managed note types); a blank
+    CSV cell leaves the existing value untouched. This import can never clear
+    a field - deletions are done in ArchivesSpace directly. detect_changes()
+    applies the same rule so reported changes match applied changes.
+
     Returns:
         Tuple of (result dict or None, changes dict, error messages list)
     """
@@ -897,11 +1001,16 @@ def process_csv_row(row: Dict, row_num: int, client: ArchivesSpaceClient,
                 logging.error(f"Invalid extent type '{original_format}' for {catalog_number}")
                 return result
         
-        # Check for duplicate
-        existing = False
-        existing_uri = None
+        # Check for duplicate. A failed check is NOT permission to create -
+        # abort the row rather than risk making a duplicate (fail closed).
         existing, existing_uri = client.check_component_unique_id(catalog_number)
-        
+
+        if existing is None:
+            result["status"] = "error"
+            result["message"] = "Duplicate check failed (search unavailable) - row not processed"
+            logging.error(f"Duplicate check failed for {catalog_number}; refusing to create")
+            return result
+
         if existing:
             if duplicate_mode == 'fail':
                 result["status"] = "error"

@@ -78,6 +78,8 @@ python aspace_csv_import.py -f your_file.csv -u username -p 'password'
 
 **Note:** If your password contains special characters (`&`, `!`, `#`, etc.), wrap it in single quotes.
 
+**Caution:** Passing the password with `-p` exposes it to your shell history and process listings. Prefer creds.py.
+
 Command-line arguments override creds.py settings.
 
 ## CSV File Format
@@ -97,7 +99,7 @@ The CSV should have the following columns:
 
 *If no title is provided, the catalog number will be used
 
-**Note:** The CSV contains 80+ columns, but only 8 are actively mapped. See **POTENTIAL_MAPPINGS.md** for analysis of unmapped fields.
+**Note:** The CSV contains 80+ columns, but only 9 are actively mapped. See **POTENTIAL_MAPPINGS.md** for analysis of unmapped fields.
 
 ## Quick Start
 
@@ -217,7 +219,7 @@ IMPORT SUMMARY
 | Broadcast Date | `dates[]` (label: broadcast) | Converted to YYYY-MM-DD |
 | Original Format | `extent_type` | Must match ASpace dropdown exactly |
 | ASpace Scope and Contents Note | Scope and Contents note | Multipart note with text subnote |
-| _TRANSFER_NOTES | Physical Characteristics note | Playback/quality issues (phystech) |
+| ASpace PhysTech Note | Physical Characteristics note | Playback/quality issues (phystech) |
 | ASpace Parent RefID | `parent.ref` | **Required** - links to parent object |
 
 ### Fixed Values
@@ -244,11 +246,16 @@ When using `--update-existing`:
 - ✅ All dates
 - ✅ Extents (format type)
 - ✅ Scope & Contents notes
+- ✅ PhysTech notes
 
 What it preserves:
 - ❌ Component ID
 - ❌ Parent relationship
 - ❌ Instances/containers
+
+**Blank cells:** a blank CSV cell leaves the existing ArchivesSpace value
+untouched — updates can replace values but never clear them. Deletions are
+done in ArchivesSpace directly.
 
 ## Validation
 
