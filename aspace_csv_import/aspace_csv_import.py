@@ -426,7 +426,7 @@ class ArchivesSpaceClient:
                 return self.make_request(method, endpoint, data, retry_count + 1)
             return None
     
-    def check_component_unique_id(self, component_id: str) -> Tuple[Optional[bool], Optional[str]]:
+    def check_component_unique_id(self, component_id: str) -> Tuple[Optional[int], Optional[str]]:
         """Check if a component unique identifier already exists IN OUR RESOURCE.
 
         Search hits are fuzzy and repo-wide, so each candidate is fetched and
@@ -436,12 +436,16 @@ class ArchivesSpaceClient:
         duplicate (update mode would edit the wrong record). All result pages
         are checked.
 
-        Returns (True, uri) on a verified hit, (False, None) only when a
-        SUCCESSFUL search verified zero matches, and (None, None) when the
+        Returns (match_count, first_uri): (0, None) only when a SUCCESSFUL
+        search verified zero matches; (1, uri) for the normal single match;
+        (2+, uri) when the resource already contains MULTIPLE records with
+        this component_id - existing corruption that callers must surface as
+        an error rather than silently picking one; and (None, None) when the
         search or a candidate fetch failed. Callers must treat None as "could
         not verify" and abort the row (fail closed).
         """
         endpoint = f"/repositories/{REPO_ID}/search"
+        matches = []
         page = 1
         while True:
             search_params = {
@@ -464,33 +468,59 @@ class ArchivesSpaceClient:
                     return None, None  # can't verify the candidate - don't guess
                 if (record.get('component_id') == component_id
                         and record.get('resource', {}).get('ref') == RESOURCE_URI):
-                    return True, uri
+                    matches.append(uri)
             last_page = result.get('last_page', page)
             if page >= last_page:
                 break
             page += 1
-        return False, None
+        return len(matches), (matches[0] if matches else None)
     
     def get_parent_object(self, parent_ref_id: str) -> Optional[Dict]:
-        """Retrieve parent archival object by ref_id."""
+        """Retrieve the parent archival object by EXACT ref_id in our resource.
+
+        Search hits are fuzzy and repository-wide, so each candidate is fetched
+        and only accepted when its ref_id matches exactly AND it belongs to
+        RESOURCE_URI - a partial or cross-resource hit must never become the
+        parent a new record is attached under. All result pages are checked.
+        (ref_id is ArchivesSpace-generated and unique, so multiple exact
+        matches cannot occur.)
+
+        Returns the parent record, or None when no verified parent was found
+        or the search/fetch failed - callers already fail the row on None.
+        """
         if not parent_ref_id:
             return None
-            
-        search_params = {
-            "q": f"ref_id:{parent_ref_id}",
-            "type[]": "archival_object",
-            "page": 1,
-            "page_size": 10
-        }
-        
+
         endpoint = f"/repositories/{REPO_ID}/search"
-        result = self.make_request("GET", 
-                                   f"{endpoint}?{self._build_query_string(search_params)}")
-        
-        if result and result.get('total_hits', 0) > 0:
-            uri = result['results'][0]['uri']
-            return self.make_request("GET", uri)
-        
+        page = 1
+        while True:
+            search_params = {
+                "q": f"ref_id:{parent_ref_id}",
+                "type[]": "archival_object",
+                "page": page,
+                "page_size": 10
+            }
+            result = self.make_request("GET",
+                                       f"{endpoint}?{self._build_query_string(search_params)}")
+            if not isinstance(result, dict) or 'total_hits' not in result:
+                logging.error(f"Parent search failed for ref_id: {parent_ref_id}")
+                return None
+            for hit in result.get('results', []):
+                uri = hit.get('uri')
+                if not uri:
+                    continue
+                record = self.make_request("GET", uri)
+                if record is None:
+                    logging.error(f"Could not verify parent candidate {uri} for ref_id: {parent_ref_id}")
+                    return None  # can't verify the candidate - don't guess
+                if (record.get('ref_id') == parent_ref_id
+                        and record.get('resource', {}).get('ref') == RESOURCE_URI):
+                    return record
+            last_page = result.get('last_page', page)
+            if page >= last_page:
+                break
+            page += 1
+
         logging.warning(f"Parent object not found with ref_id: {parent_ref_id}")
         return None
     
@@ -953,8 +983,8 @@ def create_archival_object(row: Dict, client: ArchivesSpaceClient,
                         logging.warning(f"Orphaned top container left behind: {created_container_uri}")
                         errors.append(f"Orphaned top container left behind: {created_container_uri}")
                 else:
-                    exists, existing_uri = client.check_component_unique_id(catalog_number)
-                    if exists:
+                    found_count, existing_uri = client.check_component_unique_id(catalog_number)
+                    if found_count:
                         msg = (f"Create response was lost but {catalog_number} EXISTS at "
                                f"{existing_uri} - verify it in ArchivesSpace; container "
                                f"{created_container_uri} was kept")
@@ -1075,13 +1105,25 @@ def process_csv_row(row: Dict, row_num: int, client: ArchivesSpaceClient,
         
         # Check for duplicate. A failed check is NOT permission to create -
         # abort the row rather than risk making a duplicate (fail closed).
-        existing, existing_uri = client.check_component_unique_id(catalog_number)
+        dup_count, existing_uri = client.check_component_unique_id(catalog_number)
 
-        if existing is None:
+        if dup_count is None:
             result["status"] = "error"
             result["message"] = "Duplicate check failed (search unavailable) - row not processed"
             logging.error(f"Duplicate check failed for {catalog_number}; refusing to create")
             return result
+
+        if dup_count > 1:
+            # The resource already holds several records with this component_id.
+            # Skipping would hide the corruption; updating would pick one
+            # arbitrarily. Surface it for manual cleanup instead.
+            result["status"] = "error"
+            result["message"] = (f"{dup_count} records with component ID {catalog_number} "
+                                 f"already exist in the resource - clean up duplicates before importing this row")
+            logging.error(result["message"])
+            return result
+
+        existing = dup_count == 1
 
         if existing:
             if duplicate_mode == 'fail':
