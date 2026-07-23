@@ -87,13 +87,13 @@ The CSV should have the following columns:
 | Column | Description | Required | Example |
 |--------|-------------|----------|---------|
 | CATALOG_NUMBER | Component Unique Identifier | Yes | JPC_AV_00012 |
-| TITLE | Item title | No* | Ebony/Jet Celebrity Showcase |
+| ASpace Title | Item title | No* | Ebony/Jet Celebrity Showcase |
 | Creation or Recording Date | Creation date (M/D/YYYY) | No | 8/1/1982 |
 | Edit Date | Edit/modified date (M/D/YYYY) | No | 8/2/1982 |
 | Broadcast Date | Broadcast date (M/D/YYYY) | No | 9/1/1982 |
 | Original Format | Physical format (must match dropdown) | Yes | 2 inch videotape |
 | ASpace Parent RefID | Parent object's ref_id | Yes | abc123def456 |
-| DESCRIPTION | Scope and contents | No | Pilot episode featuring... |
+| ASpace Scope and Contents Note | Scope and contents | No | Pilot episode featuring... |
 
 *If no title is provided, the catalog number will be used
 
@@ -211,12 +211,12 @@ IMPORT SUMMARY
 |------------|-------------------|-------|
 | CATALOG_NUMBER | `component_id` | Component Unique Identifier |
 | CATALOG_NUMBER | `top_container.indicator` | Container indicator (no barcode) |
-| TITLE | `title` | Falls back to CATALOG_NUMBER if empty |
+| ASpace Title | `title` | Falls back to CATALOG_NUMBER if empty |
 | Creation or Recording Date | `dates[]` (label: creation) | Converted to YYYY-MM-DD |
 | Edit Date | `dates[]` (label: Edited) | Converted to YYYY-MM-DD |
 | Broadcast Date | `dates[]` (label: broadcast) | Converted to YYYY-MM-DD |
 | Original Format | `extent_type` | Must match ASpace dropdown exactly |
-| DESCRIPTION | Scope and Contents note | Multipart note with text subnote |
+| ASpace Scope and Contents Note | Scope and Contents note | Multipart note with text subnote |
 | _TRANSFER_NOTES | Physical Characteristics note | Playback/quality issues (phystech) |
 | ASpace Parent RefID | `parent.ref` | **Required** - links to parent object |
 

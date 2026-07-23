@@ -6,13 +6,13 @@ This document shows a complete example of how a single CSV row becomes an Archiv
 
 ```
 CATALOG_NUMBER: JPC_AV_00012
-TITLE: Ebony/Jet Celebrity Showcase, episode 22, promo
+ASpace Title: Ebony/Jet Celebrity Showcase, episode 22, promo
 Creation or Recording Date: 8/1/1982
 Edit Date: [empty]
 Broadcast Date: [empty]
 Original Format: 2 inch videotape
 ASpace Parent RefID: abc123def456
-DESCRIPTION: Promotional clip for episode 22 of the Ebony/Jet Celebrity Showcase series.
+ASpace Scope and Contents Note: Promotional clip for episode 22 of the Ebony/Jet Celebrity Showcase series.
 ASpace PhysTech Note: Slight ringing present throughout. Hue is inconsistent; skin tones are redder in some sections.
 ```
 

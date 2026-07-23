@@ -8,12 +8,12 @@
 |--------|---------|---------|-------|
 | CATALOG_NUMBER | `component_id` | JPC_AV_00012 | Must be unique |
 | CATALOG_NUMBER | `top_container.indicator` | JPC_AV_00012 | Creates new top container |
-| TITLE | `title` | Ebony/Jet Celebrity Showcase, episode 22 | |
+| ASpace Title | `title` | Ebony/Jet Celebrity Showcase, episode 22 | |
 | Creation or Recording Date | `dates[]` (label: creation) | 1982-08-01 | Converted from M/D/YYYY |
 | Edit Date | `dates[]` (label: Edited) | 1982-08-15 | Converted from M/D/YYYY |
 | Broadcast Date | `dates[]` (label: broadcast) | 1982-09-01 | Converted from M/D/YYYY |
 | Original Format | `extents[].extent_type` | 2 inch videotape | Must match ASpace dropdown exactly |
-| DESCRIPTION | Scope and Contents note (note_text) | Promotional clip for episode... | |
+| ASpace Scope and Contents Note | Scope and Contents note (note_text) | Promotional clip for episode... | |
 | ASpace PhysTech Note | Physical Characteristics note (note_text) | Slight ringing present... | Note type: phystech. May contain content from `_TRANSFER_NOTES`, `_PRE_TRANSFER_NOTES`, both, or neither. Assembled and edited by staff before import. Only written when content is present. |
 | ASpace Parent RefID | `parent.ref` | /repositories/2/archival_objects/12345 | **Required** |
 
@@ -65,7 +65,7 @@
 }
 ```
 
-### TITLE → title
+### ASpace Title → title
 
 ```json
 {
@@ -146,7 +146,7 @@
 }
 ```
 
-### DESCRIPTION → Scope and Contents
+### ASpace Scope and Contents Note → Scope and Contents
 
 ```json
 {

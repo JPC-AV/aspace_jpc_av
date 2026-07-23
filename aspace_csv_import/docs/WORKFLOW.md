@@ -13,8 +13,8 @@
    - `CATALOG_NUMBER`
    - `ASpace Parent RefID`
    - `Original Format`
-   - `TITLE`
-   - `DESCRIPTION`
+   - `ASpace Title`
+   - `ASpace Scope and Contents Note`
    - `ASpace PhysTech Note`
    - `Creation or Recording Date`
    - `Edit Date`

@@ -6,13 +6,13 @@
 | CSV Column | Maps To | Status |
 |------------|---------|--------|
 | **CATALOG_NUMBER** 📼 | `component_id`, `top_container.indicator` | ✅ Active |
-| **TITLE** 📼 | `title` | ✅ Active |
+| **ASpace Title** 📼 | `title` | ✅ Active |
 | **Creation or Recording Date** | `dates[]` (label: creation) | ✅ Active |
 | **Edit Date** | `dates[]` (label: Edited) | ✅ Active |
 | **Broadcast Date** | `dates[]` (label: broadcast) | ✅ Active |
 | **Original Format** | `extent_type` | ✅ Active |
 | **ASpace Parent RefID** | `parent.ref` | ✅ Active |
-| **DESCRIPTION** 📼 | Scope and Contents note | ✅ Active |
+| **ASpace Scope and Contents Note** 📼 | Scope and Contents note | ✅ Active |
 | **ASpace PhysTech Note** | Physical Characteristics and Technical Requirements note (phystech) | ✅ Active. May contain content from `_TRANSFER_NOTES`, `_PRE_TRANSFER_NOTES`, both, or neither. Assembled and edited by staff before import. Only written when content is present. |
 
 ## Fields Handled by aspace-rename-directories.py
@@ -27,8 +27,8 @@
 Fields marked with 📼 are embedded in the Matroska (.mkv) container as key:value tag pairs during the digitization workflow:
 
 - CATALOG_NUMBER
-- TITLE
-- DESCRIPTION
+- ASpace Title
+- ASpace Scope and Contents Note
 - ORIGINAL_MEDIA_TYPE
 - _PRE_TRANSFER_NOTES
 - _TRANSFER_NOTES

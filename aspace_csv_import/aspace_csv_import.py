@@ -14,6 +14,8 @@ from pathlib import Path
 import time
 import argparse
 
+import csv_columns as col  # single source of truth for CSV header names
+
 # ==============================
 # TERMINAL COLORS
 # ==============================
@@ -121,9 +123,9 @@ def get_colored_help():
     {C.GREEN}${C.RESET} python3 aspace_csv_import.py -f data.csv --update-existing
     {C.GREEN}${C.RESET} python3 aspace_csv_import.py -f data.csv -u admin -p secret
 
-{C.BOLD}CSV COLUMNS{C.RESET} {C.DIM}(all must be present in CSV header){C.RESET}
-    CATALOG_NUMBER, ASpace Parent RefID, TITLE, Creation or Recording Date,
-    Edit Date, Broadcast Date, Original Format, DESCRIPTION, ASpace PhysTech Note
+{C.BOLD}CSV COLUMNS{C.RESET} {C.DIM}(all must be present in CSV header; from csv_columns.py){C.RESET}
+    {", ".join(col.REQUIRED_COLUMNS[:5])},
+    {", ".join(col.REQUIRED_COLUMNS[5:])}
 
 {C.BOLD}OUTPUT{C.RESET}
     Reports saved to: {C.CYAN}~/aspace_import_reports/{C.RESET} by default
@@ -231,17 +233,7 @@ def validate_csv_before_import(filename: str) -> Tuple[bool, List[str], List[str
     warnings = []
     
     # All columns that map to ArchivesSpace fields - must be present
-    required_columns = [
-        "CATALOG_NUMBER",
-        "ASpace Parent RefID",
-        "TITLE",
-        "Creation or Recording Date",
-        "Edit Date",
-        "Broadcast Date",
-        "Original Format",
-        "DESCRIPTION",
-        "ASpace PhysTech Note"
-    ]
+    required_columns = col.REQUIRED_COLUMNS
     
     try:
         with open(filename, 'r', encoding='utf-8-sig') as csvfile:
@@ -250,9 +242,9 @@ def validate_csv_before_import(filename: str) -> Tuple[bool, List[str], List[str
             
             # Check for required columns
             missing_columns = []
-            for col in required_columns:
-                if col not in headers:
-                    missing_columns.append(col)
+            for column in required_columns:
+                if column not in headers:
+                    missing_columns.append(column)
             
             if missing_columns:
                 errors.append(f"Missing required columns: {', '.join(missing_columns)}")
@@ -263,7 +255,7 @@ def validate_csv_before_import(filename: str) -> Tuple[bool, List[str], List[str
             
             for row_num, row in enumerate(reader, 1):
                 # Check catalog number
-                catalog_num = row.get('CATALOG_NUMBER', '').strip()
+                catalog_num = row.get(col.CATALOG, '').strip()
                 if not catalog_num:
                     errors.append(f"Row {row_num}: Missing CATALOG_NUMBER")
                 elif catalog_num in catalog_numbers:
@@ -272,12 +264,12 @@ def validate_csv_before_import(filename: str) -> Tuple[bool, List[str], List[str
                     catalog_numbers.add(catalog_num)
                 
                 # Check parent ref_id
-                parent_ref = row.get('ASpace Parent RefID', '').strip()
+                parent_ref = row.get(col.PARENT_REFID, '').strip()
                 if not parent_ref:
                     errors.append(f"Row {row_num}: Missing ASpace Parent RefID")
                 
                 # Check dates
-                for date_field in ['Creation or Recording Date', 'Edit Date', 'Broadcast Date']:
+                for date_field in [col.CREATION_DATE, col.EDIT_DATE, col.BROADCAST_DATE]:
                     date_val = row.get(date_field, '').strip()
                     if date_val:
                         parsed = parse_date(date_val)
@@ -285,7 +277,7 @@ def validate_csv_before_import(filename: str) -> Tuple[bool, List[str], List[str
                             errors.append(f"Row {row_num}: Invalid {date_field}: {date_val}")
                 
                 # Check title (warning only)
-                if not row.get('TITLE', '').strip():
+                if not row.get(col.TITLE, '').strip():
                     warnings.append(f"Row {row_num}: Empty TITLE (will use CATALOG_NUMBER)")
     
     except Exception as e:
@@ -551,10 +543,10 @@ def create_date_objects(row: Dict) -> Tuple[List[Dict], List[str]]:
     dates = []
     errors = []
     
-    if row.get('Creation or Recording Date'):
-        date_str = parse_date(row['Creation or Recording Date'])
+    if row.get(col.CREATION_DATE):
+        date_str = parse_date(row[col.CREATION_DATE])
         if date_str is None:
-            errors.append(f"Invalid Creation or Recording Date: {row['Creation or Recording Date']}")
+            errors.append(f"Invalid {col.CREATION_DATE}: {row[col.CREATION_DATE]}")
         elif date_str:  # Not empty string
             dates.append({
                 "date_type": "single",
@@ -564,10 +556,10 @@ def create_date_objects(row: Dict) -> Tuple[List[Dict], List[str]]:
                 "jsonmodel_type": "date"
             })
     
-    if row.get('Edit Date'):
-        date_str = parse_date(row['Edit Date'])
+    if row.get(col.EDIT_DATE):
+        date_str = parse_date(row[col.EDIT_DATE])
         if date_str is None:
-            errors.append(f"Invalid Edit Date: {row['Edit Date']}")
+            errors.append(f"Invalid {col.EDIT_DATE}: {row[col.EDIT_DATE]}")
         elif date_str:  # Not empty string
             dates.append({
                 "date_type": "single",
@@ -577,10 +569,10 @@ def create_date_objects(row: Dict) -> Tuple[List[Dict], List[str]]:
                 "jsonmodel_type": "date"
             })
     
-    if row.get('Broadcast Date'):
-        date_str = parse_date(row['Broadcast Date'])
+    if row.get(col.BROADCAST_DATE):
+        date_str = parse_date(row[col.BROADCAST_DATE])
         if date_str is None:
-            errors.append(f"Invalid Broadcast Date: {row['Broadcast Date']}")
+            errors.append(f"Invalid {col.BROADCAST_DATE}: {row[col.BROADCAST_DATE]}")
         elif date_str:  # Not empty string
             dates.append({
                 "date_type": "single",
@@ -600,7 +592,7 @@ def create_extent_objects(row: Dict) -> List[Dict]:
     """Create ArchivesSpace extent objects from CSV row."""
     extents = []
     
-    original_format = row.get('Original Format', '').strip()
+    original_format = row.get(col.ORIGINAL_FORMAT, '').strip()
     if original_format:
         extent = {
             "portion": "whole",
@@ -623,7 +615,7 @@ def create_notes(row: Dict) -> List[Dict]:
     # Scope and Contents note from DESCRIPTION
     scope_content_parts = []
     
-    description = row.get('DESCRIPTION', '').strip()
+    description = row.get(col.DESCRIPTION, '').strip()
     if description:
         scope_content_parts.append({
             "jsonmodel_type": "note_text",
@@ -640,7 +632,7 @@ def create_notes(row: Dict) -> List[Dict]:
         })
     
     # Physical Characteristics and Technical Requirements note from ASpace PhysTech Note
-    phystech_note = row.get('ASpace PhysTech Note', '').strip()
+    phystech_note = row.get(col.PHYSTECH, '').strip()
     if phystech_note:
         notes.append({
             "jsonmodel_type": "note_multipart",
@@ -663,7 +655,7 @@ def create_instances(row: Dict, client: ArchivesSpaceClient) -> List[Dict]:
     """Create ArchivesSpace instance objects from CSV row."""
     instances = []
     
-    catalog_number = row.get('CATALOG_NUMBER', '').strip()
+    catalog_number = row.get(col.CATALOG, '').strip()
     if not catalog_number:
         return instances
     
@@ -711,7 +703,7 @@ def detect_changes(existing_obj: Dict, row: Dict) -> Dict[str, Tuple[Any, Any]]:
     changes = {}
     
     # Check title
-    new_title = row.get('TITLE', '').strip()
+    new_title = row.get(col.TITLE, '').strip()
     if new_title and existing_obj.get('title') != new_title:
         changes['title'] = (existing_obj.get('title'), new_title)
     
@@ -739,7 +731,7 @@ def detect_changes(existing_obj: Dict, row: Dict) -> Dict[str, Tuple[Any, Any]]:
     # Check scopecontent note
     existing_notes = existing_obj.get('notes', [])
     existing_scope = get_note_content(existing_notes, 'scopecontent')
-    new_description = row.get('DESCRIPTION', '').strip()
+    new_description = row.get(col.DESCRIPTION, '').strip()
     
     if new_description and existing_scope != new_description:
         old_preview = (existing_scope[:40] + '...') if existing_scope and len(existing_scope) > 40 else existing_scope
@@ -769,12 +761,12 @@ def create_archival_object(row: Dict, client: ArchivesSpaceClient,
         "publish": True
     }
     
-    title = row.get('TITLE', '').strip()
+    title = row.get(col.TITLE, '').strip()
     if not title:
-        title = row.get('CATALOG_NUMBER')
+        title = row.get(col.CATALOG)
     ao_data["title"] = title
     
-    catalog_number = row.get('CATALOG_NUMBER', '').strip()
+    catalog_number = row.get(col.CATALOG, '').strip()
     if catalog_number:
         ao_data["component_id"] = catalog_number
     
@@ -819,7 +811,7 @@ def update_archival_object(row: Dict, client: ArchivesSpaceClient,
         Tuple of (result dict or None, changes dict, error messages list)
     """
     
-    catalog_number = row.get('CATALOG_NUMBER', '').strip()
+    catalog_number = row.get(col.CATALOG, '').strip()
     
     existing_obj = client.make_request("GET", existing_uri)
     if not existing_obj:
@@ -839,7 +831,7 @@ def update_archival_object(row: Dict, client: ArchivesSpaceClient,
         return {"uri": existing_uri, "unchanged": True}, {}, []
     
     # Apply changes
-    title = row.get('TITLE', '').strip()
+    title = row.get(col.TITLE, '').strip()
     if title:
         existing_obj["title"] = title
     
@@ -880,8 +872,8 @@ def process_csv_row(row: Dict, row_num: int, client: ArchivesSpaceClient,
     """Process a single CSV row and return result."""
     result = {
         "row_number": row_num,
-        "catalog_number": row.get('CATALOG_NUMBER', ''),
-        "title": row.get('TITLE', ''),
+        "catalog_number": row.get(col.CATALOG, ''),
+        "title": row.get(col.TITLE, ''),
         "status": "pending",
         "message": "",
         "uri": None,
@@ -889,7 +881,7 @@ def process_csv_row(row: Dict, row_num: int, client: ArchivesSpaceClient,
     }
     
     try:
-        catalog_number = row.get('CATALOG_NUMBER', '').strip()
+        catalog_number = row.get(col.CATALOG, '').strip()
         if not catalog_number:
             result["status"] = "skipped"
             result["message"] = "Missing catalog number"
@@ -897,7 +889,7 @@ def process_csv_row(row: Dict, row_num: int, client: ArchivesSpaceClient,
             return result
         
         # Validate extent type
-        original_format = row.get('Original Format', '').strip()
+        original_format = row.get(col.ORIGINAL_FORMAT, '').strip()
         if original_format:
             if not client.validate_extent_type(original_format):
                 result["status"] = "error"
@@ -953,7 +945,7 @@ def process_csv_row(row: Dict, row_num: int, client: ArchivesSpaceClient,
                 return result
         
         # Parent RefID is REQUIRED
-        parent_ref_id = row.get('ASpace Parent RefID', '').strip()
+        parent_ref_id = row.get(col.PARENT_REFID, '').strip()
         if not parent_ref_id:
             result["status"] = "error"
             result["message"] = "Missing Parent RefID"
@@ -1054,21 +1046,21 @@ def process_csv_file(filename: str, client: ArchivesSpaceClient,
                     summary["failed"] += 1
                     results.append({
                         "row_number": row_num,
-                        "catalog_number": row.get('CATALOG_NUMBER', ''),
-                        "title": row.get('TITLE', ''),
+                        "catalog_number": row.get(col.CATALOG, ''),
+                        "title": row.get(col.TITLE, ''),
                         "status": "error",
                         "message": str(stop),
                         "uri": None
                     })
-                    print_status("error", f"{row.get('CATALOG_NUMBER', '')} - {stop}")
+                    print_status("error", f"{row.get(col.CATALOG, '')} - {stop}")
                     break
                 except Exception as row_error:
                     logging.error(f"Unexpected error at row {row_num}: {str(row_error)}")
                     summary["failed"] += 1
                     results.append({
                             "row_number": row_num,
-                            "catalog_number": row.get('CATALOG_NUMBER', ''),
-                            "title": row.get('TITLE', ''),
+                            "catalog_number": row.get(col.CATALOG, ''),
+                            "title": row.get(col.TITLE, ''),
                             "status": "error",
                             "message": f"Unexpected error: {str(row_error)}",
                             "uri": None

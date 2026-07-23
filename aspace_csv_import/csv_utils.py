@@ -14,6 +14,8 @@ import os
 import argparse
 from pathlib import Path
 
+import csv_columns as col  # single source of truth for CSV header names
+
 # ==============================
 # TERMINAL COLORS
 # ==============================
@@ -173,22 +175,10 @@ def validate_csv_structure(filename: str) -> Dict:
     }
     
     # All columns that map to ArchivesSpace fields - must be present
-    required_columns = [
-        "CATALOG_NUMBER",
-        "ASpace Parent RefID",
-        "TITLE",
-        "Creation or Recording Date",
-        "Edit Date",
-        "Broadcast Date",
-        "Original Format",
-        "DESCRIPTION",
-        "ASpace PhysTech Note"
-    ]
-    
+    required_columns = col.REQUIRED_COLUMNS
+
     # Other columns we recognize but don't require
-    optional_columns = [
-        "EJS Season", "EJS Episode", "Content TRT", "ORIGINAL_MEDIA_TYPE"
-    ]
+    optional_columns = col.OPTIONAL_COLUMNS
     
     expected_columns = required_columns + optional_columns
     
@@ -198,15 +188,15 @@ def validate_csv_structure(filename: str) -> Dict:
             headers = reader.fieldnames
             
             # Check for required columns
-            for col in required_columns:
-                if col not in headers:
+            for column in required_columns:
+                if column not in headers:
                     results["valid"] = False
-                    results["errors"].append(f"Missing required column: {col}")
-            
+                    results["errors"].append(f"Missing required column: {column}")
+
             # Check for unexpected columns
-            for col in headers:
-                if col not in expected_columns:
-                    results["warnings"].append(f"Unexpected column: {col}")
+            for column in headers:
+                if column not in expected_columns:
+                    results["warnings"].append(f"Unexpected column: {column}")
             
             # Analyze data
             catalog_numbers = set()
@@ -222,7 +212,7 @@ def validate_csv_structure(filename: str) -> Dict:
                 row_errors = []
                 
                 # Check catalog number
-                catalog_num = row.get('CATALOG_NUMBER', '').strip()
+                catalog_num = row.get(col.CATALOG, '').strip()
                 if not catalog_num:
                     row_errors.append(f"Row {row_num}: Missing catalog number")
                 elif catalog_num in catalog_numbers:
@@ -232,12 +222,12 @@ def validate_csv_structure(filename: str) -> Dict:
                     catalog_numbers.add(catalog_num)
                 
                 # Check title
-                if not row.get('TITLE', '').strip():
+                if not row.get(col.TITLE, '').strip():
                     empty_titles += 1
                     results["warnings"].append(f"Row {row_num}: Empty title (will use catalog number)")
                 
                 # Check dates
-                for date_field in ['Creation or Recording Date', 'Edit Date', 'Broadcast Date']:
+                for date_field in [col.CREATION_DATE, col.EDIT_DATE, col.BROADCAST_DATE]:
                     date_val = row.get(date_field, '').strip()
                     if date_val:
                         parsed = parse_date(date_val)
@@ -246,12 +236,12 @@ def validate_csv_structure(filename: str) -> Dict:
                             row_errors.append(f"Row {row_num}: Invalid date in {date_field}: {date_val}")
                 
                 # Check parent ref_id (required for import)
-                parent_ref = row.get('ASpace Parent RefID', '').strip()
+                parent_ref = row.get(col.PARENT_REFID, '').strip()
                 if parent_ref:
                     parent_refs.add(parent_ref)
                 else:
                     missing_parent_refs += 1
-                    row_errors.append(f"Row {row_num}: Missing ASpace Parent RefID (required)")
+                    row_errors.append(f"Row {row_num}: Missing {col.PARENT_REFID} (required)")
                 
                 if row_errors:
                     rows_with_errors.extend(row_errors)
@@ -380,7 +370,7 @@ def generate_parent_lookup_report(csv_file: str, output_file: str = None,
     with open(csv_file, 'r', encoding='utf-8-sig') as csvfile:
         reader = csv.DictReader(csvfile)
         for row in reader:
-            ref = row.get('ASpace Parent RefID', '').strip()
+            ref = row.get(col.PARENT_REFID, '').strip()
             if ref:
                 parent_refs.add(ref)
     
