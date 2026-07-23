@@ -402,6 +402,10 @@ class ArchivesSpaceClient:
                     return self.make_request(method, endpoint, data, retry_count + 1)
                 return None
             else:
+                # Only a 4xx is proof the server rejected the request before
+                # committing. A 5xx (or a gateway 502/504) can be emitted AFTER
+                # the backend committed the write, so treat it as ambiguous.
+                self.last_failure_definitive = 400 <= response.status_code < 500
                 logging.error(f"API request failed: {method} {endpoint}")
                 logging.error(f"Status: {response.status_code}")
                 logging.error(f"Response: {response.text}")
@@ -423,30 +427,48 @@ class ArchivesSpaceClient:
             return None
     
     def check_component_unique_id(self, component_id: str) -> Tuple[Optional[bool], Optional[str]]:
-        """Check if a component unique identifier already exists.
+        """Check if a component unique identifier already exists IN OUR RESOURCE.
 
-        Returns (True, uri) on a hit, (False, None) only when a SUCCESSFUL
-        search reported zero hits, and (None, None) when the search itself
-        failed or returned a malformed response. Callers must treat None as
-        "could not verify" and abort the row — falling through to the create
-        path on a failed check is how duplicates get made (fail closed).
+        Search hits are fuzzy and repo-wide, so each candidate is fetched and
+        only counts when its component_id matches exactly AND it belongs to
+        RESOURCE_URI - the repository also holds other resources (millions of
+        photo records) and a cross-resource hit must never be treated as our
+        duplicate (update mode would edit the wrong record). All result pages
+        are checked.
+
+        Returns (True, uri) on a verified hit, (False, None) only when a
+        SUCCESSFUL search verified zero matches, and (None, None) when the
+        search or a candidate fetch failed. Callers must treat None as "could
+        not verify" and abort the row (fail closed).
         """
-        search_params = {
-            "q": f"component_id:{component_id}",
-            "type[]": "archival_object",
-            "page": 1,
-            "page_size": 10
-        }
-
         endpoint = f"/repositories/{REPO_ID}/search"
-        result = self.make_request("GET",
-                                   f"{endpoint}?{self._build_query_string(search_params)}")
+        page = 1
+        while True:
+            search_params = {
+                "q": f"component_id:{component_id}",
+                "type[]": "archival_object",
+                "page": page,
+                "page_size": 10
+            }
+            result = self.make_request("GET",
+                                       f"{endpoint}?{self._build_query_string(search_params)}")
 
-        if not isinstance(result, dict) or 'total_hits' not in result:
-            return None, None  # search failed - duplicate status unknown
-        if result.get('total_hits', 0) > 0:
-            uri = result['results'][0].get('uri', None)
-            return True, uri
+            if not isinstance(result, dict) or 'total_hits' not in result:
+                return None, None  # search failed - duplicate status unknown
+            for hit in result.get('results', []):
+                uri = hit.get('uri')
+                if not uri:
+                    continue
+                record = self.make_request("GET", uri)
+                if record is None:
+                    return None, None  # can't verify the candidate - don't guess
+                if (record.get('component_id') == component_id
+                        and record.get('resource', {}).get('ref') == RESOURCE_URI):
+                    return True, uri
+            last_page = result.get('last_page', page)
+            if page >= last_page:
+                break
+            page += 1
         return False, None
     
     def get_parent_object(self, parent_ref_id: str) -> Optional[Dict]:
@@ -527,26 +549,32 @@ class ArchivesSpaceClient:
         created moments ago may not be indexed yet (Solr lag), so reuse is
         best-effort; the delete-on-failure compensation covers the rest.
         """
-        search_params = {
-            "q": f'"{indicator}"',
-            "type[]": "top_container",
-            "page": 1,
-            "page_size": 10
-        }
         endpoint = f"/repositories/{REPO_ID}/search"
-        result = self.make_request("GET",
-                                   f"{endpoint}?{self._build_query_string(search_params)}")
-        if not isinstance(result, dict) or 'total_hits' not in result:
-            return "ERROR"
-        for hit in result.get('results', []):
-            uri = hit.get('uri')
-            if not uri:
-                continue
-            record = self.make_request("GET", uri)
-            if record is None:
-                return "ERROR"  # can't verify the candidate - don't guess
-            if record.get('indicator') == indicator and record.get('type') == 'AV Case':
-                return uri
+        page = 1
+        while True:
+            search_params = {
+                "q": f'"{indicator}"',
+                "type[]": "top_container",
+                "page": page,
+                "page_size": 10
+            }
+            result = self.make_request("GET",
+                                       f"{endpoint}?{self._build_query_string(search_params)}")
+            if not isinstance(result, dict) or 'total_hits' not in result:
+                return "ERROR"
+            for hit in result.get('results', []):
+                uri = hit.get('uri')
+                if not uri:
+                    continue
+                record = self.make_request("GET", uri)
+                if record is None:
+                    return "ERROR"  # can't verify the candidate - don't guess
+                if record.get('indicator') == indicator and record.get('type') == 'AV Case':
+                    return uri
+            last_page = result.get('last_page', page)
+            if page >= last_page:
+                break
+            page += 1
         return None
 
     def create_top_container(self, indicator: str) -> Optional[str]:
