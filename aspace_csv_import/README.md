@@ -243,7 +243,7 @@ This provides more accurate duration data than CSV estimates.
 ### What Update Mode Changes
 When using `--update-existing`:
 - ✅ Title
-- ✅ All dates
+- ✅ Dates (merged by label — a supplied date replaces only the same-label date; others are preserved)
 - ✅ Extents (format type)
 - ✅ Scope & Contents notes
 - ✅ PhysTech notes

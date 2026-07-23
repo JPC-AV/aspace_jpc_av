@@ -307,6 +307,9 @@ class ArchivesSpaceClient:
         self.password = password or ASPACE_PASSWORD or ""
         self.session = None
         self.headers = {}
+        # See make_request: whether the most recent failure was a definitive
+        # server rejection (True) or an ambiguous transport failure (False).
+        self.last_failure_definitive = True
         
     def login(self) -> bool:
         """Authenticate with ArchivesSpace and get session token."""
@@ -365,8 +368,17 @@ class ArchivesSpaceClient:
         reported as an error. The one exception is a 412 (expired session):
         the request was rejected outright, so re-authenticating and retrying is
         safe for any method.
+
+        After a failed call, self.last_failure_definitive says what kind of
+        failure it was: True means the server responded with an error status
+        (the write was definitively rejected, nothing committed); False means
+        a timeout/transport error where the server MAY have committed the
+        write even though we never saw the response. Compensating actions
+        (like deleting a just-created record) are only safe after a
+        definitive rejection.
         """
         url = f"{self.base_url}{endpoint}"
+        self.last_failure_definitive = True
 
         try:
             if method == "GET":
@@ -401,6 +413,9 @@ class ArchivesSpaceClient:
                 return None
 
         except Exception as e:
+            # No response received - for a write, the server may still have
+            # committed it. Flag the ambiguity for compensation logic.
+            self.last_failure_definitive = False
             logging.error(f"Request error: {str(e)}")
             if method == "GET" and retry_count < RETRY_ATTEMPTS:
                 time.sleep(RETRY_DELAY)
@@ -788,16 +803,22 @@ def detect_changes(existing_obj: Dict, row: Dict) -> Dict[str, Tuple[Any, Any]]:
     if new_title and existing_obj.get('title') != new_title:
         changes['title'] = (existing_obj.get('title'), new_title)
 
-    # Check dates (only when the CSV provides at least one date)
+    # Check dates. Dates merge by label: only the labels the CSV supplies are
+    # compared/replaced; existing dates under other labels (including ones this
+    # importer doesn't manage) are left alone.
     new_dates, _ = create_date_objects(row)  # Errors checked elsewhere
     existing_dates = existing_obj.get('dates', [])
 
-    # Simple comparison: just check if count differs or any begin dates differ
     existing_begins = {d.get('label'): d.get('begin') for d in existing_dates}
     new_begins = {d.get('label'): d.get('begin') for d in new_dates}
 
-    if new_begins and existing_begins != new_begins:
-        changes['dates'] = (existing_begins, new_begins)
+    changed_labels = {label for label, begin in new_begins.items()
+                      if existing_begins.get(label) != begin}
+    if changed_labels:
+        changes['dates'] = (
+            {label: existing_begins.get(label) for label in changed_labels},
+            {label: new_begins[label] for label in changed_labels},
+        )
 
     # Check extents (only when the CSV provides one)
     new_extents = create_extent_objects(row)
@@ -891,14 +912,30 @@ def create_archival_object(row: Dict, client: ArchivesSpaceClient,
         else:
             logging.error(f"Failed to create archival object: {catalog_number}")
             errors = ["Failed to create archival object via API"]
-            # Compensation: remove the container this row just created so a
-            # rerun doesn't strand it (or make another one).
             if created_container_uri:
-                if client.delete_record(created_container_uri):
-                    logging.info(f"Cleaned up unused top container: {created_container_uri}")
+                # Compensation: remove the container this row just created so a
+                # rerun doesn't strand it - but ONLY when the server definitively
+                # rejected the create. On a timeout/lost response the object may
+                # actually exist and this container may be attached to it;
+                # deleting it then would corrupt a successful import.
+                if client.last_failure_definitive:
+                    if client.delete_record(created_container_uri):
+                        logging.info(f"Cleaned up unused top container: {created_container_uri}")
+                    else:
+                        logging.warning(f"Orphaned top container left behind: {created_container_uri}")
+                        errors.append(f"Orphaned top container left behind: {created_container_uri}")
                 else:
-                    logging.warning(f"Orphaned top container left behind: {created_container_uri}")
-                    errors.append(f"Orphaned top container left behind: {created_container_uri}")
+                    exists, existing_uri = client.check_component_unique_id(catalog_number)
+                    if exists:
+                        msg = (f"Create response was lost but {catalog_number} EXISTS at "
+                               f"{existing_uri} - verify it in ArchivesSpace; container "
+                               f"{created_container_uri} was kept")
+                    else:
+                        msg = (f"Create outcome unknown (timeout/lost response) - verify "
+                               f"{catalog_number} in ArchivesSpace before rerunning; container "
+                               f"{created_container_uri} was kept and may need manual cleanup")
+                    logging.warning(msg)
+                    errors.append(msg)
             return None, errors
 
 def update_archival_object(row: Dict, client: ArchivesSpaceClient,
@@ -906,10 +943,12 @@ def update_archival_object(row: Dict, client: ArchivesSpaceClient,
     """Update an existing archival object from a CSV row.
 
     Replacement semantics: a non-blank CSV value REPLACES the corresponding
-    field wholesale (all dates, all extents, the managed note types); a blank
-    CSV cell leaves the existing value untouched. This import can never clear
-    a field - deletions are done in ArchivesSpace directly. detect_changes()
-    applies the same rule so reported changes match applied changes.
+    value - dates merge by label (a supplied date replaces only the same-label
+    date; others are preserved), while extents and the managed note types
+    replace wholesale. A blank CSV cell leaves the existing value untouched.
+    This import can never clear a field - deletions are done in ArchivesSpace
+    directly. detect_changes() applies the same rules so reported changes
+    match applied changes.
 
     Returns:
         Tuple of (result dict or None, changes dict, error messages list)
@@ -939,9 +978,14 @@ def update_archival_object(row: Dict, client: ArchivesSpaceClient,
     if title:
         existing_obj["title"] = title
     
-    # Use dates already validated above
+    # Use dates already validated above. Merge by label: a supplied date
+    # replaces the existing date(s) with the same label; dates under other
+    # labels (including ones this importer doesn't manage) are preserved.
     if dates:
-        existing_obj["dates"] = dates
+        supplied_labels = {d.get('label') for d in dates}
+        preserved_dates = [d for d in existing_obj.get('dates', [])
+                           if d.get('label') not in supplied_labels]
+        existing_obj["dates"] = preserved_dates + dates
     
     extents = create_extent_objects(row)
     if extents:
