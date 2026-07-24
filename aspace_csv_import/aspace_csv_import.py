@@ -878,15 +878,22 @@ def detect_changes(existing_obj: Dict, row: Dict) -> Dict[str, Tuple[Any, Any]]:
             {label: new_begins[label] for label in changed_labels},
         )
 
-    # Check extents (only when the CSV provides one)
+    # Check extents (only when the CSV provides one). Mirrors the apply rule:
+    # a single-extent record is compared directly; a multi-extent record only
+    # counts as changed when the CSV type is absent entirely (which the apply
+    # step refuses as a destructive collapse).
     new_extents = create_extent_objects(row)
     existing_extents = existing_obj.get('extents', [])
 
     existing_extent_types = [e.get('extent_type') for e in existing_extents]
     new_extent_types = [e.get('extent_type') for e in new_extents]
 
-    if new_extent_types and existing_extent_types != new_extent_types:
-        changes['extents'] = (existing_extent_types, new_extent_types)
+    if new_extent_types:
+        if len(existing_extent_types) <= 1:
+            if existing_extent_types != new_extent_types:
+                changes['extents'] = (existing_extent_types, new_extent_types)
+        elif new_extent_types[0] not in existing_extent_types:
+            changes['extents'] = (existing_extent_types, new_extent_types)
 
     # Check scopecontent note
     existing_notes = existing_obj.get('notes', [])
@@ -1000,13 +1007,16 @@ def update_archival_object(row: Dict, client: ArchivesSpaceClient,
                           existing_uri: str, dry_run: bool = False) -> Tuple[Optional[Dict], Dict, List[str]]:
     """Update an existing archival object from a CSV row.
 
-    Replacement semantics: a non-blank CSV value REPLACES the corresponding
-    value - dates merge by label (a supplied date replaces only the same-label
-    date; others are preserved), while extents and the managed note types
-    replace wholesale. A blank CSV cell leaves the existing value untouched.
-    This import can never clear a field - deletions are done in ArchivesSpace
-    directly. detect_changes() applies the same rules so reported changes
-    match applied changes.
+    Replacement semantics: a non-blank CSV value replaces only what this
+    importer manages - dates merge by label; the extent is replaced only on
+    records with at most one extent (multi-extent records are never collapsed;
+    an actual extent change on one errors the row); for each managed note type
+    the FIRST note's text is replaced while its non-text subnotes (e.g. the
+    Duration defined list added by aspace-rename-directories.py) and any
+    additional same-type notes are preserved. A blank CSV cell leaves the
+    existing value untouched. This import can never clear a field - deletions
+    are done in ArchivesSpace directly. detect_changes() applies the same
+    rules so reported changes match applied changes.
 
     Returns:
         Tuple of (result dict or None, changes dict, error messages list)
@@ -1045,16 +1055,42 @@ def update_archival_object(row: Dict, client: ArchivesSpaceClient,
                            if d.get('label') not in supplied_labels]
         existing_obj["dates"] = preserved_dates + dates
     
+    # Extents: this importer manages the record's single extent. Replace it
+    # when the record has at most one; on a multi-extent record (extras added
+    # manually or by another workflow) never collapse them - leave extents
+    # alone when the CSV type is already present, error the row when it isn't.
     extents = create_extent_objects(row)
     if extents:
-        existing_obj["extents"] = extents
-    
+        existing_extents = existing_obj.get('extents', [])
+        existing_types = [e.get('extent_type') for e in existing_extents]
+        if len(existing_extents) <= 1:
+            existing_obj["extents"] = extents
+        elif extents[0].get('extent_type') not in existing_types:
+            return None, changes, [
+                f"Record has {len(existing_extents)} extents; refusing to replace "
+                f"them with the single CSV extent - update extents manually"]
+        # else: CSV type already among the multiple extents - leave them alone
+
+    # Notes: replace only the FIRST note of each managed type, preserving
+    # (a) non-text subnotes on it - e.g. the Duration defined list that
+    # aspace-rename-directories.py adds to the phystech note - and (b) any
+    # additional same-type notes and all unmanaged note types.
     new_notes = create_notes(row)
     if new_notes:
-        new_note_types = {n['type'] for n in new_notes}
-        preserved_notes = [n for n in existing_obj.get('notes', []) 
-                          if n.get('type') not in new_note_types]
-        existing_obj["notes"] = preserved_notes + new_notes
+        replacements = {n['type']: n for n in new_notes}
+        merged_notes = []
+        for note in existing_obj.get('notes', []):
+            note_type = note.get('type')
+            if note_type in replacements:
+                new_note = replacements.pop(note_type)
+                carried = [sn for sn in note.get('subnotes', [])
+                           if sn.get('jsonmodel_type') != 'note_text']
+                new_note["subnotes"] = new_note.get("subnotes", []) + carried
+                merged_notes.append(new_note)
+            else:
+                merged_notes.append(note)  # extra same-type or unmanaged - keep
+        merged_notes.extend(replacements.values())  # types with no existing note
+        existing_obj["notes"] = merged_notes
     
     if dry_run:
         logging.info(f"[DRY RUN] Would update archival object: {catalog_number} at {existing_uri}")

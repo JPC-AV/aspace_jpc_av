@@ -244,9 +244,9 @@ This provides more accurate duration data than CSV estimates.
 When using `--update-existing`:
 - ✅ Title
 - ✅ Dates (merged by label — a supplied date replaces only the same-label date; others are preserved)
-- ✅ Extents (format type)
-- ✅ Scope & Contents notes
-- ✅ PhysTech notes
+- ✅ Extents (format type — only on records with a single extent; multi-extent records are never collapsed, and changing one errors the row)
+- ✅ Scope & Contents notes (first note's text replaced; extra same-type notes preserved)
+- ✅ PhysTech notes (first note's text replaced; Duration defined lists and extra same-type notes preserved)
 
 What it preserves:
 - ❌ Component ID
