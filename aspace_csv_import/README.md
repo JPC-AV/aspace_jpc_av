@@ -132,6 +132,7 @@ Duplicate Handling (choose one):
   --skip-duplicates     Skip existing records (DEFAULT)
   --update-existing     Update existing records if data changed
   --fail-on-duplicate   Stop import on first duplicate
+  --update-only         Strict updates from a narrow CSV; never creates
 ```
 
 ## Duplicate Handling Modes
@@ -159,6 +160,20 @@ python aspace_csv_import.py --fail-on-duplicate -f file.csv
 ```
 - Stops entire import on first duplicate
 - Use when duplicates indicate data problems
+
+### Update-only (narrow CSV)
+```bash
+python aspace_csv_import.py --update-only -f titles_only.csv
+```
+- Accepts a narrow CSV: `CATALOG_NUMBER` plus just the column(s) to change
+  (e.g. only `ASpace Title`) — the other mapped columns may be omitted entirely
+  and are left untouched
+- **Never creates records.** Every catalog number is resolved to exactly one
+  existing record *before anything is written*; if any row matches zero
+  records (e.g. a typo'd barcode) or multiple records, the entire run aborts
+  with no writes
+- Prints which columns the run will update and which it will leave alone
+- `ASpace Parent RefID` is not required (updates never use it)
 
 ## Output
 

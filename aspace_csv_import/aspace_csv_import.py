@@ -116,6 +116,9 @@ def get_colored_help():
     {C.CYAN}--skip-duplicates{C.RESET}                Skip existing records {C.DIM}(default){C.RESET}
     {C.CYAN}--update-existing{C.RESET}                Update existing records with CSV data
     {C.CYAN}--fail-on-duplicate{C.RESET}              Stop import on first duplicate
+    {C.CYAN}--update-only{C.RESET}                    Strict updates, never creates. Accepts a
+                                     narrow CSV (CATALOG_NUMBER + columns to
+                                     change); resolves every row before writing
 
 {C.BOLD}EXAMPLES{C.RESET}
     {C.GREEN}${C.RESET} python3 aspace_csv_import.py -f data.csv
@@ -123,7 +126,7 @@ def get_colored_help():
     {C.GREEN}${C.RESET} python3 aspace_csv_import.py -f data.csv --update-existing
     {C.GREEN}${C.RESET} python3 aspace_csv_import.py -f data.csv -u admin -p secret
 
-{C.BOLD}CSV COLUMNS{C.RESET} {C.DIM}(all must be present in CSV header; from csv_columns.py){C.RESET}
+{C.BOLD}CSV COLUMNS{C.RESET} {C.DIM}(all required for create/upsert runs; --update-only accepts a subset){C.RESET}
     {", ".join(col.REQUIRED_COLUMNS[:5])},
     {", ".join(col.REQUIRED_COLUMNS[5:])}
 
@@ -223,33 +226,49 @@ def setup_environment(dry_run: bool = False, csv_file: str = None):
 # CSV VALIDATION (UPFRONT)
 # ==============================
 
-def validate_csv_before_import(filename: str) -> Tuple[bool, List[str], List[str]]:
+def validate_csv_before_import(filename: str, update_only: bool = False) -> Tuple[bool, List[str], List[str]]:
     """Validate CSV file before attempting import.
-    
+
+    Normal mode requires ALL mapped columns in the header - a full-sheet
+    export missing one usually means the source renamed a column, which must
+    fail loudly rather than silently skip that field. Update-only mode
+    accepts a narrow CSV: CATALOG_NUMBER plus at least one mutable column;
+    absent mapped columns are simply unmanaged for the run.
+
     Returns:
         Tuple of (is_valid, error_messages, warning_messages)
     """
     errors = []
     warnings = []
-    
-    # All columns that map to ArchivesSpace fields - must be present
-    required_columns = col.REQUIRED_COLUMNS
-    
+
     try:
         with open(filename, 'r', encoding='utf-8-sig') as csvfile:
             reader = csv.DictReader(csvfile)
-            headers = reader.fieldnames
-            
-            # Check for required columns
-            missing_columns = []
-            for column in required_columns:
-                if column not in headers:
-                    missing_columns.append(column)
-            
-            if missing_columns:
-                errors.append(f"Missing required columns: {', '.join(missing_columns)}")
-                return False, errors, warnings
-            
+            headers = reader.fieldnames or []
+
+            if update_only:
+                if col.CATALOG not in headers:
+                    errors.append(f"Missing required column: {col.CATALOG}")
+                    return False, errors, warnings
+                mutable_present = [c for c in col.MUTABLE_COLUMNS if c in headers]
+                if not mutable_present:
+                    errors.append("Update-only CSV has no updatable columns "
+                                  f"(need at least one of: {', '.join(col.MUTABLE_COLUMNS)})")
+                    return False, errors, warnings
+                if col.PARENT_REFID in headers:
+                    warnings.append(f"{col.PARENT_REFID} is ignored in update-only mode "
+                                    "(records are never created or re-parented)")
+            else:
+                # Check for required columns
+                missing_columns = []
+                for column in col.REQUIRED_COLUMNS:
+                    if column not in headers:
+                        missing_columns.append(column)
+
+                if missing_columns:
+                    errors.append(f"Missing required columns: {', '.join(missing_columns)}")
+                    return False, errors, warnings
+
             # Validate each row
             catalog_numbers = set()
             
@@ -263,11 +282,12 @@ def validate_csv_before_import(filename: str) -> Tuple[bool, List[str], List[str
                 else:
                     catalog_numbers.add(catalog_num)
                 
-                # Check parent ref_id
-                parent_ref = row.get(col.PARENT_REFID, '').strip()
-                if not parent_ref:
-                    errors.append(f"Row {row_num}: Missing ASpace Parent RefID")
-                
+                # Check parent ref_id (create/upsert runs only - updates never use it)
+                if not update_only:
+                    parent_ref = row.get(col.PARENT_REFID, '').strip()
+                    if not parent_ref:
+                        errors.append(f"Row {row_num}: Missing ASpace Parent RefID")
+
                 # Check dates
                 for date_field in [col.CREATION_DATE, col.EDIT_DATE, col.BROADCAST_DATE]:
                     date_val = row.get(date_field, '').strip()
@@ -275,10 +295,11 @@ def validate_csv_before_import(filename: str) -> Tuple[bool, List[str], List[str
                         parsed = parse_date(date_val)
                         if parsed is None:  # None means invalid, "" means empty
                             errors.append(f"Row {row_num}: Invalid {date_field}: {date_val}")
-                
-                # Check title (warning only)
-                if not row.get(col.TITLE, '').strip():
-                    warnings.append(f"Row {row_num}: Empty TITLE (will use CATALOG_NUMBER)")
+
+                # Check title (warning only; irrelevant when the column isn't managed)
+                if col.TITLE in headers and not row.get(col.TITLE, '').strip():
+                    if not update_only:
+                        warnings.append(f"Row {row_num}: Empty TITLE (will use CATALOG_NUMBER)")
     
     except Exception as e:
         errors.append(f"Error reading CSV: {str(e)}")
@@ -1041,41 +1062,50 @@ def update_archival_object(row: Dict, client: ArchivesSpaceClient,
         logging.info(f"No changes needed for: {catalog_number}")
         return {"uri": existing_uri, "unchanged": True}, {}, []
     
-    # Apply changes
-    title = row.get(col.TITLE, '').strip()
-    if title:
-        existing_obj["title"] = title
-    
-    # Use dates already validated above. Merge by label: a supplied date
-    # replaces the existing date(s) with the same label; dates under other
-    # labels (including ones this importer doesn't manage) are preserved.
-    if dates:
-        supplied_labels = {d.get('label') for d in dates}
+    # Apply ONLY the detected changes. Rebuilding an unchanged field from the
+    # CSV would replace richer existing objects with minimal generated ones,
+    # silently dropping nested metadata the CSV doesn't carry (date
+    # expression/certainty, extent physical_details - which
+    # aspace-rename-directories.py sets - note labels/publish flags).
+    if 'title' in changes:
+        existing_obj["title"] = row.get(col.TITLE, '').strip()
+
+    # Dates: replace only the CHANGED labels. Same-label dates whose begin is
+    # unchanged keep their existing object (expression, certainty, etc.);
+    # unmanaged labels are always preserved.
+    if 'dates' in changes and dates:
+        changed_labels = set(changes['dates'][1].keys())
+        replacement_dates = [d for d in dates if d.get('label') in changed_labels]
         preserved_dates = [d for d in existing_obj.get('dates', [])
-                           if d.get('label') not in supplied_labels]
-        existing_obj["dates"] = preserved_dates + dates
-    
+                           if d.get('label') not in changed_labels]
+        existing_obj["dates"] = preserved_dates + replacement_dates
+
     # Extents: this importer manages the record's single extent. Replace it
     # when the record has at most one; on a multi-extent record (extras added
-    # manually or by another workflow) never collapse them - leave extents
-    # alone when the CSV type is already present, error the row when it isn't.
-    extents = create_extent_objects(row)
-    if extents:
+    # manually or by another workflow) never collapse them - detection only
+    # flags multi-extent records when the CSV type is absent, which is a
+    # destructive collapse we refuse.
+    if 'extents' in changes:
+        extents = create_extent_objects(row)
         existing_extents = existing_obj.get('extents', [])
-        existing_types = [e.get('extent_type') for e in existing_extents]
-        if len(existing_extents) <= 1:
+        if extents and len(existing_extents) <= 1:
             existing_obj["extents"] = extents
-        elif extents[0].get('extent_type') not in existing_types:
+        elif extents:
             return None, changes, [
                 f"Record has {len(existing_extents)} extents; refusing to replace "
                 f"them with the single CSV extent - update extents manually"]
-        # else: CSV type already among the multiple extents - leave them alone
 
-    # Notes: replace only the FIRST note of each managed type, preserving
-    # (a) non-text subnotes on it - e.g. the Duration defined list that
-    # aspace-rename-directories.py adds to the phystech note - and (b) any
+    # Notes: replace only the FIRST note of each CHANGED managed type,
+    # preserving (a) its note-level metadata (label, publish, persistent_id),
+    # (b) its non-text subnotes - e.g. the Duration defined list that
+    # aspace-rename-directories.py adds to the phystech note - and (c) any
     # additional same-type notes and all unmanaged note types.
-    new_notes = create_notes(row)
+    changed_note_types = set()
+    if 'description' in changes:
+        changed_note_types.add('scopecontent')
+    if 'phystech' in changes:
+        changed_note_types.add('phystech')
+    new_notes = [n for n in create_notes(row) if n['type'] in changed_note_types]
     if new_notes:
         replacements = {n['type']: n for n in new_notes}
         merged_notes = []
@@ -1086,6 +1116,9 @@ def update_archival_object(row: Dict, client: ArchivesSpaceClient,
                 carried = [sn for sn in note.get('subnotes', [])
                            if sn.get('jsonmodel_type') != 'note_text']
                 new_note["subnotes"] = new_note.get("subnotes", []) + carried
+                for key in ('label', 'publish', 'persistent_id'):
+                    if key in note:
+                        new_note[key] = note[key]
                 merged_notes.append(new_note)
             else:
                 merged_notes.append(note)  # extra same-type or unmanaged - keep
@@ -1247,7 +1280,140 @@ def process_csv_row(row: Dict, row_num: int, client: ArchivesSpaceClient,
 
     return result
 
-def process_csv_file(filename: str, client: ArchivesSpaceClient, 
+def process_csv_file_update_only(filename: str, client: ArchivesSpaceClient,
+                                 dry_run: bool = False) -> Tuple[List[Dict], Dict]:
+    """Process a (possibly narrow) CSV in strict update-only mode.
+
+    Never creates records. Phase 1 resolves EVERY catalog number to exactly one
+    existing record before anything is written; if any row resolves to zero
+    matches (typo'd barcode would otherwise become a create), multiple matches,
+    or the lookup fails, the entire run aborts with no writes. Phase 2 then
+    applies updates row by row.
+    """
+    results = []
+    summary = {
+        "total_rows": 0, "created": 0, "updated": 0, "unchanged": 0,
+        "failed": 0, "skipped": 0,
+        "start_time": datetime.now().isoformat(), "end_time": None,
+        "dry_run": dry_run, "duplicate_mode": "update-only",
+    }
+
+    def row_result(row_num, row, status, message, uri=None, changes=None):
+        return {"row_number": row_num, "catalog_number": row.get(col.CATALOG, ''),
+                "title": row.get(col.TITLE, ''), "status": status,
+                "message": message, "uri": uri, "changes": changes or {}}
+
+    try:
+        with open(filename, 'r', encoding='utf-8-sig') as csvfile:
+            rows = list(csv.DictReader(csvfile))
+    except Exception as e:
+        logging.error(f"Error reading CSV file: {str(e)}")
+        raise
+
+    summary["total_rows"] = len(rows)
+
+    # --- Phase 1: resolve and preflight every row. No writes happen here. ---
+    # A row can only fail phase 2 in ways detectable here, so catching them all
+    # now preserves the mode's guarantee: the run is all-or-nothing.
+    print_status("info", f"Resolving {len(rows)} catalog number(s) before writing anything...")
+    resolved = {}
+    problems = []
+    for row_num, row in enumerate(rows, 1):
+        catalog_number = row.get(col.CATALOG, '').strip()
+        if not catalog_number:
+            problems.append((row_num, row, "Missing catalog number"))
+            continue
+
+        # Extent type must be in the live controlled vocabulary (normal mode
+        # checks this in process_csv_row, which update-only bypasses).
+        original_format = row.get(col.ORIGINAL_FORMAT, '').strip()
+        if original_format and not client.validate_extent_type(original_format):
+            problems.append((row_num, row, f"Invalid extent type: '{original_format}'"))
+            continue
+
+        count, uri = client.check_component_unique_id(catalog_number)
+        if count is None:
+            problems.append((row_num, row, f"Lookup failed for {catalog_number}"))
+        elif count == 0:
+            problems.append((row_num, row,
+                             f"No record found for {catalog_number} (update-only never creates)"))
+        elif count > 1:
+            problems.append((row_num, row,
+                             f"{count} records found for {catalog_number} - clean up duplicates first"))
+        else:
+            # Preflight the multi-extent guard so it can't fire mid-run in
+            # phase 2 after earlier rows were already updated.
+            if original_format:
+                record = client.make_request("GET", uri)
+                if record is None:
+                    problems.append((row_num, row, f"Could not fetch {catalog_number} to preflight extents"))
+                    continue
+                existing_extents = record.get('extents', [])
+                existing_types = [e.get('extent_type') for e in existing_extents]
+                if len(existing_extents) > 1 and original_format not in existing_types:
+                    problems.append((row_num, row,
+                                     f"{catalog_number} has {len(existing_extents)} extents and "
+                                     f"'{original_format}' is not among them - update extents manually"))
+                    continue
+            resolved[row_num] = uri
+
+    if problems:
+        print_status("error", f"{len(problems)} row(s) failed to resolve - ABORTING, nothing was written:")
+        for row_num, row, msg in problems:
+            print_status("error", f"Row {row_num}: {msg}", indent=1)
+        for row_num, row in enumerate(rows, 1):
+            if row_num in resolved:
+                results.append(row_result(row_num, row, "skipped",
+                                          "Aborted: other rows failed to resolve"))
+                summary["skipped"] += 1
+            else:
+                msg = next(m for n, r, m in problems if n == row_num)
+                results.append(row_result(row_num, row, "error", msg))
+                summary["failed"] += 1
+        summary["end_time"] = datetime.now().isoformat()
+        return results, summary
+
+    # --- Phase 2: apply updates. ---
+    for row_num, row in enumerate(rows, 1):
+        catalog_number = row.get(col.CATALOG, '').strip()
+        try:
+            ao_result, changes, errors = update_archival_object(
+                row, client, resolved[row_num], dry_run)
+            if errors:
+                results.append(row_result(row_num, row, "error", "; ".join(errors)))
+                summary["failed"] += 1
+                print_status("error", f"{catalog_number} - {'; '.join(errors)}")
+            elif ao_result and ao_result.get('unchanged'):
+                results.append(row_result(row_num, row, "unchanged", "No changes needed",
+                                          uri=resolved[row_num]))
+                summary["unchanged"] += 1
+                print_status("unchanged", f"{catalog_number} - No changes needed")
+            elif ao_result:
+                message = f"Updated: {', '.join(changes.keys())}" if changes else "Updated"
+                results.append(row_result(row_num, row, "updated", message,
+                                          uri=resolved[row_num], changes=changes))
+                summary["updated"] += 1
+                prefix = "[DRY RUN] Would update" if dry_run else "Updated"
+                print_status("updated", f"{catalog_number} - {message}")
+                for field, (old, new) in changes.items():
+                    print_status("info", f"{field}: {old} --> {new}", indent=1)
+            else:
+                results.append(row_result(row_num, row, "error", "Failed to update"))
+                summary["failed"] += 1
+                print_status("error", f"{catalog_number} - Failed to update")
+        except Exception as e:
+            results.append(row_result(row_num, row, "error", str(e)))
+            summary["failed"] += 1
+            logging.error(f"Error updating row {row_num}: {e}")
+
+        if row_num % BATCH_SIZE == 0 and not dry_run:
+            time.sleep(1)
+
+    summary["end_time"] = datetime.now().isoformat()
+    return results, summary
+
+
+def process_csv_file(filename: str, client: ArchivesSpaceClient,
                     dry_run: bool = False, duplicate_mode: str = 'skip') -> Tuple[List[Dict], Dict]:
     """Process entire CSV file and return results."""
     results = []
@@ -1418,6 +1584,7 @@ def main():
   {C.CYAN}--skip-duplicates{C.RESET}                Skip existing records {C.DIM}(default){C.RESET}
   {C.CYAN}--update-existing{C.RESET}                Update existing records with CSV data
   {C.CYAN}--fail-on-duplicate{C.RESET}              Stop import on first duplicate
+  {C.CYAN}--update-only{C.RESET}                    Strict updates from a narrow CSV; never creates
 """
             return usage + help_hint + options
         
@@ -1488,7 +1655,12 @@ def main():
         action='store_true',
         help=argparse.SUPPRESS
     )
-    
+    duplicate_group.add_argument(
+        '--update-only',
+        action='store_true',
+        help=argparse.SUPPRESS
+    )
+
     args = parser.parse_args()
     
     # Handle color disable
@@ -1516,7 +1688,9 @@ def main():
         print_status("error", "Missing repo_id or resource_id in creds.py")
         sys.exit(1)
     
-    if args.update_existing:
+    if args.update_only:
+        duplicate_mode = 'update-only'
+    elif args.update_existing:
         duplicate_mode = 'update'
     elif args.fail_on_duplicate:
         duplicate_mode = 'fail'
@@ -1543,8 +1717,24 @@ def main():
     
     # Validate CSV before proceeding
     print_section("VALIDATING CSV")
-    is_valid, val_errors, val_warnings = validate_csv_before_import(csv_file)
-    
+    is_valid, val_errors, val_warnings = validate_csv_before_import(
+        csv_file, update_only=args.update_only)
+
+    # In update-only mode, say prominently which fields this run will and
+    # won't touch - a narrow CSV should look intentional, and on a full sheet
+    # an unexpectedly "unmanaged" column is the tell that the source renamed it.
+    if args.update_only:
+        try:
+            with open(csv_file, 'r', encoding='utf-8-sig') as _f:
+                headers = csv.DictReader(_f).fieldnames or []
+        except Exception:
+            headers = []
+        managed = [c for c in col.MUTABLE_COLUMNS if c in headers]
+        unmanaged = [c for c in col.MUTABLE_COLUMNS if c not in headers]
+        print_status("info", f"UPDATE-ONLY: will update: {', '.join(managed)}")
+        if unmanaged:
+            print_status("info", f"Left untouched (not in CSV): {', '.join(unmanaged)}")
+
     if val_warnings:
         for warning in val_warnings[:5]:
             print_status("warning", warning)
@@ -1590,7 +1780,10 @@ def main():
     print_section("PROCESSING RECORDS")
     
     try:
-        results, summary = process_csv_file(csv_file, client, args.dry_run, duplicate_mode)
+        if args.update_only:
+            results, summary = process_csv_file_update_only(csv_file, client, args.dry_run)
+        else:
+            results, summary = process_csv_file(csv_file, client, args.dry_run, duplicate_mode)
         generate_reports(results, summary)
         
         # Calculate elapsed time

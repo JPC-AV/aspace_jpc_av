@@ -150,6 +150,8 @@ def get_colored_help():
     {C.CYAN}-p, --password PASS{C.RESET}       ASpace password (or use creds.py)
     {C.CYAN}-o, --output FILE{C.RESET}         Output file path (for --parents report)
     {C.CYAN}--no-color{C.RESET}                Disable colored output
+    {C.CYAN}--update-only{C.RESET}             Validate as a narrow update-only CSV
+                              (CATALOG_NUMBER + columns to change; no parent needed)
 
 {C.BOLD}EXAMPLES{C.RESET}
     {C.GREEN}${C.RESET} python3 csv_utils.py --validate data.csv
@@ -162,8 +164,14 @@ def get_colored_help():
 # VALIDATION FUNCTIONS
 # ==============================
 
-def validate_csv_structure(filename: str) -> Dict:
-    """Validate CSV file structure and return analysis."""
+def validate_csv_structure(filename: str, update_only: bool = False) -> Dict:
+    """Validate CSV file structure and return analysis.
+
+    Normal mode requires all mapped columns (a full export missing one usually
+    means a renamed header). update_only accepts a narrow CSV: CATALOG_NUMBER
+    plus at least one mutable column; absent mapped columns are unmanaged.
+    Mirrors aspace_csv_import.validate_csv_before_import - keep in sync.
+    """
     results = {
         "valid": True,
         "errors": [],
@@ -173,25 +181,39 @@ def validate_csv_structure(filename: str) -> Dict:
         "duplicate_ids": [],
         "missing_parents": []
     }
-    
+
     # All columns that map to ArchivesSpace fields - must be present
     required_columns = col.REQUIRED_COLUMNS
 
     # Other columns we recognize but don't require
     optional_columns = col.OPTIONAL_COLUMNS
-    
+
     expected_columns = required_columns + optional_columns
-    
+
     try:
         with open(filename, 'r', encoding='utf-8-sig') as csvfile:
             reader = csv.DictReader(csvfile)
-            headers = reader.fieldnames
-            
+            headers = reader.fieldnames or []
+
             # Check for required columns
-            for column in required_columns:
-                if column not in headers:
+            if update_only:
+                if col.CATALOG not in headers:
                     results["valid"] = False
-                    results["errors"].append(f"Missing required column: {column}")
+                    results["errors"].append(f"Missing required column: {col.CATALOG}")
+                if not any(c in headers for c in col.MUTABLE_COLUMNS):
+                    results["valid"] = False
+                    results["errors"].append(
+                        "Update-only CSV has no updatable columns "
+                        f"(need at least one of: {', '.join(col.MUTABLE_COLUMNS)})")
+                unmanaged = [c for c in col.MUTABLE_COLUMNS if c not in headers]
+                if unmanaged:
+                    results["warnings"].append(
+                        f"Not in CSV, will be left untouched: {', '.join(unmanaged)}")
+            else:
+                for column in required_columns:
+                    if column not in headers:
+                        results["valid"] = False
+                        results["errors"].append(f"Missing required column: {column}")
 
             # Check for unexpected columns
             for column in headers:
@@ -235,11 +257,11 @@ def validate_csv_structure(filename: str) -> Dict:
                             invalid_dates += 1
                             row_errors.append(f"Row {row_num}: Invalid date in {date_field}: {date_val}")
                 
-                # Check parent ref_id (required for import)
+                # Check parent ref_id (required for create/upsert; never used by updates)
                 parent_ref = row.get(col.PARENT_REFID, '').strip()
                 if parent_ref:
                     parent_refs.add(parent_ref)
-                else:
+                elif not update_only:
                     missing_parent_refs += 1
                     row_errors.append(f"Row {row_num}: Missing {col.PARENT_REFID} (required)")
                 
@@ -415,13 +437,15 @@ def generate_parent_lookup_report(csv_file: str, output_file: str = None,
         print(f"\n  Report saved: {Colors.CYAN}{output_file}{Colors.RESET}")
         print(f"{Colors.DIM}{'-' * 60}{Colors.RESET}\n")
 
-def run_validation(csv_file: str):
+def run_validation(csv_file: str, update_only: bool = False):
     """Run CSV validation and display results."""
-    
+
     print_header("CSV Validation")
     print(f"  File: {csv_file}")
-    
-    results = validate_csv_structure(csv_file)
+    if update_only:
+        print(f"  Mode: update-only (narrow CSV allowed; parent ref not required)")
+
+    results = validate_csv_structure(csv_file, update_only=update_only)
     
     # Print validation result
     if results['valid']:
@@ -540,7 +564,12 @@ def main():
         action='store_true',
         help=argparse.SUPPRESS
     )
-    
+    parser.add_argument(
+        '--update-only',
+        action='store_true',
+        help=argparse.SUPPRESS
+    )
+
     args = parser.parse_args()
     
     # Handle color disable
@@ -556,7 +585,7 @@ def main():
         if not os.path.exists(args.validate):
             print_status("error", f"File not found: {args.validate}")
             sys.exit(1)
-        run_validation(args.validate)
+        run_validation(args.validate, update_only=args.update_only)
         
     elif args.parents:
         if not os.path.exists(args.parents):

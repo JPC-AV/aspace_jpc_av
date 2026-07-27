@@ -34,6 +34,18 @@ REQUIRED_COLUMNS = [
     PHYSTECH,
 ]
 
+# Columns whose values update mode can change on an existing record. CATALOG
+# is the matching key (never changed); PARENT_REFID is only used when creating.
+MUTABLE_COLUMNS = [
+    TITLE,
+    CREATION_DATE,
+    EDIT_DATE,
+    BROADCAST_DATE,
+    ORIGINAL_FORMAT,
+    DESCRIPTION,
+    PHYSTECH,
+]
+
 # Columns we recognize in the export but don't require or import.
 OPTIONAL_COLUMNS = [
     "EJS Season", "EJS Episode", "Content TRT", "ORIGINAL_MEDIA_TYPE",
