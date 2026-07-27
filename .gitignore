@@ -6,6 +6,9 @@ credentials.json
 *.key
 *.token
 
+# Local-only test suite (not pushed to GitHub)
+aspace_csv_import/tests/
+
 # Generated reports and logs
 import_reports/
 validation_report_*.json

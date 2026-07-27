@@ -244,10 +244,17 @@ def validate_csv_structure(filename: str, update_only: bool = False) -> Dict:
                     catalog_numbers.add(catalog_num)
                 
                 # Check title (irrelevant when the column isn't in the CSV -
-                # update-only leaves an absent title unmanaged)
+                # update-only leaves an absent title unmanaged). The catalog-
+                # number fallback only happens when CREATING a record; updates
+                # leave a blank title untouched.
                 if col.TITLE in headers and not row.get(col.TITLE, '').strip():
                     empty_titles += 1
-                    results["warnings"].append(f"Row {row_num}: Empty title (will use catalog number)")
+                    if update_only:
+                        results["warnings"].append(
+                            f"Row {row_num}: Empty title (existing title will be left unchanged)")
+                    else:
+                        results["warnings"].append(
+                            f"Row {row_num}: Empty title (will use catalog number if created)")
                 
                 # Check dates
                 for date_field in [col.CREATION_DATE, col.EDIT_DATE, col.BROADCAST_DATE]:
