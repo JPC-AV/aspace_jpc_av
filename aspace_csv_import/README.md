@@ -10,7 +10,7 @@ This script imports item-level archival objects from CSV files into ArchivesSpac
 - **Parent Hierarchy**: Attach items to existing parent objects using ref_ids
 - **Comprehensive Metadata**: Import titles, dates, extents, and notes
 - **Smart Update Mode**: Detects actual changes before updating (shows what changed)
-- **Flexible Duplicate Handling**: Three modes - skip, update, or fail
+- **Flexible Duplicate Handling**: Four modes - skip, update, fail, or update-only
 - **Colorized Output**: Clean, color-coded terminal output with status indicators
 - **Change Detection**: Only updates records when data actually differs
 - **Error Handling**: Robust error handling with retry logic
@@ -293,9 +293,9 @@ Generated in `~/aspace_import_reports/` directory:
 ### csv_utils.py
 Validate CSV before import:
 ```bash
-python csv_utils.py validate your_file.csv
-python csv_utils.py parents your_file.csv
-python csv_utils.py clean your_file.csv
+python csv_utils.py --validate your_file.csv
+python csv_utils.py --parents your_file.csv
+python csv_utils.py --validate your_file.csv --update-only   # narrow update CSV
 ```
 
 ### check_extent_types.py
@@ -309,12 +309,12 @@ python check_extent_types.py your_file.csv  # Validate CSV values
 
 1. **Validate CSV**
    ```bash
-   python csv_utils.py validate your_file.csv
+   python csv_utils.py --validate your_file.csv
    ```
 
 2. **Check parent ref_ids exist**
    ```bash
-   python csv_utils.py parents your_file.csv
+   python csv_utils.py --parents your_file.csv
    ```
 
 3. **Verify extent types**

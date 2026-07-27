@@ -25,7 +25,7 @@
 Check that your CSV has correct columns and valid data:
 
 ```bash
-python csv_utils.py validate your_file.csv
+python csv_utils.py --validate your_file.csv
 ```
 
 **Output:** `~/aspace_import_reports/csv_validation/validation_report_*.json`
@@ -35,7 +35,7 @@ python csv_utils.py validate your_file.csv
 Confirm all parent archival objects exist in ArchivesSpace:
 
 ```bash
-python csv_utils.py parents your_file.csv
+python csv_utils.py --parents your_file.csv
 ```
 
 **Critical:** All parent ref_ids must exist before import. Items cannot be created as orphans.
@@ -129,10 +129,10 @@ python aspace-rename-directories.py -d /path/to/videos --no-update
 
 ```bash
 # Validate CSV
-python csv_utils.py validate file.csv
+python csv_utils.py --validate file.csv
 
 # Check parents exist
-python csv_utils.py parents file.csv
+python csv_utils.py --parents file.csv
 
 # Dry run import
 python aspace_csv_import.py -f file.csv --dry-run
