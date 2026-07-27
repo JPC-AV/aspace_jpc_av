@@ -88,6 +88,35 @@ def print_section(text: str):
 # HELP MENU
 # ==============================
 
+# One source of truth for the CLI option lists - rendered into both the -h
+# help and the short usage shown on argument errors, so the two can't drift
+# (the help text went stale once before for exactly this reason).
+CLI_OPTIONS = [
+    ("-f, --file FILE", "(required)", "CSV file to import"),
+    ("-n, --dry-run", "", "Preview changes without creating records"),
+    ("-u, --username USER", "", "ASpace username (or use creds.py)"),
+    ("-p, --password PASS", "", "ASpace password (or use creds.py)"),
+    ("--no-color", "", "Disable colored output"),
+]
+DUPLICATE_OPTIONS = [
+    ("--skip-duplicates", "", "Skip existing records (default)"),
+    ("--update-existing", "", "Update existing records with CSV data"),
+    ("--fail-on-duplicate", "", "Stop import on first duplicate"),
+    ("--update-only", "", "Strict updates from a narrow CSV; never creates"),
+]
+
+
+def render_options(options, indent="    "):
+    """Render an option list as aligned, colorized lines."""
+    C = Colors
+    lines = []
+    for flag, note, desc in options:
+        note_txt = f"{C.YELLOW}{note}{C.RESET}  " if note else ""
+        pad = " " * max(1, 33 - len(flag))
+        lines.append(f"{indent}{C.CYAN}{flag}{C.RESET}{pad}{note_txt}{desc}")
+    return "\n".join(lines)
+
+
 def get_colored_help():
     """Generate a colored and formatted help message for the command line."""
     C = Colors  # Shorthand
@@ -106,19 +135,10 @@ def get_colored_help():
     {C.GREEN}${C.RESET} python3 aspace_csv_import.py -f FILE [options]
 
 {C.BOLD}OPTIONS{C.RESET}
-    {C.CYAN}-f, --file FILE{C.RESET}       {C.YELLOW}(required){C.RESET}  CSV file to import
-    {C.CYAN}-n, --dry-run{C.RESET}                    Preview changes without creating records
-    {C.CYAN}-u, --username USER{C.RESET}              ASpace username (or use creds.py)
-    {C.CYAN}-p, --password PASS{C.RESET}              ASpace password (or use creds.py)
-    {C.CYAN}--no-color{C.RESET}                       Disable colored output
+{render_options(CLI_OPTIONS)}
 
 {C.BOLD}DUPLICATE HANDLING{C.RESET} {C.DIM}(mutually exclusive){C.RESET}
-    {C.CYAN}--skip-duplicates{C.RESET}                Skip existing records {C.DIM}(default){C.RESET}
-    {C.CYAN}--update-existing{C.RESET}                Update existing records with CSV data
-    {C.CYAN}--fail-on-duplicate{C.RESET}              Stop import on first duplicate
-    {C.CYAN}--update-only{C.RESET}                    Strict updates, never creates. Accepts a
-                                     narrow CSV (CATALOG_NUMBER + columns to
-                                     change); resolves every row before writing
+{render_options(DUPLICATE_OPTIONS)}
 
 {C.BOLD}EXAMPLES{C.RESET}
     {C.GREEN}${C.RESET} python3 aspace_csv_import.py -f data.csv
@@ -289,7 +309,7 @@ def validate_csv_before_import(filename: str, update_only: bool = False) -> Tupl
                         errors.append(f"Row {row_num}: Missing ASpace Parent RefID")
 
                 # Check dates
-                for date_field in [col.CREATION_DATE, col.EDIT_DATE, col.BROADCAST_DATE]:
+                for date_field, _label in col.DATE_COLUMNS:
                     date_val = row.get(date_field, '').strip()
                     if date_val:
                         parsed = parse_date(date_val)
@@ -447,15 +467,52 @@ class ArchivesSpaceClient:
                 return self.make_request(method, endpoint, data, retry_count + 1)
             return None
     
+    def _verified_search(self, query: str, record_type: str, matches):
+        """Paginated search returning (uri, record) pairs for verified hits only.
+
+        Search hits are fuzzy and repository-wide (and the index lags reality),
+        so each candidate is fetched and must pass `matches(record)` before it
+        counts. The uri is the one the candidate was fetched by. All result
+        pages are walked. Returns None when the search or any candidate fetch
+        fails - callers must fail closed on None, never treat it as "no
+        match". This is the single hardening point for every record lookup;
+        fixes here apply to duplicates, parents, and containers alike.
+        """
+        endpoint = f"/repositories/{REPO_ID}/search"
+        verified = []
+        page = 1
+        while True:
+            search_params = {
+                "q": query,
+                "type[]": record_type,
+                "page": page,
+                "page_size": 10
+            }
+            result = self.make_request("GET",
+                                       f"{endpoint}?{self._build_query_string(search_params)}")
+            if not isinstance(result, dict) or 'total_hits' not in result:
+                return None  # search failed
+            for hit in result.get('results', []):
+                uri = hit.get('uri')
+                if not uri:
+                    continue
+                record = self.make_request("GET", uri)
+                if record is None:
+                    return None  # can't verify the candidate - don't guess
+                if matches(record):
+                    verified.append((uri, record))
+            last_page = result.get('last_page', page)
+            if page >= last_page:
+                break
+            page += 1
+        return verified
+
     def check_component_unique_id(self, component_id: str) -> Tuple[Optional[int], Optional[str]]:
         """Check if a component unique identifier already exists IN OUR RESOURCE.
 
-        Search hits are fuzzy and repo-wide, so each candidate is fetched and
-        only counts when its component_id matches exactly AND it belongs to
-        RESOURCE_URI - the repository also holds other resources (millions of
-        photo records) and a cross-resource hit must never be treated as our
-        duplicate (update mode would edit the wrong record). All result pages
-        are checked.
+        Only exact component_id matches inside RESOURCE_URI count - the
+        repository also holds other resources (millions of photo records) and
+        a cross-resource hit must never be treated as our duplicate.
 
         Returns (match_count, first_uri): (0, None) only when a SUCCESSFUL
         search verified zero matches; (1, uri) for the normal single match;
@@ -465,85 +522,37 @@ class ArchivesSpaceClient:
         search or a candidate fetch failed. Callers must treat None as "could
         not verify" and abort the row (fail closed).
         """
-        endpoint = f"/repositories/{REPO_ID}/search"
-        matches = []
-        page = 1
-        while True:
-            search_params = {
-                "q": f"component_id:{component_id}",
-                "type[]": "archival_object",
-                "page": page,
-                "page_size": 10
-            }
-            result = self.make_request("GET",
-                                       f"{endpoint}?{self._build_query_string(search_params)}")
+        hits = self._verified_search(
+            f"component_id:{component_id}", "archival_object",
+            lambda r: (r.get('component_id') == component_id
+                       and r.get('resource', {}).get('ref') == RESOURCE_URI))
+        if hits is None:
+            return None, None
+        return len(hits), (hits[0][0] if hits else None)
 
-            if not isinstance(result, dict) or 'total_hits' not in result:
-                return None, None  # search failed - duplicate status unknown
-            for hit in result.get('results', []):
-                uri = hit.get('uri')
-                if not uri:
-                    continue
-                record = self.make_request("GET", uri)
-                if record is None:
-                    return None, None  # can't verify the candidate - don't guess
-                if (record.get('component_id') == component_id
-                        and record.get('resource', {}).get('ref') == RESOURCE_URI):
-                    matches.append(uri)
-            last_page = result.get('last_page', page)
-            if page >= last_page:
-                break
-            page += 1
-        return len(matches), (matches[0] if matches else None)
-    
     def get_parent_object(self, parent_ref_id: str) -> Optional[Dict]:
         """Retrieve the parent archival object by EXACT ref_id in our resource.
 
-        Search hits are fuzzy and repository-wide, so each candidate is fetched
-        and only accepted when its ref_id matches exactly AND it belongs to
-        RESOURCE_URI - a partial or cross-resource hit must never become the
-        parent a new record is attached under. All result pages are checked.
-        (ref_id is ArchivesSpace-generated and unique, so multiple exact
-        matches cannot occur.)
+        A partial or cross-resource hit must never become the parent a new
+        record is attached under. (ref_id is ArchivesSpace-generated and
+        unique, so multiple exact matches cannot occur.)
 
         Returns the parent record, or None when no verified parent was found
         or the search/fetch failed - callers already fail the row on None.
         """
         if not parent_ref_id:
             return None
-
-        endpoint = f"/repositories/{REPO_ID}/search"
-        page = 1
-        while True:
-            search_params = {
-                "q": f"ref_id:{parent_ref_id}",
-                "type[]": "archival_object",
-                "page": page,
-                "page_size": 10
-            }
-            result = self.make_request("GET",
-                                       f"{endpoint}?{self._build_query_string(search_params)}")
-            if not isinstance(result, dict) or 'total_hits' not in result:
-                logging.error(f"Parent search failed for ref_id: {parent_ref_id}")
-                return None
-            for hit in result.get('results', []):
-                uri = hit.get('uri')
-                if not uri:
-                    continue
-                record = self.make_request("GET", uri)
-                if record is None:
-                    logging.error(f"Could not verify parent candidate {uri} for ref_id: {parent_ref_id}")
-                    return None  # can't verify the candidate - don't guess
-                if (record.get('ref_id') == parent_ref_id
-                        and record.get('resource', {}).get('ref') == RESOURCE_URI):
-                    return record
-            last_page = result.get('last_page', page)
-            if page >= last_page:
-                break
-            page += 1
-
-        logging.warning(f"Parent object not found with ref_id: {parent_ref_id}")
-        return None
+        hits = self._verified_search(
+            f"ref_id:{parent_ref_id}", "archival_object",
+            lambda r: (r.get('ref_id') == parent_ref_id
+                       and r.get('resource', {}).get('ref') == RESOURCE_URI))
+        if hits is None:
+            logging.error(f"Parent search failed for ref_id: {parent_ref_id}")
+            return None
+        if not hits:
+            logging.warning(f"Parent object not found with ref_id: {parent_ref_id}")
+            return None
+        return hits[0][1]
     
     def get_extent_types(self) -> Optional[List[str]]:
         """Get the list of valid extent types from ArchivesSpace.
@@ -600,33 +609,12 @@ class ArchivesSpaceClient:
         created moments ago may not be indexed yet (Solr lag), so reuse is
         best-effort; the delete-on-failure compensation covers the rest.
         """
-        endpoint = f"/repositories/{REPO_ID}/search"
-        page = 1
-        while True:
-            search_params = {
-                "q": f'"{indicator}"',
-                "type[]": "top_container",
-                "page": page,
-                "page_size": 10
-            }
-            result = self.make_request("GET",
-                                       f"{endpoint}?{self._build_query_string(search_params)}")
-            if not isinstance(result, dict) or 'total_hits' not in result:
-                return "ERROR"
-            for hit in result.get('results', []):
-                uri = hit.get('uri')
-                if not uri:
-                    continue
-                record = self.make_request("GET", uri)
-                if record is None:
-                    return "ERROR"  # can't verify the candidate - don't guess
-                if record.get('indicator') == indicator and record.get('type') == 'AV Case':
-                    return uri
-            last_page = result.get('last_page', page)
-            if page >= last_page:
-                break
-            page += 1
-        return None
+        hits = self._verified_search(
+            f'"{indicator}"', "top_container",
+            lambda r: r.get('indicator') == indicator and r.get('type') == 'AV Case')
+        if hits is None:
+            return "ERROR"
+        return hits[0][0] if hits else None
 
     def create_top_container(self, indicator: str) -> Optional[str]:
         """Create a new top container."""
@@ -668,12 +656,15 @@ def parse_date(date_string: str) -> Optional[str]:
     
     date_string = date_string.strip()
     
+    # Accepted formats per the CSV contract: US month-first or ISO. Day-first
+    # (%d/%m/%Y) is deliberately NOT accepted - a value like 13/02/2024 is
+    # malformed input that must bounce for a human, not silently parse as
+    # February 13.
     formats = [
         "%m/%d/%Y",
         "%m/%d/%y",
         "%Y-%m-%d",
         "%Y/%m/%d",
-        "%d/%m/%Y",
     ]
     
     for fmt in formats:
@@ -694,46 +685,22 @@ def create_date_objects(row: Dict) -> Tuple[List[Dict], List[str]]:
     """
     dates = []
     errors = []
-    
-    if row.get(col.CREATION_DATE):
-        date_str = parse_date(row[col.CREATION_DATE])
+
+    for column, label in col.DATE_COLUMNS:
+        if not row.get(column):
+            continue
+        date_str = parse_date(row[column])
         if date_str is None:
-            errors.append(f"Invalid {col.CREATION_DATE}: {row[col.CREATION_DATE]}")
+            errors.append(f"Invalid {column}: {row[column]}")
         elif date_str:  # Not empty string
             dates.append({
                 "date_type": "single",
-                "label": "creation",
+                "label": label,
                 "begin": date_str,
                 "expression": date_str,
                 "jsonmodel_type": "date"
             })
-    
-    if row.get(col.EDIT_DATE):
-        date_str = parse_date(row[col.EDIT_DATE])
-        if date_str is None:
-            errors.append(f"Invalid {col.EDIT_DATE}: {row[col.EDIT_DATE]}")
-        elif date_str:  # Not empty string
-            dates.append({
-                "date_type": "single",
-                "label": "Edited",
-                "begin": date_str,
-                "expression": date_str,
-                "jsonmodel_type": "date"
-            })
-    
-    if row.get(col.BROADCAST_DATE):
-        date_str = parse_date(row[col.BROADCAST_DATE])
-        if date_str is None:
-            errors.append(f"Invalid {col.BROADCAST_DATE}: {row[col.BROADCAST_DATE]}")
-        elif date_str:  # Not empty string
-            dates.append({
-                "date_type": "single",
-                "label": "broadcast",
-                "begin": date_str,
-                "expression": date_str,
-                "jsonmodel_type": "date"
-            })
-    
+
     return dates, errors
 
 # ==============================
@@ -933,6 +900,26 @@ def detect_changes(existing_obj: Dict, row: Dict) -> Dict[str, Tuple[Any, Any]]:
 
     return changes
 
+
+def multi_date_conflicts(existing_obj: Dict, changes: Dict) -> List[Tuple[str, int]]:
+    """Changed date labels that have MULTIPLE existing same-label dates.
+
+    Replacing several same-label dates with the one CSV date would silently
+    collapse them, so these are refused. Single source for the guard: the
+    update apply path errors the row on it, and update-only's phase-1
+    preflight uses the same check so the conflict aborts BEFORE any row is
+    written. Returns [(label, existing_count), ...].
+    """
+    if 'dates' not in changes:
+        return []
+    existing_dates = existing_obj.get('dates', [])
+    conflicts = []
+    for label in sorted(changes['dates'][1].keys()):
+        count = len([d for d in existing_dates if d.get('label') == label])
+        if count > 1:
+            conflicts.append((label, count))
+    return conflicts
+
 # ==============================
 # ARCHIVAL OBJECT CREATION
 # ==============================
@@ -1072,8 +1059,16 @@ def update_archival_object(row: Dict, client: ArchivesSpaceClient,
 
     # Dates: replace only the CHANGED labels. Same-label dates whose begin is
     # unchanged keep their existing object (expression, certainty, etc.);
-    # unmanaged labels are always preserved.
+    # unmanaged labels are always preserved. Like the multi-extent guard: if a
+    # changed label has SEVERAL existing dates, replacing them with the single
+    # CSV date would silently collapse them - error the row instead.
     if 'dates' in changes and dates:
+        conflicts = multi_date_conflicts(existing_obj, changes)
+        if conflicts:
+            label, count = conflicts[0]
+            return None, changes, [
+                f"Record has {count} '{label}' dates; refusing to replace "
+                f"them with one CSV date - update dates manually"]
         changed_labels = set(changes['dates'][1].keys())
         replacement_dates = [d for d in dates if d.get('label') in changed_labels]
         preserved_dates = [d for d in existing_obj.get('dates', [])
@@ -1142,18 +1137,41 @@ def update_archival_object(row: Dict, client: ArchivesSpaceClient,
 # CSV PROCESSING
 # ==============================
 
-def process_csv_row(row: Dict, row_num: int, client: ArchivesSpaceClient, 
-                   dry_run: bool = False, duplicate_mode: str = 'skip') -> Dict:
-    """Process a single CSV row and return result."""
-    result = {
+def make_row_result(row_num: int, row: Dict, status: str = "pending",
+                    message: str = "", uri: str = None, changes: Dict = None) -> Dict:
+    """One row's outcome record - shared by every processing path."""
+    return {
         "row_number": row_num,
         "catalog_number": row.get(col.CATALOG, ''),
         "title": row.get(col.TITLE, ''),
-        "status": "pending",
-        "message": "",
-        "uri": None,
-        "changes": {}
+        "status": status,
+        "message": message,
+        "uri": uri,
+        "changes": changes or {}
     }
+
+
+def record_row_outcome(result: Dict, summary: Dict):
+    """Tally one row result into the summary and print its status line.
+
+    The single bookkeeping point for BOTH normal and update-only processing -
+    keeping them on one code path is what stops a fix from landing in one
+    mode and silently missing the other.
+    """
+    status = result["status"]
+    summary_key = "failed" if status == "error" else status
+    if summary_key in summary:
+        summary[summary_key] += 1
+    print_status(status, f"{result['catalog_number']} - {result['message']}")
+    if status == "updated":
+        for field, (old, new) in result.get("changes", {}).items():
+            print_status("info", f"{field}: {old} --> {new}", indent=1)
+
+
+def process_csv_row(row: Dict, row_num: int, client: ArchivesSpaceClient,
+                   dry_run: bool = False, duplicate_mode: str = 'skip') -> Dict:
+    """Process a single CSV row and return result."""
+    result = make_row_result(row_num, row)
     
     try:
         catalog_number = row.get(col.CATALOG, '').strip()
@@ -1298,11 +1316,6 @@ def process_csv_file_update_only(filename: str, client: ArchivesSpaceClient,
         "dry_run": dry_run, "duplicate_mode": "update-only",
     }
 
-    def row_result(row_num, row, status, message, uri=None, changes=None):
-        return {"row_number": row_num, "catalog_number": row.get(col.CATALOG, ''),
-                "title": row.get(col.TITLE, ''), "status": status,
-                "message": message, "uri": uri, "changes": changes or {}}
-
     try:
         with open(filename, 'r', encoding='utf-8-sig') as csvfile:
             rows = list(csv.DictReader(csvfile))
@@ -1343,20 +1356,32 @@ def process_csv_file_update_only(filename: str, client: ArchivesSpaceClient,
             problems.append((row_num, row,
                              f"{count} records found for {catalog_number} - clean up duplicates first"))
         else:
-            # Preflight the multi-extent guard so it can't fire mid-run in
-            # phase 2 after earlier rows were already updated.
-            if original_format:
+            # Preflight the guards that would otherwise fire mid-run in phase 2
+            # after earlier rows were already updated: the multi-extent guard
+            # and the multi-same-label-date guard. Fetch the record once when
+            # the row supplies anything those guards need.
+            supplies_dates = any(row.get(c, '').strip() for c, _ in col.DATE_COLUMNS)
+            if original_format or supplies_dates:
                 record = client.make_request("GET", uri)
                 if record is None:
-                    problems.append((row_num, row, f"Could not fetch {catalog_number} to preflight extents"))
+                    problems.append((row_num, row, f"Could not fetch {catalog_number} to preflight the row"))
                     continue
-                existing_extents = record.get('extents', [])
-                existing_types = [e.get('extent_type') for e in existing_extents]
-                if len(existing_extents) > 1 and original_format not in existing_types:
-                    problems.append((row_num, row,
-                                     f"{catalog_number} has {len(existing_extents)} extents and "
-                                     f"'{original_format}' is not among them - update extents manually"))
-                    continue
+                if original_format:
+                    existing_extents = record.get('extents', [])
+                    existing_types = [e.get('extent_type') for e in existing_extents]
+                    if len(existing_extents) > 1 and original_format not in existing_types:
+                        problems.append((row_num, row,
+                                         f"{catalog_number} has {len(existing_extents)} extents and "
+                                         f"'{original_format}' is not among them - update extents manually"))
+                        continue
+                if supplies_dates:
+                    conflicts = multi_date_conflicts(record, detect_changes(record, row))
+                    if conflicts:
+                        detail = ", ".join(f"{count}x '{label}'" for label, count in conflicts)
+                        problems.append((row_num, row,
+                                         f"{catalog_number} has multiple same-label dates ({detail}) "
+                                         f"- update dates manually"))
+                        continue
             resolved[row_num] = uri
 
     if problems:
@@ -1365,48 +1390,37 @@ def process_csv_file_update_only(filename: str, client: ArchivesSpaceClient,
             print_status("error", f"Row {row_num}: {msg}", indent=1)
         for row_num, row in enumerate(rows, 1):
             if row_num in resolved:
-                results.append(row_result(row_num, row, "skipped",
-                                          "Aborted: other rows failed to resolve"))
+                results.append(make_row_result(row_num, row, "skipped",
+                                               "Aborted: other rows failed to resolve"))
                 summary["skipped"] += 1
             else:
                 msg = next(m for n, r, m in problems if n == row_num)
-                results.append(row_result(row_num, row, "error", msg))
+                results.append(make_row_result(row_num, row, "error", msg))
                 summary["failed"] += 1
         summary["end_time"] = datetime.now().isoformat()
         return results, summary
 
     # --- Phase 2: apply updates. ---
     for row_num, row in enumerate(rows, 1):
-        catalog_number = row.get(col.CATALOG, '').strip()
         try:
             ao_result, changes, errors = update_archival_object(
                 row, client, resolved[row_num], dry_run)
             if errors:
-                results.append(row_result(row_num, row, "error", "; ".join(errors)))
-                summary["failed"] += 1
-                print_status("error", f"{catalog_number} - {'; '.join(errors)}")
+                result = make_row_result(row_num, row, "error", "; ".join(errors))
             elif ao_result and ao_result.get('unchanged'):
-                results.append(row_result(row_num, row, "unchanged", "No changes needed",
-                                          uri=resolved[row_num]))
-                summary["unchanged"] += 1
-                print_status("unchanged", f"{catalog_number} - No changes needed")
+                result = make_row_result(row_num, row, "unchanged", "No changes needed",
+                                         uri=resolved[row_num])
             elif ao_result:
                 message = f"Updated: {', '.join(changes.keys())}" if changes else "Updated"
-                results.append(row_result(row_num, row, "updated", message,
-                                          uri=resolved[row_num], changes=changes))
-                summary["updated"] += 1
-                prefix = "[DRY RUN] Would update" if dry_run else "Updated"
-                print_status("updated", f"{catalog_number} - {message}")
-                for field, (old, new) in changes.items():
-                    print_status("info", f"{field}: {old} --> {new}", indent=1)
+                result = make_row_result(row_num, row, "updated", message,
+                                         uri=resolved[row_num], changes=changes)
             else:
-                results.append(row_result(row_num, row, "error", "Failed to update"))
-                summary["failed"] += 1
-                print_status("error", f"{catalog_number} - Failed to update")
+                result = make_row_result(row_num, row, "error", "Failed to update")
         except Exception as e:
-            results.append(row_result(row_num, row, "error", str(e)))
-            summary["failed"] += 1
+            result = make_row_result(row_num, row, "error", str(e))
             logging.error(f"Error updating row {row_num}: {e}")
+        results.append(result)
+        record_row_outcome(result, summary)
 
         if row_num % BATCH_SIZE == 0 and not dry_run:
             time.sleep(1)
@@ -1442,56 +1456,25 @@ def process_csv_file(filename: str, client: ArchivesSpaceClient,
                 try:
                     result = process_csv_row(row, row_num, client, dry_run, duplicate_mode)
                     results.append(result)
-                    
-                    # Print status
-                    catalog_num = result['catalog_number']
-                    if result["status"] == "created":
-                        summary["created"] += 1
-                        print_status("created", f"{catalog_num} - {result['message']}")
-                    elif result["status"] == "updated":
-                        summary["updated"] += 1
-                        print_status("updated", f"{catalog_num} - {result['message']}")
-                        for field, (old, new) in result.get('changes', {}).items():
-                            print_status("info", f"{field}: {old} --> {new}", indent=1)
-                    elif result["status"] == "unchanged":
-                        summary["unchanged"] += 1
-                        print_status("unchanged", f"{catalog_num} - {result['message']}")
-                    elif result["status"] == "error":
-                        summary["failed"] += 1
-                        print_status("error", f"{catalog_num} - {result['message']}")
-                    elif result["status"] == "skipped":
-                        summary["skipped"] += 1
-                        print_status("skipped", f"{catalog_num} - {result['message']}")
-                    
+                    record_row_outcome(result, summary)
+
                     if row_num % BATCH_SIZE == 0 and not dry_run:
                         time.sleep(1)
-                        
+
                 except DuplicateStop as stop:
                     # --fail-on-duplicate: record this row and stop processing, but
                     # break (do not re-raise) so the caller still writes the reports.
                     logging.error(f"Stopping import due to duplicate at row {row_num}")
-                    summary["failed"] += 1
-                    results.append({
-                        "row_number": row_num,
-                        "catalog_number": row.get(col.CATALOG, ''),
-                        "title": row.get(col.TITLE, ''),
-                        "status": "error",
-                        "message": str(stop),
-                        "uri": None
-                    })
-                    print_status("error", f"{row.get(col.CATALOG, '')} - {stop}")
+                    result = make_row_result(row_num, row, "error", str(stop))
+                    results.append(result)
+                    record_row_outcome(result, summary)
                     break
                 except Exception as row_error:
                     logging.error(f"Unexpected error at row {row_num}: {str(row_error)}")
-                    summary["failed"] += 1
-                    results.append({
-                            "row_number": row_num,
-                            "catalog_number": row.get(col.CATALOG, ''),
-                            "title": row.get(col.TITLE, ''),
-                            "status": "error",
-                            "message": f"Unexpected error: {str(row_error)}",
-                            "uri": None
-                        })
+                    result = make_row_result(row_num, row, "error",
+                                             f"Unexpected error: {str(row_error)}")
+                    results.append(result)
+                    record_row_outcome(result, summary)
     
     except Exception as e:
         logging.error(f"Error reading CSV file: {str(e)}")
@@ -1504,20 +1487,26 @@ def process_csv_file(filename: str, client: ArchivesSpaceClient,
 # REPORTING
 # ==============================
 
-def generate_reports(results: List[Dict], summary: Dict):
-    """Generate CSV and JSON reports of the import process."""
-    
+def generate_reports(results: List[Dict], summary: Dict) -> bool:
+    """Generate CSV and JSON reports of the import process.
+
+    Returns True only when BOTH reports were written. The caller must treat
+    False as a run failure: if ArchivesSpace was modified but the audit trail
+    could not be saved, exiting zero would misreport the run.
+    """
+    ok = True
     try:
         with open(CSV_REPORT, 'w', newline='', encoding='utf-8') as csvfile:
-            fieldnames = ['row_number', 'catalog_number', 'title', 'status', 
+            fieldnames = ['row_number', 'catalog_number', 'title', 'status',
                          'message', 'uri']
             writer = csv.DictWriter(csvfile, fieldnames=fieldnames, extrasaction='ignore')
             writer.writeheader()
             writer.writerows(results)
         logging.info(f"CSV report saved: {CSV_REPORT}")
     except Exception as e:
+        ok = False
         logging.error(f"Failed to write CSV report: {str(e)}")
-    
+
     try:
         report_data = {
             "summary": summary,
@@ -1527,7 +1516,9 @@ def generate_reports(results: List[Dict], summary: Dict):
             json.dump(report_data, jsonfile, indent=2)
         logging.info(f"JSON report saved: {JSON_REPORT}")
     except Exception as e:
+        ok = False
         logging.error(f"Failed to write JSON report: {str(e)}")
+    return ok
 
 def print_summary(summary: Dict, elapsed_time: str = None):
     """Print import summary to console."""
@@ -1577,17 +1568,8 @@ def main():
             C = Colors
             usage = f"\nusage: {self.prog} -f FILE [options]\n"
             help_hint = f"       {C.DIM}Use -h or --help for detailed information{C.RESET}\n"
-            options = f"""
-  {C.CYAN}-f, --file FILE{C.RESET}       {C.YELLOW}(required){C.RESET}  CSV file to import
-  {C.CYAN}-n, --dry-run{C.RESET}                    Preview changes without creating records
-  {C.CYAN}-u, --username USER{C.RESET}              ASpace username (or use creds.py)
-  {C.CYAN}-p, --password PASS{C.RESET}              ASpace password (or use creds.py)
-  {C.CYAN}--no-color{C.RESET}                       Disable colored output
-  {C.CYAN}--skip-duplicates{C.RESET}                Skip existing records {C.DIM}(default){C.RESET}
-  {C.CYAN}--update-existing{C.RESET}                Update existing records with CSV data
-  {C.CYAN}--fail-on-duplicate{C.RESET}              Stop import on first duplicate
-  {C.CYAN}--update-only{C.RESET}                    Strict updates from a narrow CSV; never creates
-"""
+            options = ("\n" + render_options(CLI_OPTIONS, indent="  ") + "\n"
+                       + render_options(DUPLICATE_OPTIONS, indent="  ") + "\n")
             return usage + help_hint + options
         
         def format_help(self):
@@ -1796,16 +1778,24 @@ def main():
             results, summary = process_csv_file_update_only(csv_file, client, args.dry_run)
         else:
             results, summary = process_csv_file(csv_file, client, args.dry_run, duplicate_mode)
-        generate_reports(results, summary)
-        
+        reports_ok = generate_reports(results, summary)
+
         # Calculate elapsed time
         elapsed_seconds = time.time() - start_time
         hours, remainder = divmod(int(elapsed_seconds), 3600)
         minutes, seconds = divmod(remainder, 60)
         elapsed_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-        
+
         print_summary(summary, elapsed_str)
-        
+
+        if not reports_ok:
+            # ArchivesSpace may have been modified but the audit trail wasn't
+            # saved - that is a failed run, not a successful one.
+            print_status("error", "Report files could not be written (see log) - "
+                                  "records above may have been modified without an audit trail")
+            client.logout()
+            sys.exit(3)
+
         if summary['failed'] > 0:
             client.logout()
             sys.exit(2)

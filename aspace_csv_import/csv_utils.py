@@ -257,7 +257,7 @@ def validate_csv_structure(filename: str, update_only: bool = False) -> Dict:
                             f"Row {row_num}: Empty title (will use catalog number if created)")
                 
                 # Check dates
-                for date_field in [col.CREATION_DATE, col.EDIT_DATE, col.BROADCAST_DATE]:
+                for date_field, _label in col.DATE_COLUMNS:
                     date_val = row.get(date_field, '').strip()
                     if date_val:
                         parsed = parse_date(date_val)

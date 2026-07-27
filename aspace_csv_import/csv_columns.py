@@ -34,6 +34,13 @@ REQUIRED_COLUMNS = [
     PHYSTECH,
 ]
 
+# Date columns and the ArchivesSpace date label each one maps to.
+DATE_COLUMNS = [
+    (CREATION_DATE, "creation"),
+    (EDIT_DATE, "Edited"),
+    (BROADCAST_DATE, "broadcast"),
+]
+
 # Columns whose values update mode can change on an existing record. CATALOG
 # is the matching key (never changed); PARENT_REFID is only used when creating.
 MUTABLE_COLUMNS = [

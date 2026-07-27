@@ -334,6 +334,12 @@ python check_extent_types.py your_file.csv  # Validate CSV values
 
 6. **Verify in ArchivesSpace**
 
+> **Rerunning after a run that created records:** wait a minute or two before
+> rerunning. The duplicate check uses ArchivesSpace's search index, which is
+> updated on a short delay (typically under a minute) — a record created
+> seconds ago may not be findable yet, and an immediate rerun could create a
+> duplicate. Normal human-paced reruns are unaffected.
+
 ## Troubleshooting
 
 ### Common Errors
