@@ -243,8 +243,9 @@ def validate_csv_structure(filename: str, update_only: bool = False) -> Dict:
                 else:
                     catalog_numbers.add(catalog_num)
                 
-                # Check title
-                if not row.get(col.TITLE, '').strip():
+                # Check title (irrelevant when the column isn't in the CSV -
+                # update-only leaves an absent title unmanaged)
+                if col.TITLE in headers and not row.get(col.TITLE, '').strip():
                     empty_titles += 1
                     results["warnings"].append(f"Row {row_num}: Empty title (will use catalog number)")
                 

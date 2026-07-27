@@ -1313,8 +1313,10 @@ def process_csv_file_update_only(filename: str, client: ArchivesSpaceClient,
     summary["total_rows"] = len(rows)
 
     # --- Phase 1: resolve and preflight every row. No writes happen here. ---
-    # A row can only fail phase 2 in ways detectable here, so catching them all
-    # now preserves the mode's guarantee: the run is all-or-nothing.
+    # All rows are resolved and locally preflighted before writing, so every
+    # PREDICTABLE problem aborts with zero writes. Runtime API failures during
+    # phase 2 can still leave a partial update (no transactions in the API);
+    # those are surfaced in the report and the non-zero exit.
     print_status("info", f"Resolving {len(rows)} catalog number(s) before writing anything...")
     resolved = {}
     problems = []
@@ -1723,6 +1725,7 @@ def main():
     # In update-only mode, say prominently which fields this run will and
     # won't touch - a narrow CSV should look intentional, and on a full sheet
     # an unexpectedly "unmanaged" column is the tell that the source renamed it.
+    needs_extent_vocab = True
     if args.update_only:
         try:
             with open(csv_file, 'r', encoding='utf-8-sig') as _f:
@@ -1734,6 +1737,9 @@ def main():
         print_status("info", f"UPDATE-ONLY: will update: {', '.join(managed)}")
         if unmanaged:
             print_status("info", f"Left untouched (not in CSV): {', '.join(unmanaged)}")
+        # A run that can't touch extents shouldn't be blocked by a transient
+        # failure fetching the extent vocabulary it would never consult.
+        needs_extent_vocab = col.ORIGINAL_FORMAT in headers
 
     if val_warnings:
         for warning in val_warnings[:5]:
@@ -1768,14 +1774,20 @@ def main():
     
     # Load extent types (fail closed: abort if the live controlled vocabulary
     # cannot be retrieved, rather than silently trusting a stale local list).
-    extent_types = client.get_extent_types()
-    if not extent_types:
-        print_status("error", "Could not load the 'extent_extent_type' controlled vocabulary "
-                              "from ArchivesSpace. Aborting (run check_extent_types.py to diagnose).")
-        client.logout()
-        sys.exit(1)
-    client._valid_extent_types = extent_types  # cache so validate_extent_type does not refetch
-    print_status("info", f"Loaded {len(extent_types)} valid extent types")
+    # Skipped when an update-only CSV has no Original Format column - that run
+    # never consults the vocabulary. validate_extent_type still fails closed
+    # if anything unexpectedly asks.
+    if needs_extent_vocab:
+        extent_types = client.get_extent_types()
+        if not extent_types:
+            print_status("error", "Could not load the 'extent_extent_type' controlled vocabulary "
+                                  "from ArchivesSpace. Aborting (run check_extent_types.py to diagnose).")
+            client.logout()
+            sys.exit(1)
+        client._valid_extent_types = extent_types  # cache so validate_extent_type does not refetch
+        print_status("info", f"Loaded {len(extent_types)} valid extent types")
+    else:
+        print_status("info", "Extent vocabulary not loaded (Original Format not in this CSV)")
     
     print_section("PROCESSING RECORDS")
     
