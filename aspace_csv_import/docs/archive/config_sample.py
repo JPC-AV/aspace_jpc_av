@@ -1,3 +1,10 @@
+# =============================================================================
+# HISTORICAL REFERENCE ONLY - DO NOT USE
+# This config.py mechanism was abandoned; credentials now live in creds.py at
+# the repo root (see creds_template.py) and column/date rules have changed.
+# Kept only as a record of the old approach. See README.md for current setup.
+# =============================================================================
+
 # ArchivesSpace CSV Import Configuration
 # Copy this file to 'config.py' and customize for your needs
 

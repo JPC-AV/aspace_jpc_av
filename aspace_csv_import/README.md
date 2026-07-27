@@ -96,6 +96,7 @@ The CSV should have the following columns:
 | Original Format | Physical format (must match dropdown) | Yes | 2 inch videotape |
 | ASpace Parent RefID | Parent object's ref_id | Yes | abc123def456 |
 | ASpace Scope and Contents Note | Scope and contents | No | Pilot episode featuring... |
+| ASpace PhysTech Note | Physical characteristics / playback notes | No | Slight ringing present... |
 
 *If no title is provided, the catalog number will be used
 
@@ -185,19 +186,19 @@ ArchivesSpace CSV Import
   File: your_file.csv
   Mode: update
 
-→ Connecting to ArchivesSpace...
-✓ Authenticated
-→ Loaded 37 valid extent types
+[>] Connecting to ArchivesSpace...
+[OK] Authenticated
+[>] Loaded 37 valid extent types
 
 ────────────────────────────────────────────────────────────
 PROCESSING RECORDS
 ────────────────────────────────────────────────────────────
-+ JPC_AV_00463 - Created successfully
-↻ JPC_AV_00468 - Updated: title, description
-  → title: Old Title → New Title
-  → description: Old desc... → New desc...
-= JPC_AV_00471 - No changes needed
-○ JPC_AV_00472 - Duplicate - skipped
+[+] JPC_AV_00463 - Created successfully
+[~] JPC_AV_00468 - Updated: title, description
+  [>] title: Old Title --> New Title
+  [>] description: Old desc... --> New desc...
+[=] JPC_AV_00471 - No changes needed
+[-] JPC_AV_00472 - Duplicate - skipped
 
 ────────────────────────────────────────────────────────────
 IMPORT SUMMARY
@@ -214,11 +215,14 @@ IMPORT SUMMARY
 ```
 
 ### Status Symbols
-- `+` Green - Created new record
-- `↻` Blue - Updated existing record
-- `=` Gray - No changes needed
-- `○` Yellow - Skipped
-- `✗` Red - Error
+- `[+]` Green - Created new record
+- `[~]` Blue - Updated existing record
+- `[=]` Gray - No changes needed
+- `[-]` Yellow - Skipped
+- `[X]` Red - Error
+- `[!]` Yellow - Warning
+- `[>]` Cyan - Info
+- `[OK]` Green - Success
 
 ## Field Mapping
 

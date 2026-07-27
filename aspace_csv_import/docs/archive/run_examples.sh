@@ -1,9 +1,16 @@
 #!/bin/bash
 
+# =============================================================================
+# HISTORICAL REFERENCE ONLY - DO NOT EXECUTE
+# These examples predate the current scripts: the csv_utils syntax is now
+# --validate/--parents (no positional commands, no 'clean'), -f is required,
+# and the report directory has changed. Kept only as a record of the old
+# workflow. See README.md for current usage.
+# =============================================================================
+
 # ArchivesSpace CSV Import - Example Commands
 # ============================================
 # This file shows common workflows and example commands
-# Make executable with: chmod +x run_examples.sh
 
 echo "========================================"
 echo "ArchivesSpace CSV Import - Example Commands"

@@ -11,6 +11,8 @@ import os
 import argparse
 from pathlib import Path
 
+import csv_columns as col  # single source of truth for CSV header names
+
 # ==============================
 # TERMINAL COLORS
 # ==============================
@@ -105,7 +107,7 @@ def get_colored_help():
 
 {C.BOLD}DESCRIPTION{C.RESET}
     Fetches valid extent types from ArchivesSpace and optionally validates
-    the 'Original Format' column in your CSV against the controlled vocabulary.
+    the '{col.ORIGINAL_FORMAT}' column in your CSV against the controlled vocabulary.
 
 {C.BOLD}USAGE{C.RESET}
     {C.GREEN}${C.RESET} python3 check_extent_types.py [options]
@@ -234,7 +236,7 @@ def check_csv_values(csv_file):
         with open(csv_file, 'r', encoding='utf-8-sig') as f:
             reader = csv.DictReader(f)
             for row in reader:
-                format_type = row.get('Original Format', '').strip()
+                format_type = row.get(col.ORIGINAL_FORMAT, '').strip()
                 if format_type:
                     used_types.add(format_type)
     except Exception as e:
