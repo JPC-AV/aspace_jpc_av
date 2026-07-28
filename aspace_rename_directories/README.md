@@ -11,11 +11,11 @@ This script automates two tasks for digitized AV assets from the JPC Archive:
 
 For each `JPC_AV_*` directory, the script:
 
-1. Searches ArchivesSpace for the archival object matching the directory's Component Unique Identifier (e.g., `JPC_AV_00001`).
-2. Extracts the runtime of the `.mkv` file using `mediainfo`.
-3. Updates the ArchivesSpace record:
+1. Resolves the directory's Component Unique Identifier (e.g., `JPC_AV_00001`) to exactly one verified ArchivesSpace record — each search candidate is fetched and must match the identifier exactly within the AV resource. Zero matches, multiple matches, or a failed search all fail the directory with a message saying which it was.
+2. Extracts the runtime of the `.mkv` file using `mediainfo`. The directory must contain exactly one `.mkv` — several candidates fail the directory rather than guessing which file's runtime to record.
+3. Updates the ArchivesSpace record **only if something changed** (otherwise it's counted as `Unchanged` and nothing is written):
    - Adds Duration as a Defined List subnote to the Physical Characteristics and Technical Requirements note (appended to any existing text subnotes, or creates a new phystech note if none exists).
-   - Sets `physical_details` on all extents to `SD video, color, sound`.
+   - Fills **blank** `physical_details` on extents with `SD video, color, sound` — existing values are never overwritten, so manual corrections survive reruns.
 4. Renames the directory to append `_refid_<ref_id>`.
 
 ## Directory Structure
@@ -44,7 +44,7 @@ JPC_AV_00001_refid_b645fa3ffd01ad7364c9658f83fdceda/
 - `mediainfo` CLI tool installed and on your system PATH
 - Required Python packages:
   ```bash
-  pip install requests pymediainfo colorama
+  pip install requests colorama
   ```
 - `creds.py` configured at the repository root (see Installation)
 
@@ -126,14 +126,14 @@ Added as a Defined List subnote to the Physical Characteristics and Technical Re
 If a phystech note already exists (e.g., created during CSV import with transfer notes), Duration is appended to it. If no phystech note exists, one is created. The operation is idempotent — re-running removes and rewrites the Duration entry without duplicating it.
 
 ### Physical Details
-Set on all extents:
+Filled on extents whose `physical_details` is blank:
 ```json
 {
   "physical_details": "SD video, color, sound"
 }
 ```
 
-> **Note:** This hardcoded value is correct for most JPCA AV material. For tapes that deviate from the standard (BW, silent, HD), update the Physical Details field manually in ArchivesSpace after running the script.
+> **Note:** This default is correct for most JPCA AV material. For tapes that deviate from the standard (BW, silent, HD), set the Physical Details field manually in ArchivesSpace — the script only fills blanks and never overwrites an existing value, so manual corrections survive reruns.
 
 ## Logs
 
@@ -167,10 +167,11 @@ Written to `~/aspace_rename_reports/` by default. Override by setting `logs_dir`
 
 ## Notes
 
-- The script matches directories to ArchivesSpace records using the Component Unique Identifier field (`component_id`), not a general keyword search. Each identifier must be unique.
-- If multiple matches are found for a directory, the script logs a warning and uses the first result.
+- The script matches directories to ArchivesSpace records using the Component Unique Identifier field (`component_id`); every search candidate is fetched and verified as an exact match within the AV resource.
+- If multiple verified matches exist for one identifier, the directory FAILS with a clean-up-duplicates message — the script never picks one arbitrarily.
+- A failed search (network/server error) is reported as such, distinct from "no record found", and fails the directory so it is retried on a later run.
+- Directory names must be exactly `JPC_AV_<digits>`; anything else (including already-renamed `_refid_` directories) is not processed.
 - If `.mkv` extraction or API updates fail for a directory, the script logs the error and moves on to the next directory.
-- Directories already containing `_refid_` in their name are skipped.
 - Authentication is always required, even when using `--no-update`, because the ArchivesSpace lookup for `ref_id` is needed for renaming.
 
 ## Troubleshooting
@@ -179,5 +180,7 @@ Written to `~/aspace_rename_reports/` by default. Override by setting `logs_dir`
 |-------|----------|
 | `mediainfo` not found | Install `mediainfo` and ensure it is on your system PATH |
 | Authentication failed | Check `creds.py` credentials and ArchivesSpace URL |
-| No archival object found | Verify the Component Unique Identifier exists in ArchivesSpace |
-| Multiple matches found | Ensure identifiers are unique in ArchivesSpace |
+| No record with this Component Unique Identifier | Verify the identifier exists in ArchivesSpace (AV resource) |
+| N records share this Component Unique Identifier | Clean up the duplicate records in ArchivesSpace first |
+| Search failed ... retry later | Transient network/server problem — the record was NOT assumed missing; rerun |
+| N media files found - expected exactly one | Remove or relocate extra media files from the directory |

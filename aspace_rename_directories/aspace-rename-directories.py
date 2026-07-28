@@ -1,11 +1,12 @@
-"""ArchivesSpace Directory Processing Script - extracts video runtime and updates ASpace Scope and Contents notes."""
+"""ArchivesSpace Directory Processing Script - extracts video runtime, updates the
+ASpace phystech (Physical Characteristics and Technical Requirements) note, and
+renames directories to include the record's ref_id."""
 
 import json  # Library for working with JSON data structures
 import requests  # Library for making HTTP requests
 import os  # Library for interacting with the operating system (e.g., files, directories)
 import sys  # Library for system-specific parameters and functions
 import logging  # Library for logging messages (e.g., info, warnings, errors)
-from pymediainfo import MediaInfo  # External library to extract metadata from media files
 import subprocess  # Library for running external commands and capturing their output
 import re  # Library for working with regular expressions (text pattern matching)
 import argparse  # Library for parsing command-line arguments
@@ -102,7 +103,11 @@ class ArchivesSpaceClient:
             )
             
             if response.status_code == 200:
-                self.session = response.json()['session']
+                token = response.json().get('session')
+                if not token:
+                    logging.error("Authentication failed: 200 response but no session token in body")
+                    return False
+                self.session = token
                 self.headers = {"X-ArchivesSpace-Session": self.session}
                 logging.info("Successfully authenticated with ArchivesSpace")
                 return True
@@ -167,8 +172,8 @@ def get_colored_help():
 
 {BOLD}{WHITE}DESCRIPTION{RESET}
     Processes JPC_AV_* directories to:
-    {GREEN}1.{RESET} Extract video runtime from .mkv files → {YELLOW}Scope and Contents note{RESET} in ArchivesSpace
-    {GREEN}2.{RESET} Set extent physical_details → {YELLOW}SD video, color, sound{RESET}
+    {GREEN}1.{RESET} Extract video runtime from .mkv files → {YELLOW}phystech note{RESET} (Physical Characteristics) in ArchivesSpace
+    {GREEN}2.{RESET} Fill blank extent physical_details → {YELLOW}SD video, color, sound{RESET} {DIM}(existing values kept){RESET}
     {GREEN}3.{RESET} Rename directories to include {YELLOW}ref_id{RESET}
 
 {BOLD}{WHITE}USAGE{RESET}
@@ -215,7 +220,8 @@ def get_video_duration(file_path):
             ["mediainfo", "-f", file_path],  # Command and arguments
             stdout=subprocess.PIPE,  # Capture standard output
             stderr=subprocess.PIPE,  # Capture standard error
-            text=True  # Interpret the output as text (not bytes)
+            text=True,  # Interpret the output as text (not bytes)
+            timeout=60  # a hung mediainfo must not hang the whole run
         )
         # Check if the command executed successfully (return code 0)
         if result.returncode != 0:
@@ -236,20 +242,27 @@ def get_video_duration(file_path):
 
 def get_refid(query, repository, resource, baseURL, headers):
     """
-    Retrieve the RefID and Archival Object ID for a given query from ArchivesSpace.
-    Searches specifically in the Component Unique Identifier field of item-level archival objects.
-    
+    Resolve a Component Unique Identifier to EXACTLY ONE verified archival object.
+
+    Search hits are fuzzy and the index lags reality, so each candidate is
+    fetched and only counts when its component_id matches exactly AND it
+    belongs to the configured resource. All result pages are checked.
+
     Args:
-        query (str): The directory name or query string (e.g., JPC_AV_00001).
+        query (str): The directory name / catalog number (e.g., JPC_AV_00001).
         repository (str): The repository path in ArchivesSpace.
         resource (str): The resource path in ArchivesSpace.
         baseURL (str): The base URL for the ArchivesSpace API.
         headers (dict): The headers for API authentication.
     Returns:
-        tuple: (RefID, Archival Object ID) if found, otherwise (None, None).
+        tuple: (ref_id, archival_object_id, problem). problem is None only on
+        a verified single match; otherwise it says WHY resolution failed
+        ("search failed...", "no record...", "N records...") so callers can
+        report accurately instead of conflating a transient search failure
+        with a genuinely missing record. Fail closed on any problem.
     """
     resource_value = str(repository + resource)  # Combine repository and resource paths
-    
+
     # Build the search filter query to target Component Unique Identifier field
     filter = json.dumps(
         {
@@ -271,42 +284,114 @@ def get_refid(query, repository, resource, baseURL, headers):
             }
         }
     )
-    
-    # Construct the search query URL - using wildcard search but filtering by component_id.
-    # Use the configured repository path rather than a hardcoded /repositories/2.
-    search_query = f"{repository}/search?q=*&page=1&filter={filter}"
 
-    try:
-        # Send a GET request to the ArchivesSpace API and parse the JSON response
-        response = requests.get(baseURL + search_query, headers=headers, timeout=30).json()
+    matches = []  # (ref_id, archival_object_id, title) for VERIFIED hits only
+    page = 1
+    while True:
+        search_query = f"{repository}/search?q=*&page={page}&filter={filter}"
+        try:
+            response = requests.get(baseURL + search_query, headers=headers, timeout=30)
+        except requests.exceptions.RequestException as e:
+            logging.error(f"Search request failed for '{query}': {e}")
+            return None, None, "search failed (network error) - retry later"
+        if response.status_code != 200:
+            logging.error(f"Search returned HTTP {response.status_code} for '{query}': {response.text[:200]}")
+            return None, None, f"search failed (HTTP {response.status_code}) - retry later"
+        try:
+            payload = response.json()
+        except ValueError:
+            return None, None, "search failed (malformed response) - retry later"
+        if not isinstance(payload, dict) or "results" not in payload:
+            return None, None, "search failed (unexpected response shape) - retry later"
 
-        # Check if results are present
-        if response.get("results"):
-            # Log how many results were found
-            result_count = len(response["results"])
-            if result_count > 1:
-                logging.warning(f"Multiple results found for Component Unique Identifier '{query}': {result_count} matches")
-                logging.warning("Using the first result. Consider ensuring unique identifiers.")
-            
-            # Extract the RefID and Archival Object ID from the first result
-            first_result = response["results"][0]
-            ref_id = first_result.get("ref_id", None)
-            archival_object_id = first_result["id"].split("/")[-1]
-            
-            # Log the found result for verification
-            logging.info(f"Found archival object with Component Unique Identifier '{query}'")
-            logging.info(f"Title: {first_result.get('title', 'N/A')}")
-            logging.info(f"Level: {first_result.get('level', 'N/A')}")
-            
-            return ref_id, archival_object_id
-        else:
-            logging.warning(f"No archival object found with Component Unique Identifier: {query}")
-            return None, None
-            
-    except Exception as e:
-        # Handle unexpected exceptions and log an error
-        logging.error(f"Error fetching RefID for Component Unique Identifier '{query}': {e}")
-        return None, None
+        for hit in payload.get("results", []):
+            uri = hit.get("uri") or hit.get("id")
+            if not uri:
+                continue
+            # Verify the candidate: fetch the full record and require an EXACT
+            # component_id match inside our resource. Search 'literal' matching
+            # is not a guarantee, and acting on a near-miss would update the
+            # wrong record AND brand the directory with the wrong ref_id.
+            try:
+                record_response = requests.get(baseURL + uri, headers=headers, timeout=30)
+            except requests.exceptions.RequestException as e:
+                logging.error(f"Could not fetch candidate {uri}: {e}")
+                return None, None, "could not verify a search candidate - retry later"
+            if record_response.status_code != 200:
+                return None, None, "could not verify a search candidate - retry later"
+            try:
+                record = record_response.json()
+            except ValueError:
+                return None, None, "could not verify a search candidate - retry later"
+            if (record.get("component_id") == query
+                    and record.get("resource", {}).get("ref") == resource_value):
+                object_id = uri.rstrip("/").rsplit("/", 1)[-1]
+                matches.append((record.get("ref_id"), object_id, record.get("title", "N/A")))
+
+        last_page = payload.get("last_page", page)
+        if page >= last_page:
+            break
+        page += 1
+
+    if not matches:
+        return None, None, "no record with this Component Unique Identifier in the resource"
+    if len(matches) > 1:
+        return None, None, (f"{len(matches)} records share this Component Unique Identifier "
+                            f"- clean up duplicates in ArchivesSpace first")
+    ref_id, archival_object_id, title = matches[0]
+    if not ref_id:
+        return None, None, "matched record has no ref_id"
+    logging.info(f"Verified archival object with Component Unique Identifier '{query}'")
+    logging.info(f"Title: {title}")
+    return ref_id, archival_object_id, None
+
+# A processable directory is named exactly like a catalog number. Substring
+# matching ("JPC_AV" in name) used to catch things like JPC_AV_NOTES and send
+# them to ArchivesSpace as lookups.
+JPC_AV_DIR_RE = re.compile(r"^JPC_AV_\d+$")
+
+PHYSICAL_DETAILS_DEFAULT = "SD video, color, sound"
+
+# Media types this script processes. Currently .mkv only; future format flags
+# (.mp4 / .wav / .mp3 / .iso ...) should feed their extensions through here so
+# discovery, the exactly-one check, and renaming all follow automatically.
+DEFAULT_MEDIA_EXTENSIONS = (".mkv",)
+
+
+def find_media_file(dir_path, extensions=DEFAULT_MEDIA_EXTENSIONS):
+    """Locate exactly ONE media file in the directory.
+
+    Returns (filename, problem). problem is None only when precisely one
+    candidate exists - zero or several is a fail-closed condition, because
+    picking one arbitrarily could write the WRONG file's runtime to the
+    record (and rename the wrong file).
+    """
+    candidates = sorted(
+        f for f in os.listdir(dir_path)
+        if f.lower().endswith(tuple(ext.lower() for ext in extensions))
+        and "_refid_" not in f
+    )
+    if not candidates:
+        return None, f"no {'/'.join(extensions)} file found"
+    if len(candidates) > 1:
+        return None, (f"{len(candidates)} media files found ({', '.join(candidates)}) "
+                      f"- expected exactly one")
+    return candidates[0], None
+
+
+def get_current_duration(data):
+    """Return the value of the phystech note's Duration defined-list item, or
+    None when the record has no Duration yet. Used for change detection so an
+    already-correct record is not rewritten."""
+    for note in data.get("notes", []):
+        if note.get("type") == "phystech" and note.get("jsonmodel_type") == "note_multipart":
+            for subnote in note.get("subnotes", []):
+                if subnote.get("jsonmodel_type") == "note_definedlist":
+                    for item in subnote.get("items", []):
+                        if item.get("label") == "Duration":
+                            return item.get("value")
+    return None
+
 
 def modify_phystech_note(data, runtime):
     """
@@ -386,25 +471,34 @@ def modify_phystech_note(data, runtime):
 
 def set_extent_physical_details(data):
     """
-    Set the physical_details field on all extents to 'SD video, color, sound'.
-    
+    Fill BLANK physical_details fields with the collection default.
+
+    Never overwrites a non-blank value: deviations curated by staff in
+    ArchivesSpace (e.g. 'BW, silent', 'HD video, color, sound') must survive
+    reruns of this script. Overwriting unconditionally used to revert exactly
+    the manual corrections the README tells staff to make.
+
     Args:
         data (dict): The original archival object JSON data.
     Returns:
-        dict: The updated archival object JSON data.
+        tuple: (updated data, number of extents filled)
     """
-    # Initialize extents array if it doesn't exist
     if "extents" not in data or not data["extents"]:
         logging.warning("No extents found on archival object - skipping physical_details")
-        return data
-    
-    # Update physical_details on all extents
+        return data, 0
+
+    filled = 0
     for extent in data["extents"]:
-        extent["physical_details"] = "SD video, color, sound"
-    
-    logging.info(f"Set physical_details to 'SD video, color, sound' on {len(data['extents'])} extent(s)")
-    
-    return data
+        current = (extent.get("physical_details") or "").strip()
+        if not current:
+            extent["physical_details"] = PHYSICAL_DETAILS_DEFAULT
+            filled += 1
+        elif current != PHYSICAL_DETAILS_DEFAULT:
+            logging.info(f"Keeping existing physical_details: '{current}' (not overwritten)")
+
+    if filled:
+        logging.info(f"Set physical_details to '{PHYSICAL_DETAILS_DEFAULT}' on {filled} blank extent(s)")
+    return data, filled
 
 def rename_and_update_directories(repository, resource, baseURL, headers, 
                                    target_dir, dry_run=False, no_rename=False, 
@@ -461,11 +555,11 @@ def rename_and_update_directories(repository, resource, baseURL, headers,
             directory_name = os.path.basename(path)
             parent_dir = os.path.dirname(path)
             
-            if "JPC_AV" not in directory_name:
-                logging.error(f"Directory name must contain 'JPC_AV': {directory_name}")
-                continue
             if "_refid_" in directory_name:
                 logging.error(f"Directory already has refid: {directory_name}")
+                continue
+            if not JPC_AV_DIR_RE.fullmatch(directory_name):
+                logging.error(f"Directory name must be JPC_AV_<digits> (e.g. JPC_AV_00001): {directory_name}")
                 continue
             if not os.path.isdir(path):
                 logging.error(f"Directory not found: {path}")
@@ -477,10 +571,11 @@ def rename_and_update_directories(repository, resource, baseURL, headers,
         # For --single mode, we'll handle paths individually in the loop
         use_single_mode = True
     else:
-        # Normal mode: find all JPC_AV_* subdirectories
+        # Normal mode: find all JPC_AV_<digits> subdirectories (already-renamed
+        # dirs contain _refid_ and therefore don't match the pattern)
         directory_list = [
             entry for entry in os.listdir(working_dir)
-            if os.path.isdir(os.path.join(working_dir, entry)) and "_refid_" not in entry and "JPC_AV" in entry
+            if os.path.isdir(os.path.join(working_dir, entry)) and JPC_AV_DIR_RE.fullmatch(entry)
         ]
         parent_dirs = {}
         use_single_mode = False
@@ -499,7 +594,8 @@ def rename_and_update_directories(repository, resource, baseURL, headers,
 
     # Honest tallies so the summary and exit code reflect what actually happened.
     counters = {"selected": len(directory_list), "processed": 0, "updated": 0,
-                "dir_renamed": 0, "mkv_renamed": 0, "skipped": 0, "failed": 0}
+                "unchanged": 0, "dir_renamed": 0, "mkv_renamed": 0,
+                "skipped": 0, "failed": 0}
 
     # Process each directory
     for directory in directory_list:
@@ -510,26 +606,26 @@ def rename_and_update_directories(repository, resource, baseURL, headers,
             logging.info(f"Processing directory: {directory}")
 
             # Step 1: Resolve the ArchivesSpace record (needed for both rename and update)
-            refid, archival_object_id = get_refid(directory, repository, resource, baseURL, headers)
-            if not refid or not archival_object_id:
-                logging.error(f"No matching archival object found for directory: {directory}. Skipping.")
+            refid, archival_object_id, problem = get_refid(directory, repository, resource, baseURL, headers)
+            if problem:
+                logging.error(f"Could not resolve {directory}: {problem}. Skipping.")
                 counters["failed"] += 1
                 continue
 
             logging.info(f"RefID: {refid}, Archival Object ID: {archival_object_id}")
 
-            # Step 2: Locate the content .mkv if we'll need it (duration and/or mkv rename).
-            # Rename-only mode (--no-update) does NOT require an .mkv or mediainfo.
+            # Step 2: Locate THE media file if we'll need it (duration and/or mkv rename).
+            # Rename-only mode (--no-update) does NOT require a media file or mediainfo.
+            # Exactly one candidate is required - guessing among several could write
+            # the wrong file's runtime to the record.
             need_mkv = (not no_update) or (rename_mkv and not no_rename)
             mkv_filename = None
             if need_mkv:
-                mkv_files = [f for f in os.listdir(dir_path)
-                             if f.endswith(".mkv") and "_refid_" not in f]
-                if not mkv_files:
-                    logging.error(f"No .mkv file found in directory: {directory}. Skipping.")
+                mkv_filename, media_problem = find_media_file(dir_path)
+                if media_problem:
+                    logging.error(f"{directory}: {media_problem}. Skipping.")
                     counters["failed"] += 1
                     continue
-                mkv_filename = mkv_files[0]
 
             # Step 3: Precompute rename targets and collision-check BEFORE any write,
             # so a rename can never half-complete after the record was already updated.
@@ -579,13 +675,24 @@ def rename_and_update_directories(repository, resource, baseURL, headers,
                         counters["failed"] += 1
                         continue
 
-                    updated_data = modify_phystech_note(archival_object_data, video_duration)
-                    updated_data = set_extent_physical_details(updated_data)
-                    if not update_archival_object(REPO_ID, archival_object_id, updated_data, baseURL, headers):
-                        logging.error(f"Failed to update archival object for ID: {archival_object_id}. Skipping.")
-                        counters["failed"] += 1
-                        continue
-                    counters["updated"] += 1
+                    # Change detection: only write when something actually
+                    # changes. Rewriting an already-correct record churns
+                    # lock_versions and hides what a run really did.
+                    needs_duration = get_current_duration(archival_object_data) != video_duration
+                    updated_data, filled_details = set_extent_physical_details(archival_object_data)
+                    if needs_duration:
+                        updated_data = modify_phystech_note(updated_data, video_duration)
+
+                    if not needs_duration and filled_details == 0:
+                        logging.info(f"Record already up to date for {directory} "
+                                     f"(Duration and physical_details unchanged) - nothing written")
+                        counters["unchanged"] += 1
+                    else:
+                        if not update_archival_object(REPO_ID, archival_object_id, updated_data, baseURL, headers):
+                            logging.error(f"Failed to update archival object for ID: {archival_object_id}. Skipping.")
+                            counters["failed"] += 1
+                            continue
+                        counters["updated"] += 1
 
             # Step 6: Rename the directory (unless --no-rename). Target collision was
             # already checked above.
@@ -620,6 +727,7 @@ def rename_and_update_directories(repository, resource, baseURL, headers,
     logging.info(f"  Selected:     {counters['selected']}")
     logging.info(f"  Processed:    {counters['processed']}")
     logging.info(f"  Updated:      {counters['updated']}")
+    logging.info(f"  Unchanged:    {counters['unchanged']}")
     logging.info(f"  Dirs renamed: {counters['dir_renamed']}")
     logging.info(f"  MKVs renamed: {counters['mkv_renamed']}")
     failed_color = Fore.RED if counters["failed"] else Fore.GREEN
@@ -644,11 +752,15 @@ def fetch_archival_object(repository_id, object_id, baseURL, headers):
         # Build the URL to fetch the archival object
         url = f"{baseURL}/repositories/{repository_id}/archival_objects/{object_id}"
         # Send a GET request to the ArchivesSpace API
-        response = requests.get(url, headers=headers, timeout=10)
+        response = requests.get(url, headers=headers, timeout=30)
 
         # Check the response status code
         if response.status_code == 200:
-            return response.json()  # Return the JSON response on success
+            try:
+                return response.json()  # Return the JSON response on success
+            except ValueError:
+                logging.error("Fetched archival object was not valid JSON")
+                return None
         else:
             logging.error(f"Failed to fetch archival object: {response.status_code}")
             logging.error(f"Response content: {response.text}")
@@ -670,16 +782,34 @@ def update_archival_object(repository_id, object_id, updated_data, baseURL, head
     Returns:
         dict: The API response JSON on success, or None if the update fails.
     """
+    # Belt-and-suspenders scope lock (matches the CSV importer's write helper):
+    # refuse to write a payload whose own uri doesn't match the endpoint, or
+    # whose record lives outside the configured resource.
+    expected_uri = f"/repositories/{repository_id}/archival_objects/{object_id}"
+    if updated_data.get("uri") != expected_uri:
+        logging.error(f"REFUSING to write {expected_uri}: payload uri "
+                      f"{updated_data.get('uri')!r} does not match endpoint")
+        return None
+    expected_resource = f"/repositories/{repository_id}/resources/{RESOURCE_ID}"
+    if updated_data.get("resource", {}).get("ref") != expected_resource:
+        logging.error(f"REFUSING to write {expected_uri}: record is not in "
+                      f"{expected_resource} (scope lock)")
+        return None
+
     try:
         # Build the URL for updating the archival object
-        url = f"{baseURL}/repositories/{repository_id}/archival_objects/{object_id}"
+        url = f"{baseURL}{expected_uri}"
         # Send a POST request to update the archival object
-        response = requests.post(url, headers=headers, data=json.dumps(updated_data), timeout=10)
+        response = requests.post(url, headers=headers, data=json.dumps(updated_data), timeout=30)
 
         # Check the response status code
         if response.status_code == 200:
             logging.info("Archival object updated successfully!")
-            return response.json()  # Return the JSON response on success
+            try:
+                return response.json()  # Return the JSON response on success
+            except ValueError:
+                logging.error("Update returned 200 but the response was not valid JSON")
+                return None
         else:
             logging.error(f"Failed to update archival object: {response.status_code}")
             logging.error(f"Response content: {response.text}")
