@@ -4,6 +4,33 @@
 
 This script imports item-level archival objects from CSV files into ArchivesSpace. It's specifically designed for the Johnson Publishing Company (JPC) audiovisual collection but can be adapted for other collections.
 
+## Table of Contents
+
+- [Features](#features)
+- [Prerequisites](#prerequisites)
+- [Installation](#installation)
+- [Related Documentation](#related-documentation)
+- [Authentication](#authentication)
+- [CSV File Format](#csv-file-format)
+- [Quick Start](#quick-start)
+- [Command-Line Options](#command-line-options)
+- [Duplicate Handling Modes](#duplicate-handling-modes)
+  - [Skip (Default)](#skip-default)
+  - [Update](#update)
+  - [Fail](#fail)
+  - [Update-only (narrow CSV)](#update-only-narrow-csv)
+- [Output](#output)
+- [Field Mapping](#field-mapping)
+- [Validation](#validation)
+- [Reports](#reports)
+- [Utility Scripts](#utility-scripts)
+- [Recommended Workflow](#recommended-workflow)
+  - [Full import (create/update)](#full-import-createupdate)
+  - [Update-only workflow (narrow CSV)](#update-only-workflow-narrow-csv)
+- [Troubleshooting](#troubleshooting)
+- [Version History](#version-history)
+- [License](#license)
+
 ## Features
 
 - **Bulk Import**: Create multiple archival objects from CSV data
@@ -311,6 +338,8 @@ python check_extent_types.py your_file.csv  # Validate CSV values
 
 ## Recommended Workflow
 
+### Full import (create/update)
+
 1. **Validate CSV**
    ```bash
    python csv_utils.py --validate your_file.csv
@@ -343,6 +372,40 @@ python check_extent_types.py your_file.csv  # Validate CSV values
 > updated on a short delay (typically under a minute) — a record created
 > seconds ago may not be findable yet, and an immediate rerun could create a
 > duplicate. Normal human-paced reruns are unaffected.
+
+### Update-only workflow (narrow CSV)
+
+For updating existing records from a narrow CSV (`CATALOG_NUMBER` plus just
+the column(s) to change — e.g. titles only). Never creates records; no parent
+ref_ids needed.
+
+1. **Validate CSV**
+   ```bash
+   python csv_utils.py --validate your_file.csv --update-only
+   ```
+
+2. **Verify extent types** *(only if `Original Format` is one of your columns)*
+   ```bash
+   python check_extent_types.py your_file.csv
+   ```
+
+3. **Dry run** — check the `will update:` / `Left untouched:` scope lines and
+   the proposed `old --> new` changes
+   ```bash
+   python aspace_csv_import.py --update-only -n -f your_file.csv
+   ```
+
+4. **Run the update**
+   ```bash
+   python aspace_csv_import.py --update-only -f your_file.csv
+   ```
+
+5. **Verify in ArchivesSpace**
+
+Every row is resolved and preflighted before anything is written — if any
+catalog number matches zero or multiple records, or a row would hit a guard
+(invalid extent type, multi-extent or multi-date conflict), the entire run
+aborts with no writes.
 
 ## Troubleshooting
 
