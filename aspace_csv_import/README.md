@@ -420,6 +420,28 @@ aborts with no writes.
 
 ## Version History
 
+- **v3.0** (2026): Safety hardening + update-only mode
+  - New `--update-only` mode: narrow CSVs (CATALOG_NUMBER + columns to
+    change), never creates records, resolves and preflights every row
+    before anything is written — any predictable problem aborts the run
+    with zero writes
+  - Fail-closed everywhere: duplicate/parent/container lookups verify exact
+    matches within the AV resource and abort on failure instead of guessing;
+    failed report writes fail the run (exit 3)
+  - Write safety: retries limited to reads (a timed-out POST is never blindly
+    retried); top containers are reused by indicator and cleaned up if the
+    record creation is definitively rejected
+  - Update mode applies only detected changes — unchanged dates, extents,
+    and notes keep their richer nested metadata (date expressions/certainty,
+    extent physical_details, note labels and Duration defined lists);
+    multi-extent and multi-same-label-date records are never collapsed
+  - Blank CSV cells mean "leave the existing value alone"; day-first dates
+    (13/02/2024) are rejected as malformed
+  - Column names renamed (ASpace Title, ASpace Scope and Contents Note) and
+    centralized in csv_columns.py — future renames are a one-line edit
+  - `csv_utils.py --validate --update-only` for narrow CSVs; docs corrected
+    and expanded (ToC, workflows, real status symbols)
+
 - **v2.0** (2024): Major update
   - Colorized terminal output
   - Smart change detection in update mode
