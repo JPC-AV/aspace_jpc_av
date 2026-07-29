@@ -300,6 +300,7 @@ class ASpaceClient:
         from urllib.parse import urlencode
         verified = []
         hits_seen = 0
+        seen_uris = set()
         total_hits = None
         page = 1
         while True:
@@ -331,6 +332,13 @@ class ASpaceClient:
                     # skipping it could turn a real match into a false "none",
                     # which callers read as "safe to create". Fail the lookup.
                     return None
+                if uri in seen_uris:
+                    # A repeated hit means the hit count reconciles while a
+                    # record it displaced went unseen (index shifted mid-walk,
+                    # or a mangled response). Can't trust the walk.
+                    logging.error(f"Search returned duplicate hit {uri} - failing lookup")
+                    return None
+                seen_uris.add(uri)
                 record = self.get(uri)
                 if record is None:
                     return None  # can't verify the candidate - don't guess
@@ -352,8 +360,10 @@ class ASpaceClient:
                 # success could hide the very record being checked for.
                 # (type() not isinstance(): JSON true/false pass isinstance.)
                 return None
-            if last_page < 1 and total_hits > 0:
-                return None  # hits exist but no pages to hold them - mangled
+            if last_page < 0 or (last_page < 1 and total_hits > 0):
+                # Negative page counts are nonsense; last_page == 0 is only
+                # coherent alongside zero hits.
+                return None
             if page >= last_page:
                 break
             page += 1
