@@ -427,10 +427,10 @@ def rename_and_update_directories(client, target_dir, dry_run=False, no_rename=F
     if single:
         # --single mode: process only the specified directories (not their
         # subdirs). Targets are (parent_path, name) TUPLES, never keyed by
-        # basename alone - two targets like /a/JPC_AV_00001 and
-        # /b/JPC_AV_00001 are distinct directories and both get processed
-        # (keying by name used to silently drop one and process the other
-        # twice). Exact duplicate paths are deduplicated.
+        # basename alone (keying by name used to silently drop one same-named
+        # target and process the other twice). Exact duplicate paths are
+        # deduplicated; distinct same-named targets are rejected by the
+        # collision preflight below, since they'd write the same record.
         targets = []
         seen_paths = set()
 
@@ -757,7 +757,10 @@ def main():
         default=argparse.SUPPRESS,
         help=argparse.SUPPRESS
     )
-    parser.add_argument(
+    # -d and --single are genuinely mutually exclusive targets - allowing both
+    # used to silently ignore the -d directory in favor of --single.
+    target_group = parser.add_mutually_exclusive_group()
+    target_group.add_argument(
         '-d', '--directory',
         type=str,
         required=False,
@@ -789,18 +792,25 @@ def main():
         action='store_true',
         help=argparse.SUPPRESS
     )
-    parser.add_argument(
+    target_group.add_argument(
         '--single',
         nargs='+',
         metavar='PATH',
         help=argparse.SUPPRESS
     )
-    
+
     args = parser.parse_args()
-    
-    # Validate: require either -d or --single
+
+    # Validate: require either -d or --single (argparse enforces not-both)
     if not args.directory and not args.single:
         parser.error("either -d/--directory or --single is required")
+
+    # --rename-mkv renames the media file DURING the rename step, which
+    # --no-rename disables entirely - the combination would announce renames
+    # and then do nothing. Reject it instead of exiting successfully.
+    if args.rename_mkv and args.no_rename:
+        parser.error("--rename-mkv cannot be combined with --no-rename "
+                     "(--no-rename skips all renaming)")
     
     # Set logging level based on verbose flag
     if args.verbose:
