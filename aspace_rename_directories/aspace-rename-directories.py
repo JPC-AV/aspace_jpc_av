@@ -238,6 +238,10 @@ def find_media_file(dir_path, extensions=DEFAULT_MEDIA_EXTENSIONS):
         f for f in os.listdir(dir_path)
         if f.lower().endswith(tuple(ext.lower() for ext in extensions))
         and "_refid_" not in f
+        # A directory/FIFO/socket named *.mkv is not media - selecting one
+        # could rename a non-file as though it were (--no-update --rename-mkv
+        # never runs mediainfo, so nothing else would catch it).
+        and os.path.isfile(os.path.join(dir_path, f))
     )
     if not candidates:
         return None, f"no {'/'.join(extensions)} file found"
@@ -454,6 +458,24 @@ def rename_and_update_directories(client, target_dir, dry_run=False, no_rename=F
                 continue
 
             targets.append((parent_dir, directory_name))
+
+        # Same-named directories in different parents resolve to the SAME
+        # ArchivesSpace record (the name is the catalog number), so processing
+        # both would write the same archival object twice with the last
+        # runtime winning. Fail every colliding target before any work.
+        name_counts = {}
+        for _, name in targets:
+            name_counts[name] = name_counts.get(name, 0) + 1
+        colliding = {n for n, c in name_counts.items() if c > 1}
+        if colliding:
+            for parent_dir, name in targets:
+                if name in colliding:
+                    logging.error(f"Conflicting --single targets: {name_counts[name]} directories "
+                                  f"named {name} were selected, but they all resolve to the same "
+                                  f"ArchivesSpace record ({os.path.join(parent_dir, name)}). "
+                                  f"Process only one of them.")
+                    invalid_single_count += 1
+            targets = [t for t in targets if t[1] not in colliding]
     else:
         # Normal mode: find all JPC_AV_<digits> subdirectories (already-renamed
         # dirs contain _refid_ and therefore don't match the pattern)
