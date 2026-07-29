@@ -324,7 +324,8 @@ def get_refid(query, repository, resource, baseURL, headers):
             except ValueError:
                 return None, None, "could not verify a search candidate - retry later"
             if (record.get("component_id") == query
-                    and record.get("resource", {}).get("ref") == resource_value):
+                    and record.get("resource", {}).get("ref") == resource_value
+                    and record.get("level") == "item"):
                 object_id = uri.rstrip("/").rsplit("/", 1)[-1]
                 matches.append((record.get("ref_id"), object_id, record.get("title", "N/A")))
 
@@ -544,30 +545,36 @@ def rename_and_update_directories(repository, resource, baseURL, headers,
     
     log_spacing()
 
-    # Find directories to process
+    # Find directories to process. In --single mode the operator named each
+    # target explicitly, so a rejected target is a FAILURE (counted, non-zero
+    # exit) - not a silent skip that can leave an all-invalid run exiting 0.
+    invalid_single_count = 0
     if single:
         # --single mode: process only the specified directories (not their subdirs)
         directory_list = []
         parent_dirs = {}  # Map directory name to its parent path
-        
+
         for path in single:
             path = path.rstrip('/')
             directory_name = os.path.basename(path)
             parent_dir = os.path.dirname(path)
-            
+
             if "_refid_" in directory_name:
                 logging.error(f"Directory already has refid: {directory_name}")
+                invalid_single_count += 1
                 continue
             if not JPC_AV_DIR_RE.fullmatch(directory_name):
                 logging.error(f"Directory name must be JPC_AV_<digits> (e.g. JPC_AV_00001): {directory_name}")
+                invalid_single_count += 1
                 continue
             if not os.path.isdir(path):
                 logging.error(f"Directory not found: {path}")
+                invalid_single_count += 1
                 continue
-                
+
             directory_list.append(directory_name)
             parent_dirs[directory_name] = parent_dir
-        
+
         # For --single mode, we'll handle paths individually in the loop
         use_single_mode = True
     else:
@@ -584,6 +591,9 @@ def rename_and_update_directories(repository, resource, baseURL, headers,
     directory_list.sort()
     
     if not directory_list:
+        if invalid_single_count:
+            logging.error(f"All {invalid_single_count} requested --single target(s) were invalid.")
+            return invalid_single_count
         logging.warning("No matching directories found to process.")
         return 0  # nothing to do is not a failure
 
@@ -593,9 +603,11 @@ def rename_and_update_directories(repository, resource, baseURL, headers,
     log_spacing()
 
     # Honest tallies so the summary and exit code reflect what actually happened.
-    counters = {"selected": len(directory_list), "processed": 0, "updated": 0,
+    # Rejected --single targets are pre-counted as failures.
+    counters = {"selected": len(directory_list) + invalid_single_count,
+                "processed": 0, "updated": 0,
                 "unchanged": 0, "dir_renamed": 0, "mkv_renamed": 0,
-                "skipped": 0, "failed": 0}
+                "skipped": 0, "failed": invalid_single_count}
 
     # Process each directory
     for directory in directory_list:
