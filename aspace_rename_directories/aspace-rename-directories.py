@@ -811,6 +811,13 @@ def main():
     if args.rename_mkv and args.no_rename:
         parser.error("--rename-mkv cannot be combined with --no-rename "
                      "(--no-rename skips all renaming)")
+
+    # --no-update --no-rename disables everything the script can do; it would
+    # still authenticate and resolve records, then exit 0 having changed
+    # nothing. Reject the no-op rather than report a clean success.
+    if args.no_update and args.no_rename:
+        parser.error("--no-update and --no-rename together leave nothing to do "
+                     "(records untouched, nothing renamed)")
     
     # Set logging level based on verbose flag
     if args.verbose:
