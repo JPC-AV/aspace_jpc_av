@@ -314,16 +314,31 @@ class ASpaceClient:
                     return None  # untrustworthy response - don't guess
                 uri = hit.get("uri") or hit.get("id")
                 if not uri:
-                    continue
+                    # A hit we can't resolve might BE the existing record -
+                    # skipping it could turn a real match into a false "none",
+                    # which callers read as "safe to create". Fail the lookup.
+                    return None
                 record = self.get(uri)
                 if record is None:
                     return None  # can't verify the candidate - don't guess
                 if not isinstance(record, dict):
                     return None
-                if matches(record):
+                # The matcher indexes nested fields; malformed nesting (e.g.
+                # resource: []) must fail the lookup, not raise out of it.
+                try:
+                    matched = matches(record)
+                except (AttributeError, TypeError, KeyError):
+                    logging.error(f"Malformed candidate record at {uri} - failing lookup")
+                    return None
+                if matched:
                     verified.append((uri, record))
-            last_page = result.get("last_page", page)
-            if not isinstance(last_page, int) or page >= last_page:
+            last_page = result.get("last_page")
+            if not isinstance(last_page, int):
+                # Missing/invalid pagination metadata means we can't know
+                # whether more result pages exist - a partial walk returned as
+                # success could hide the very record being checked for.
+                return None
+            if page >= last_page:
                 break
             page += 1
         return verified
