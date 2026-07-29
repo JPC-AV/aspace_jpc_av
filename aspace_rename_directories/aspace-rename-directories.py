@@ -110,7 +110,7 @@ def get_colored_help():
 {BOLD}{WHITE}DESCRIPTION{RESET}
     Processes JPC_AV_* directories to:
     {GREEN}1.{RESET} Extract video runtime from .mkv files → {YELLOW}phystech note{RESET} (Physical Characteristics) in ArchivesSpace
-    {GREEN}2.{RESET} Fill blank extent physical_details → {YELLOW}SD video, color, sound{RESET} {DIM}(existing values kept){RESET}
+    {GREEN}2.{RESET} Fill blank extent physical_details → {YELLOW}SD video, color, sound{RESET} {DIM}(existing values kept; single-extent records only){RESET}
     {GREEN}3.{RESET} Rename directories to include {YELLOW}ref_id{RESET}
 
 {BOLD}{WHITE}USAGE{RESET}
@@ -247,29 +247,47 @@ def find_media_file(dir_path, extensions=DEFAULT_MEDIA_EXTENSIONS):
     return candidates[0], None
 
 
-def get_current_duration(data):
-    """Return the value of the phystech note's Duration defined-list item, or
-    None when the record has no Duration yet. Used for change detection so an
-    already-correct record is not rewritten."""
+def _iter_duration_items(data):
+    """Yield every Duration defined-list item across ALL phystech notes.
+
+    Change detection and mutation must walk the exact same set of items - a
+    record can carry several phystech notes (the CSV importer deliberately
+    preserves extra same-type notes), and reading one note while writing
+    another used to leave stale, conflicting Duration values behind.
+    """
     for note in data.get("notes", []):
         if note.get("type") == "phystech" and note.get("jsonmodel_type") == "note_multipart":
             for subnote in note.get("subnotes", []):
                 if subnote.get("jsonmodel_type") == "note_definedlist":
                     for item in subnote.get("items", []):
                         if item.get("label") == "Duration":
-                            return item.get("value")
-    return None
+                            yield item
+
+
+def duration_needs_update(data, runtime):
+    """True when the record has no Duration yet, or any Duration item (in any
+    phystech note) disagrees with the extracted runtime."""
+    values = [item.get("value") for item in _iter_duration_items(data)]
+    return (not values) or any(v != runtime for v in values)
 
 
 def modify_phystech_note(data, runtime):
     """
-    Add a Duration defined list to the Physical Characteristics and Technical
-    Requirements (phystech) note. If no phystech note exists, creates one with
-    just the duration; existing text/other subnotes are preserved.
+    Set the Duration in the Physical Characteristics and Technical
+    Requirements (phystech) note(s).
 
-    Creates the structure: phystech note > subnotes > Defined List > Item (Label: "Duration", Value: runtime)
+    Existing Duration items are updated IN PLACE, wherever they live: every
+    Duration item in every phystech note gets the new value, so a record with
+    several phystech notes can never keep a stale, conflicting Duration.
+    Updating in place also preserves the surrounding structure - a defined
+    list holding Duration alongside other items (e.g. Codec) keeps those
+    items untouched. (Replacing whole defined lists used to delete them.)
 
-    Forward-facing only: this targets the phystech note. It deliberately does NOT
+    When no Duration exists anywhere, a new defined list is appended to the
+    first phystech note (or a new phystech note is created), producing:
+    phystech note > subnotes > Defined List > Item (Label: "Duration", Value: runtime)
+
+    Forward-facing only: this targets phystech notes. It deliberately does NOT
     remediate any Duration entry left in a scopecontent note by older runs — that
     cleanup is handled separately.
 
@@ -279,60 +297,44 @@ def modify_phystech_note(data, runtime):
     Returns:
         dict: The updated archival object JSON data.
     """
-    # Create the defined list item with Duration label and runtime value
-    duration_item = {
-        "jsonmodel_type": "note_definedlist_item",
-        "label": "Duration",
-        "value": runtime
-    }
+    # Update every existing Duration item in place (all phystech notes).
+    updated = 0
+    for item in _iter_duration_items(data):
+        item["value"] = runtime
+        updated += 1
+    if updated:
+        logging.info(f"Updated {updated} Duration item(s) in place: {runtime}")
+        return data
 
-    # Create the defined list structure
+    # No Duration anywhere yet - append a new defined list.
     duration_defined_list = {
         "jsonmodel_type": "note_definedlist",
-        "items": [duration_item]
+        "items": [{
+            "jsonmodel_type": "note_definedlist_item",
+            "label": "Duration",
+            "value": runtime
+        }]
     }
 
-    # Initialize notes array if it doesn't exist
     if "notes" not in data:
         data["notes"] = []
 
-    # Find existing phystech note
-    existing_phystech_note = None
     for note in data["notes"]:
         if note.get("type") == "phystech" and note.get("jsonmodel_type") == "note_multipart":
-            existing_phystech_note = note
+            # Existing phystech note - add the Duration defined list,
+            # preserving any existing text (or other) subnotes.
+            logging.info("Found existing Physical Characteristics and Technical Requirements note - adding Duration defined list")
+            note.setdefault("subnotes", []).append(duration_defined_list)
+            logging.info(f"Added Duration defined list to Physical Characteristics and Technical Requirements note: {runtime}")
             break
-
-    if existing_phystech_note is not None:
-        # phystech note exists - add/update Duration defined list in subnotes,
-        # preserving any existing text (or other) subnotes.
-        logging.info("Found existing Physical Characteristics and Technical Requirements note - adding Duration defined list")
-
-        # Ensure subnotes array exists
-        if "subnotes" not in existing_phystech_note:
-            existing_phystech_note["subnotes"] = []
-
-        # Remove any existing Duration defined list (to allow re-running without duplicates)
-        existing_phystech_note["subnotes"] = [
-            subnote for subnote in existing_phystech_note["subnotes"]
-            if not (
-                subnote.get("jsonmodel_type") == "note_definedlist" and
-                any(item.get("label") == "Duration" for item in subnote.get("items", []))
-            )
-        ]
-
-        # Append the new Duration defined list
-        existing_phystech_note["subnotes"].append(duration_defined_list)
-        logging.info(f"Added Duration defined list to Physical Characteristics and Technical Requirements note: {runtime}")
     else:
         # No phystech note exists - create a new one with just the duration
         logging.info("No existing Physical Characteristics and Technical Requirements note found - creating new one")
-        phystech_note = {
+        data["notes"].append({
             "jsonmodel_type": "note_multipart",
             "type": "phystech",
             "subnotes": [duration_defined_list]
-        }
-        data["notes"].append(phystech_note)
+        })
         logging.info(f"Created new Physical Characteristics and Technical Requirements note with Duration: {runtime}")
 
     return data
@@ -355,18 +357,24 @@ def set_extent_physical_details(data):
         logging.warning("No extents found on archival object - skipping physical_details")
         return data, 0
 
-    filled = 0
-    for extent in data["extents"]:
-        current = (extent.get("physical_details") or "").strip()
-        if not current:
-            extent["physical_details"] = PHYSICAL_DETAILS_DEFAULT
-            filled += 1
-        elif current != PHYSICAL_DETAILS_DEFAULT:
-            logging.info(f"Keeping existing physical_details: '{current}' (not overwritten)")
+    if len(data["extents"]) > 1:
+        # The default describes the video carrier. On a multi-extent record we
+        # can't tell which blank extents are video (one might be linear_feet),
+        # so stamping them all would mislabel non-video extents. Leave every
+        # blank alone for staff to curate (fail closed).
+        logging.info("Multiple extents on record - leaving blank physical_details "
+                     "for staff (default only applied to single-extent records)")
+        return data, 0
 
-    if filled:
-        logging.info(f"Set physical_details to '{PHYSICAL_DETAILS_DEFAULT}' on {filled} blank extent(s)")
-    return data, filled
+    extent = data["extents"][0]
+    current = (extent.get("physical_details") or "").strip()
+    if not current:
+        extent["physical_details"] = PHYSICAL_DETAILS_DEFAULT
+        logging.info(f"Set physical_details to '{PHYSICAL_DETAILS_DEFAULT}' on blank extent")
+        return data, 1
+    if current != PHYSICAL_DETAILS_DEFAULT:
+        logging.info(f"Keeping existing physical_details: '{current}' (not overwritten)")
+    return data, 0
 
 def rename_and_update_directories(client, target_dir, dry_run=False, no_rename=False,
                                    no_update=False, verbose=False, rename_mkv=False,
@@ -413,14 +421,24 @@ def rename_and_update_directories(client, target_dir, dry_run=False, no_rename=F
     # exit) - not a silent skip that can leave an all-invalid run exiting 0.
     invalid_single_count = 0
     if single:
-        # --single mode: process only the specified directories (not their subdirs)
-        directory_list = []
-        parent_dirs = {}  # Map directory name to its parent path
+        # --single mode: process only the specified directories (not their
+        # subdirs). Targets are (parent_path, name) TUPLES, never keyed by
+        # basename alone - two targets like /a/JPC_AV_00001 and
+        # /b/JPC_AV_00001 are distinct directories and both get processed
+        # (keying by name used to silently drop one and process the other
+        # twice). Exact duplicate paths are deduplicated.
+        targets = []
+        seen_paths = set()
 
         for path in single:
-            path = path.rstrip('/')
+            path = os.path.abspath(path.rstrip('/'))
             directory_name = os.path.basename(path)
             parent_dir = os.path.dirname(path)
+
+            if path in seen_paths:
+                logging.warning(f"Duplicate --single target ignored: {path}")
+                continue
+            seen_paths.add(path)
 
             if "_refid_" in directory_name:
                 logging.error(f"Directory already has refid: {directory_name}")
@@ -435,46 +453,39 @@ def rename_and_update_directories(client, target_dir, dry_run=False, no_rename=F
                 invalid_single_count += 1
                 continue
 
-            directory_list.append(directory_name)
-            parent_dirs[directory_name] = parent_dir
-
-        # For --single mode, we'll handle paths individually in the loop
-        use_single_mode = True
+            targets.append((parent_dir, directory_name))
     else:
         # Normal mode: find all JPC_AV_<digits> subdirectories (already-renamed
         # dirs contain _refid_ and therefore don't match the pattern)
-        directory_list = [
-            entry for entry in os.listdir(working_dir)
+        targets = [
+            (working_dir, entry) for entry in os.listdir(working_dir)
             if os.path.isdir(os.path.join(working_dir, entry)) and JPC_AV_DIR_RE.fullmatch(entry)
         ]
-        parent_dirs = {}
-        use_single_mode = False
-    
-    # Sort directories alphabetically/numerically
-    directory_list.sort()
-    
-    if not directory_list:
+
+    # Sort by directory name (then parent, for same-name targets)
+    targets.sort(key=lambda t: (t[1], t[0]))
+
+    if not targets:
         if invalid_single_count:
             logging.error(f"All {invalid_single_count} requested --single target(s) were invalid.")
             return invalid_single_count
         logging.warning("No matching directories found to process.")
         return 0  # nothing to do is not a failure
 
-    logging.info(f"Found {len(directory_list)} directories to process:")
-    for directory in directory_list:
-        logging.info(f"  - {directory}")
+    logging.info(f"Found {len(targets)} directories to process:")
+    for parent_path, directory in targets:
+        logging.info(f"  - {os.path.join(parent_path, directory) if single else directory}")
     log_spacing()
 
     # Honest tallies so the summary and exit code reflect what actually happened.
     # Rejected --single targets are pre-counted as failures.
-    counters = {"selected": len(directory_list) + invalid_single_count,
+    counters = {"selected": len(targets) + invalid_single_count,
                 "processed": 0, "updated": 0,
                 "unchanged": 0, "dir_renamed": 0, "mkv_renamed": 0,
                 "skipped": 0, "failed": invalid_single_count}
 
     # Process each directory
-    for directory in directory_list:
-        parent_path = parent_dirs[directory] if use_single_mode else working_dir
+    for parent_path, directory in targets:
         dir_path = os.path.join(parent_path, directory)
         counters["processed"] += 1
         try:
@@ -538,49 +549,55 @@ def rename_and_update_directories(client, target_dir, dry_run=False, no_rename=F
                     continue
                 logging.info(f"Extracted runtime: {video_duration} for file: {mkv_filename}")
 
-            # Step 5: Update ASpace record (unless --no-update)
+            # Step 5: Update ASpace record (unless --no-update). Dry run does
+            # the same fetch and change detection as a real run - GETs are
+            # safe, and a dry run that just claims "would update" without
+            # looking at the record hides both no-op rows and problems that
+            # only surface at comparison time.
             if not no_update:
-                if dry_run:
-                    logging.info(f"{Fore.YELLOW}[DRY RUN]{Style.RESET_ALL} Would update ASpace record with duration: {video_duration}")
-                    logging.info(f"{Fore.YELLOW}[DRY RUN]{Style.RESET_ALL} Would set extent physical_details to: SD video, color, sound")
+                archival_object_data = fetch_archival_object(client, archival_object_id)
+                if not archival_object_data:
+                    logging.error(f"Failed to fetch archival object for ID: {archival_object_id}. Skipping.")
+                    counters["failed"] += 1
+                    continue
+
+                # Change detection: only write when something actually
+                # changes. Rewriting an already-correct record churns
+                # lock_versions and hides what a run really did.
+                needs_duration = duration_needs_update(archival_object_data, video_duration)
+                updated_data, filled_details = set_extent_physical_details(archival_object_data)
+                if needs_duration:
+                    updated_data = modify_phystech_note(updated_data, video_duration)
+
+                if not needs_duration and filled_details == 0:
+                    logging.info(f"Record already up to date for {directory} "
+                                 f"(Duration and physical_details unchanged) - nothing written")
+                    counters["unchanged"] += 1
+                elif dry_run:
+                    changes = []
+                    if needs_duration:
+                        changes.append(f"Duration -> {video_duration}")
+                    if filled_details:
+                        changes.append(f"physical_details -> '{PHYSICAL_DETAILS_DEFAULT}' "
+                                       f"on {filled_details} blank extent(s)")
+                    logging.info(f"{Fore.YELLOW}[DRY RUN]{Style.RESET_ALL} Would update "
+                                 f"ASpace record: {'; '.join(changes)}")
+                    counters["updated"] += 1
                 else:
-                    archival_object_data = fetch_archival_object(client, archival_object_id)
-                    if not archival_object_data:
-                        logging.error(f"Failed to fetch archival object for ID: {archival_object_id}. Skipping.")
+                    if not update_archival_object(client, archival_object_id, updated_data):
+                        logging.error(f"Failed to update archival object for ID: {archival_object_id}. Skipping.")
                         counters["failed"] += 1
                         continue
+                    counters["updated"] += 1
 
-                    # Change detection: only write when something actually
-                    # changes. Rewriting an already-correct record churns
-                    # lock_versions and hides what a run really did.
-                    needs_duration = get_current_duration(archival_object_data) != video_duration
-                    updated_data, filled_details = set_extent_physical_details(archival_object_data)
-                    if needs_duration:
-                        updated_data = modify_phystech_note(updated_data, video_duration)
-
-                    if not needs_duration and filled_details == 0:
-                        logging.info(f"Record already up to date for {directory} "
-                                     f"(Duration and physical_details unchanged) - nothing written")
-                        counters["unchanged"] += 1
-                    else:
-                        if not update_archival_object(client, archival_object_id, updated_data):
-                            logging.error(f"Failed to update archival object for ID: {archival_object_id}. Skipping.")
-                            counters["failed"] += 1
-                            continue
-                        counters["updated"] += 1
-
-            # Step 6: Rename the directory (unless --no-rename). Target collision was
-            # already checked above.
-            if not no_rename:
-                if dry_run:
-                    logging.info(f"{Fore.YELLOW}[DRY RUN]{Style.RESET_ALL} Would rename directory: {directory} → {os.path.basename(dir_target)}")
-                else:
-                    os.rename(dir_path, dir_target)
-                    logging.info(f"Directory renamed to: {os.path.basename(dir_target)}")
-                    dir_path = dir_target  # mkv rename below operates on the renamed dir
-                    counters["dir_renamed"] += 1
-
-            # Step 7: Rename the .mkv file (if --rename-mkv). Target collision was already checked.
+            # Step 6: Rename the media file FIRST (if --rename-mkv), then the
+            # directory. This order fails loudly if interrupted: a refid-
+            # stamped file inside a not-yet-renamed directory makes the next
+            # run report "no media file found" (a counted failure), whereas
+            # renaming the directory first meant a media rename failure left a
+            # refid directory that later runs silently skipped as done.
+            mkv_renamed_now = False
+            old_mkv_path = new_mkv_path = None
             if rename_mkv and not no_rename and mkv_target_name:
                 old_mkv_path = os.path.join(dir_path, mkv_filename)
                 new_mkv_path = os.path.join(dir_path, mkv_target_name)
@@ -590,6 +607,32 @@ def rename_and_update_directories(client, target_dir, dry_run=False, no_rename=F
                     os.rename(old_mkv_path, new_mkv_path)
                     logging.info(f".mkv file renamed to: {mkv_target_name}")
                     counters["mkv_renamed"] += 1
+                    mkv_renamed_now = True
+
+            # Step 7: Rename the directory (unless --no-rename). Target collision
+            # was already checked above. If this fails after the media file was
+            # renamed, roll the file back so the directory is left untouched.
+            if not no_rename:
+                if dry_run:
+                    logging.info(f"{Fore.YELLOW}[DRY RUN]{Style.RESET_ALL} Would rename directory: {directory} → {os.path.basename(dir_target)}")
+                else:
+                    try:
+                        os.rename(dir_path, dir_target)
+                    except OSError as e:
+                        logging.error(f"Directory rename failed for {directory}: {e}")
+                        if mkv_renamed_now:
+                            try:
+                                os.rename(new_mkv_path, old_mkv_path)
+                                counters["mkv_renamed"] -= 1
+                                logging.info(f"Rolled back media file rename: {mkv_target_name} → {mkv_filename}")
+                            except OSError as e2:
+                                logging.error(f"MANUAL FIX NEEDED: could not roll back media file "
+                                              f"rename ({new_mkv_path}): {e2}. Rename it back to "
+                                              f"{mkv_filename} before rerunning.")
+                        counters["failed"] += 1
+                        continue
+                    logging.info(f"Directory renamed to: {os.path.basename(dir_target)}")
+                    counters["dir_renamed"] += 1
 
         except Exception as e:
             logging.error(f"An error occurred while processing directory {directory}: {e}")

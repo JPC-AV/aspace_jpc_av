@@ -14,8 +14,8 @@ For each `JPC_AV_*` directory, the script:
 1. Resolves the directory's Component Unique Identifier (e.g., `JPC_AV_00001`) to exactly one verified ArchivesSpace record — each search candidate is fetched and must match the identifier exactly within the AV resource. Zero matches, multiple matches, or a failed search all fail the directory with a message saying which it was.
 2. Extracts the runtime of the `.mkv` file using `mediainfo`. The directory must contain exactly one `.mkv` — several candidates fail the directory rather than guessing which file's runtime to record.
 3. Updates the ArchivesSpace record **only if something changed** (otherwise it's counted as `Unchanged` and nothing is written):
-   - Adds Duration as a Defined List subnote to the Physical Characteristics and Technical Requirements note (appended to any existing text subnotes, or creates a new phystech note if none exists).
-   - Fills **blank** `physical_details` on extents with `SD video, color, sound` — existing values are never overwritten, so manual corrections survive reruns.
+   - Sets Duration in the Physical Characteristics and Technical Requirements note — existing Duration entries are updated in place (in every phystech note, preserving neighboring items), or a Defined List subnote is added if none exists.
+   - Fills a **blank** `physical_details` with `SD video, color, sound` on single-extent records — existing values are never overwritten, so manual corrections survive reruns; multi-extent records are left for staff.
 4. Renames the directory to append `_refid_<ref_id>`.
 
 ## Directory Structure
@@ -123,17 +123,17 @@ Added as a Defined List subnote to the Physical Characteristics and Technical Re
 }
 ```
 
-If a phystech note already exists (e.g., created during CSV import with transfer notes), Duration is appended to it. If no phystech note exists, one is created. The operation is idempotent — re-running removes and rewrites the Duration entry without duplicating it.
+If Duration entries already exist (in any phystech note), they are updated in place — other items in the same defined list (and any other phystech notes) are preserved. If none exists, a Duration defined list is appended to the existing phystech note, or a new phystech note is created. The operation is idempotent — re-running converges on the current runtime without duplicating entries.
 
 ### Physical Details
-Filled on extents whose `physical_details` is blank:
+Filled when the record has a **single extent** whose `physical_details` is blank:
 ```json
 {
   "physical_details": "SD video, color, sound"
 }
 ```
 
-> **Note:** This default is correct for most JPCA AV material. For tapes that deviate from the standard (BW, silent, HD), set the Physical Details field manually in ArchivesSpace — the script only fills blanks and never overwrites an existing value, so manual corrections survive reruns.
+> **Note:** This default is correct for most JPCA AV material. For tapes that deviate from the standard (BW, silent, HD), set the Physical Details field manually in ArchivesSpace — the script only fills blanks and never overwrites an existing value, so manual corrections survive reruns. On records with multiple extents the script leaves all blanks alone (it can't tell which extent describes the video carrier), so fill those manually too.
 
 ## Logs
 
