@@ -290,12 +290,16 @@ class ASpaceClient:
         return self._request("DELETE", uri) is not None
 
     # -- verified lookups ---------------------------------------------------
-    def _verified_search(self, params: Dict, matches) -> Optional[List]:
+    def _verified_search(self, params: Dict, matches, uri_prefix: str) -> Optional[List]:
         """Paginated search returning (uri, record) pairs for verified hits.
 
-        Every candidate is fetched and must pass matches(record). Returns None
-        when the search or any candidate fetch fails - callers fail closed.
-        This is the single hardening point for every record lookup.
+        Every candidate is fetched and must pass matches(record). Each hit uri
+        must be a string inside uri_prefix (the expected collection in OUR
+        repository - a cross-repository uri must never be verified, then
+        embedded in a record we write), and the fetched record must identify
+        itself as that uri. Returns None when the search or any candidate
+        fetch fails - callers fail closed. This is the single hardening point
+        for every record lookup.
         """
         from urllib.parse import urlencode
         verified = []
@@ -332,6 +336,13 @@ class ASpaceClient:
                     # skipping it could turn a real match into a false "none",
                     # which callers read as "safe to create". Fail the lookup.
                     return None
+                if not isinstance(uri, str) or not uri.startswith(uri_prefix):
+                    # Wrong type, wrong repository, or wrong collection. A
+                    # verified cross-repository uri would be handed back to
+                    # callers that embed it in records they write.
+                    logging.error(f"Search hit uri {uri!r} is not under "
+                                  f"{uri_prefix} - failing lookup")
+                    return None
                 if uri in seen_uris:
                     # A repeated hit means the hit count reconciles while a
                     # record it displaced went unseen (index shifted mid-walk,
@@ -343,6 +354,12 @@ class ASpaceClient:
                 if record is None:
                     return None  # can't verify the candidate - don't guess
                 if not isinstance(record, dict):
+                    return None
+                if record.get("uri") != uri:
+                    # The fetched record must identify as the uri we asked
+                    # for; anything else means the response can't be trusted.
+                    logging.error(f"Record fetched from {uri} identifies as "
+                                  f"{record.get('uri')!r} - failing lookup")
                     return None
                 # The matcher indexes nested fields; malformed nesting (e.g.
                 # resource: []) must fail the lookup, not raise out of it.
@@ -401,7 +418,8 @@ class ASpaceClient:
              "type[]": "archival_object"},
             lambda r: (r.get("component_id") == component_id
                        and r.get("resource", {}).get("ref") == RESOURCE_URI
-                       and (level is None or r.get("level") == level)))
+                       and (level is None or r.get("level") == level)),
+            uri_prefix=f"/repositories/{REPO_ID}/archival_objects/")
         return self._as_lookup(hits, f"component_id {component_id}")
 
     def find_parent(self, ref_id: str) -> Lookup:
@@ -412,14 +430,21 @@ class ASpaceClient:
         hits = self._verified_search(
             {"q": f"ref_id:{lucene_escape(ref_id)}", "type[]": "archival_object"},
             lambda r: (r.get("ref_id") == ref_id
-                       and r.get("resource", {}).get("ref") == RESOURCE_URI))
+                       and r.get("resource", {}).get("ref") == RESOURCE_URI),
+            uri_prefix=f"/repositories/{REPO_ID}/archival_objects/")
         return self._as_lookup(hits, f"ref_id {ref_id}")
 
     def find_top_container(self, indicator: str) -> Lookup:
-        """Resolve an indicator to exactly one 'AV Case' top container."""
+        """Resolve an indicator to exactly one 'AV Case' top container.
+
+        Container records carry no resource ref, so the uri_prefix check is
+        what pins the match to OUR repository - without it a same-indicator
+        container from another repository could be linked into new records.
+        """
         # Phrase query; embedded quotes/backslashes must not break out of it.
         phrase = str(indicator).replace('\\', '\\\\').replace('"', '\\"')
         hits = self._verified_search(
             {"q": f'"{phrase}"', "type[]": "top_container"},
-            lambda r: r.get("indicator") == indicator and r.get("type") == "AV Case")
+            lambda r: r.get("indicator") == indicator and r.get("type") == "AV Case",
+            uri_prefix=f"/repositories/{REPO_ID}/top_containers/")
         return self._as_lookup(hits, f"top container {indicator}")
