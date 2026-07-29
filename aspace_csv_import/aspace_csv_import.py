@@ -417,21 +417,26 @@ class ArchivesSpaceClient(ASpaceClient):
     def find_top_container(self, indicator: str) -> Optional[str]:
         """Legacy sentinel adapter over the shared find_top_container.
 
-        Returns its uri, None when a successful search found no match, or the
-        sentinel "ERROR" when the lookup failed - callers must not create a
-        container on "ERROR", or reruns after transient failures will
-        accumulate duplicates (fail closed). Note: a container created moments
-        ago may not be indexed yet (Solr lag), so reuse is best-effort; the
+        Returns its uri, None when a successful search found no match, or a
+        fail-closed sentinel: "ERROR" when the lookup failed (creating on a
+        transient failure would accumulate duplicates on rerun), "MULTIPLE"
+        when several verified 'AV Case' containers already share this
+        indicator (attaching to one arbitrarily could pick the wrong box -
+        the duplicates need manual cleanup first). Callers must not create a
+        container on either sentinel. Note: a container created moments ago
+        may not be indexed yet (Solr lag), so reuse is best-effort; the
         delete-on-failure compensation covers the rest.
         """
         lookup = ASpaceClient.find_top_container(self, indicator)
         if lookup.status == "failed":
             return "ERROR"
+        if lookup.status == "multiple":
+            logging.error(f"{lookup.count} 'AV Case' top containers share indicator "
+                          f"{indicator} - clean up duplicates in ArchivesSpace first")
+            return "MULTIPLE"
         if lookup.status == "none":
             return None
-        # "found" or "multiple" - reuse the first existing container rather
-        # than creating yet another duplicate.
-        return lookup.matches[0][0]
+        return lookup.uri
 
     def create_top_container(self, indicator: str) -> Optional[str]:
         """Create a new top container."""
@@ -594,6 +599,9 @@ def create_instances(row: Dict, client: ArchivesSpaceClient) -> Tuple[List[Dict]
     container_uri = client.find_top_container(catalog_number)
     if container_uri == "ERROR":
         return [], None, ["Top container lookup failed - row not processed (retry later)"]
+    if container_uri == "MULTIPLE":
+        return [], None, [f"Multiple 'AV Case' top containers already share indicator "
+                          f"{catalog_number} - clean up duplicates in ArchivesSpace first"]
     if container_uri:
         logging.info(f"Reusing existing top container for {catalog_number}: {container_uri}")
     else:
@@ -1014,6 +1022,11 @@ def process_csv_row(row: Dict, row_num: int, client: ArchivesSpaceClient,
             result["message"] = (f"{dup_count} records with component ID {catalog_number} "
                                  f"already exist in the resource - clean up duplicates before importing this row")
             logging.error(result["message"])
+            if duplicate_mode == 'fail':
+                # --fail-on-duplicate means STOP on any existing record - several
+                # existing records must halt the run just like one does.
+                raise DuplicateStop(f"Duplicate component ID: {catalog_number} "
+                                    f"({dup_count} existing records)")
             return result
 
         existing = dup_count == 1

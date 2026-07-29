@@ -154,6 +154,11 @@ class ASpaceClient:
                 except ValueError:
                     logging.error(f"{method} {endpoint} -> 200 but response was not valid JSON")
                     self.last_failure_definitive = False  # outcome of a write unknowable
+                    # Malformed JSON on a read is as transient as any other GET
+                    # failure (proxy truncation, mid-restart) - retry reads only.
+                    if method == "GET" and retry_count < RETRY_ATTEMPTS:
+                        _time.sleep(RETRY_DELAY)
+                        return self._request(method, endpoint, data, retry_count + 1)
                     return None
             if response.status_code == 412 and retry_count < RETRY_ATTEMPTS:
                 logging.warning("Session expired, re-authenticating...")
