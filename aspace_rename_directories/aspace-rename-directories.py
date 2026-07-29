@@ -227,27 +227,61 @@ DEFAULT_MEDIA_EXTENSIONS = (".mkv",)
 
 
 def find_media_file(dir_path, extensions=DEFAULT_MEDIA_EXTENSIONS):
-    """Locate exactly ONE media file in the directory.
+    """Locate exactly ONE media file in the directory, and require its
+    basename to MATCH the directory name.
 
     Returns (filename, problem). problem is None only when precisely one
-    candidate exists - zero or several is a fail-closed condition, because
-    picking one arbitrarily could write the WRONG file's runtime to the
-    record (and rename the wrong file).
+    candidate exists AND it is named after the directory - zero, several, or
+    a mismatched name is a fail-closed condition. Count alone is not enough:
+    a misfiled JPC_AV_00001.mkv sitting alone inside JPC_AV_00002/ would
+    otherwise write file 00001's runtime into record 00002 and stamp the
+    file with 00002's ref_id - a silent cross-labeling that survives forever.
     """
-    candidates = sorted(
+    ext_tuple = tuple(ext.lower() for ext in extensions)
+    # A symlinked media file must be refused loudly: isfile() follows links,
+    # so mediainfo would measure content OUTSIDE this directory and the
+    # rename would stamp the link - the same cross-labeling/stranding hazard
+    # as symlinked directories.
+    linked = sorted(
         f for f in os.listdir(dir_path)
-        if f.lower().endswith(tuple(ext.lower() for ext in extensions))
-        and "_refid_" not in f
+        if f.lower().endswith(ext_tuple)
+        and os.path.islink(os.path.join(dir_path, f))
+    )
+    if linked:
+        return None, (f"symlinked media present ({', '.join(linked)}) - refusing "
+                      f"(place the real file in this directory instead)")
+    media_names = sorted(
+        f for f in os.listdir(dir_path)
+        if f.lower().endswith(ext_tuple)
         # A directory/FIFO/socket named *.mkv is not media - selecting one
         # could rename a non-file as though it were (--no-update --rename-mkv
         # never runs mediainfo, so nothing else would catch it).
         and os.path.isfile(os.path.join(dir_path, f))
     )
+    stamped = [f for f in media_names if "_refid_" in f]
+    candidates = [f for f in media_names if "_refid_" not in f]
+
+    if stamped and candidates:
+        # A leftover stamped file next to an unstamped one would end this run
+        # with two media files claiming DIFFERENT refids in one directory -
+        # the exact cross-labeling this guard exists to prevent.
+        return None, (f"refid-stamped media already present ({', '.join(stamped)}) "
+                      f"alongside {', '.join(candidates)} - clean up the leftover "
+                      f"from an earlier run first")
+    if stamped and not candidates:
+        return None, (f"only refid-stamped media present ({', '.join(stamped)}) - "
+                      f"likely an interrupted earlier run; restore the original "
+                      f"filename (remove the _refid_ suffix) and rerun")
     if not candidates:
         return None, f"no {'/'.join(extensions)} file found"
     if len(candidates) > 1:
         return None, (f"{len(candidates)} media files found ({', '.join(candidates)}) "
                       f"- expected exactly one")
+    expected = os.path.basename(os.path.normpath(dir_path))
+    base = os.path.splitext(candidates[0])[0]
+    if base != expected:
+        return None, (f"media file {candidates[0]} does not match directory name "
+                      f"{expected} - misfiled content? (nothing written)")
     return candidates[0], None
 
 
@@ -452,6 +486,15 @@ def rename_and_update_directories(client, target_dir, dry_run=False, no_rename=F
                 logging.error(f"Directory name must be JPC_AV_<digits> (e.g. JPC_AV_00001): {directory_name}")
                 invalid_single_count += 1
                 continue
+            if os.path.islink(path):
+                # Renaming a symlink stamps the LINK while the real directory
+                # keeps its old name around a refid-stamped file - the exact
+                # half-renamed state later runs can't recover. Refuse; run on
+                # the real directory instead.
+                logging.error(f"Target is a symlink, refusing (process the real "
+                              f"directory instead): {path}")
+                invalid_single_count += 1
+                continue
             if not os.path.isdir(path):
                 logging.error(f"Directory not found: {path}")
                 invalid_single_count += 1
@@ -478,18 +521,31 @@ def rename_and_update_directories(client, target_dir, dry_run=False, no_rename=F
             targets = [t for t in targets if t[1] not in colliding]
     else:
         # Normal mode: find all JPC_AV_<digits> subdirectories (already-renamed
-        # dirs contain _refid_ and therefore don't match the pattern)
-        targets = [
-            (working_dir, entry) for entry in os.listdir(working_dir)
-            if os.path.isdir(os.path.join(working_dir, entry)) and JPC_AV_DIR_RE.fullmatch(entry)
-        ]
+        # dirs contain _refid_ and therefore don't match the pattern). Symlinked
+        # entries are refused like --single symlinks: renaming one stamps the
+        # link, stranding the real directory half-renamed.
+        targets = []
+        for entry in sorted(os.listdir(working_dir)):
+            if not JPC_AV_DIR_RE.fullmatch(entry):
+                continue
+            full = os.path.join(working_dir, entry)
+            # islink BEFORE isdir: isdir() follows links, so a DANGLING
+            # symlink would otherwise be silently skipped instead of refused.
+            if os.path.islink(full):
+                logging.error(f"Entry is a symlink, refusing (process the real "
+                              f"directory instead): {full}")
+                invalid_single_count += 1
+                continue
+            if not os.path.isdir(full):
+                continue
+            targets.append((working_dir, entry))
 
     # Sort by directory name (then parent, for same-name targets)
     targets.sort(key=lambda t: (t[1], t[0]))
 
     if not targets:
         if invalid_single_count:
-            logging.error(f"All {invalid_single_count} requested --single target(s) were invalid.")
+            logging.error(f"All {invalid_single_count} requested target(s) were invalid.")
             return invalid_single_count
         logging.warning("No matching directories found to process.")
         return 0  # nothing to do is not a failure
@@ -541,7 +597,9 @@ def rename_and_update_directories(client, target_dir, dry_run=False, no_rename=F
             mkv_target_name = None
             if not no_rename:
                 dir_target = os.path.join(parent_path, f"{directory}_refid_{refid}")
-                if os.path.exists(dir_target):
+                # lexists, not exists: a DANGLING symlink at the target would
+                # pass exists() and then be silently replaced by os.rename.
+                if os.path.lexists(dir_target):
                     logging.error(f"Target directory already exists, refusing to overwrite: "
                                   f"{os.path.basename(dir_target)}. Skipping.")
                     counters["failed"] += 1
@@ -549,7 +607,7 @@ def rename_and_update_directories(client, target_dir, dry_run=False, no_rename=F
                 if rename_mkv and mkv_filename:
                     base, ext = os.path.splitext(mkv_filename)
                     mkv_target_name = f"{base}_refid_{refid}{ext}"
-                    if os.path.exists(os.path.join(dir_path, mkv_target_name)):
+                    if os.path.lexists(os.path.join(dir_path, mkv_target_name)):
                         logging.error(f"Target .mkv already exists, refusing to overwrite: "
                                       f"{mkv_target_name}. Skipping.")
                         counters["failed"] += 1

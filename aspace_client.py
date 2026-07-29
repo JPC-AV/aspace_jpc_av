@@ -38,6 +38,7 @@ Lookups return a Lookup with status one of:
 
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
@@ -82,6 +83,34 @@ def lucene_escape(value: str) -> str:
     return ''.join(out)
 
 
+def _str_field(record: Dict, key: str) -> str:
+    """Fetch a candidate field the matcher is about to compare - it must be a
+    present, non-empty string.
+
+    A candidate record that LACKS a field our query filtered on (or carries
+    it with a non-string type, e.g. component_id: ["JPC_AV_00001"]) is a
+    malformed response, and must fail the LOOKUP - discarding it as a clean
+    mismatch would verify as "none", which the importer converts into
+    permission to create a duplicate. Legitimate fuzzy hits differ in the
+    field's VALUE; they don't omit the field entirely.
+    """
+    value = record.get(key)
+    if not isinstance(value, str) or not value:
+        raise TypeError(f"{key} is missing or not a string: {value!r}")
+    return value
+
+
+def _resource_ref(record: Dict) -> str:
+    """The record's resource ref, with the same strictness as _str_field."""
+    resource = record.get("resource")
+    if not isinstance(resource, dict):
+        raise TypeError(f"resource is missing or not an object: {resource!r}")
+    ref = resource.get("ref")
+    if not isinstance(ref, str) or not ref:
+        raise TypeError(f"resource.ref is missing or not a string: {ref!r}")
+    return ref
+
+
 @dataclass
 class Lookup:
     """Dumb result object for verified lookups. No behavior, no policy."""
@@ -111,11 +140,19 @@ class ASpaceClient:
 
     # -- session ------------------------------------------------------------
     def login(self) -> bool:
+        # An unconfigured client must refuse to operate: with REPO_ID or
+        # RESOURCE_ID unset the scope locks would compare against None and
+        # fail OPEN (None == None), which is worse than not running at all.
+        if not (self.base_url and REPO_ID and RESOURCE_URI):
+            logging.error("Refusing to operate: creds.py must set baseURL, "
+                          "repo_id and resource_id (see creds_template.py)")
+            return False
         try:
             response = self.http.post(
                 f"{self.base_url}/users/{self.username}/login",
                 data={"password": self.password},
                 timeout=TIMEOUT,
+                allow_redirects=False,
             )
         except requests.RequestException as e:
             logging.error(f"Authentication error: {e}")
@@ -144,7 +181,8 @@ class ASpaceClient:
         if not self.session_token:
             return True
         try:
-            response = self.http.post(f"{self.base_url}/logout", timeout=TIMEOUT)
+            response = self.http.post(f"{self.base_url}/logout", timeout=TIMEOUT,
+                                      allow_redirects=False)
         except requests.RequestException as e:
             logging.warning(f"Logout error: {e}")
             return False
@@ -165,14 +203,30 @@ class ASpaceClient:
         url = f"{self.base_url}{endpoint}"
         self.last_failure_definitive = True
         try:
+            # Never follow redirects: a 3xx would re-send a write to a
+            # server-chosen location AFTER the scope locks approved the
+            # original endpoint (and 301/302 turn a POST into a GET, which
+            # would report a write that never happened). A redirect also
+            # forwards the session header wherever Location points.
             if method == "GET":
-                response = self.http.get(url, timeout=TIMEOUT)
+                response = self.http.get(url, timeout=TIMEOUT, allow_redirects=False)
             elif method == "POST":
-                response = self.http.post(url, json=data, timeout=TIMEOUT)
+                response = self.http.post(url, json=data, timeout=TIMEOUT,
+                                          allow_redirects=False)
             elif method == "DELETE":
-                response = self.http.delete(url, timeout=TIMEOUT)
+                response = self.http.delete(url, timeout=TIMEOUT,
+                                            allow_redirects=False)
             else:
                 raise ValueError(f"Unsupported HTTP method: {method}")
+
+            if 300 <= response.status_code < 400:
+                location = getattr(response, "headers", {}).get("Location")
+                logging.error(f"{method} {endpoint} -> unexpected redirect "
+                              f"{response.status_code} to {location!r} - refusing to follow")
+                # The origin didn't process the request itself, but we can't
+                # prove what a redirecting proxy did - treat as ambiguous.
+                self.last_failure_definitive = False
+                return None
 
             if response.status_code in (200, 201):
                 try:
@@ -226,32 +280,62 @@ class ASpaceClient:
     def get(self, endpoint: str) -> Optional[Dict]:
         return self._request("GET", endpoint)
 
-    def _refuse_out_of_repo(self, action: str, endpoint: str,
-                            required_prefix: str = None) -> bool:
-        """True (refuse) when a WRITE endpoint is outside the configured
-        repository - the boundary enforces its own scope instead of trusting
-        every caller to build paths correctly. An optional required_prefix
-        narrows the scope further (e.g. deletes to top containers only).
-        Refusals are definitive: nothing was sent."""
-        prefix = required_prefix or f"/repositories/{REPO_ID}/"
-        if not str(endpoint).startswith(prefix):
+    # Canonical write targets. startswith() was not enough: uris like
+    # ".../top_containers/../../2/archival_objects/55" or ".../5?cascade=1"
+    # pass a prefix check but resolve elsewhere at the server. Writes are
+    # only ever aimed at exact collection paths with numeric record ids.
+    _WRITE_COLLECTIONS = "archival_objects|top_containers"
+
+    @staticmethod
+    def _canonical(value: str, pattern: str) -> bool:
+        return isinstance(value, str) and re.fullmatch(pattern, value) is not None
+
+    def _refuse_non_canonical(self, action: str, value, pattern: str) -> bool:
+        """True (refuse) when a WRITE target is not a canonical record path
+        inside the configured repository - the boundary enforces its own
+        scope instead of trusting every caller (or server response) to
+        supply well-formed paths. Refusals are definitive: nothing sent.
+
+        Also refuses ALL writes when the client is unconfigured: with
+        REPO_ID or RESOURCE_URI unset the scope comparisons would degrade
+        (None == None), so the write boundary enforces the config invariant
+        itself instead of relying on login()'s guard having run."""
+        if not REPO_ID or not RESOURCE_URI:
             self.last_failure_definitive = True
-            logging.error(f"REFUSING to {action} {endpoint}: endpoint is outside "
-                          f"{prefix} (scope lock)")
+            logging.error(f"REFUSING to {action}: client is not configured "
+                          f"(repo_id/resource_id unset in creds.py)")
+            return True
+        if not self._canonical(value, pattern):
+            self.last_failure_definitive = True
+            logging.error(f"REFUSING to {action} {value!r}: not a canonical "
+                          f"record path in repository {REPO_ID} (scope lock)")
             return True
         return False
 
     def create_record(self, endpoint: str, payload: Dict) -> Optional[Dict]:
-        """POST a new record inside our repository. Never retried (see
-        _request). A 200/201 whose body has no uri is treated as an ambiguous
-        failure - the record may exist, but we can't report or compensate it.
-        """
-        if self._refuse_out_of_repo("create at", endpoint):
+        """POST a new record to a collection inside our repository. Never
+        retried (see _request). The response must carry a canonical uri under
+        the same collection; anything else is an ambiguous failure - the
+        record may exist, but we can't report or compensate it (and a
+        malformed uri must never flow into a later delete)."""
+        collection_pattern = (f"/repositories/{re.escape(str(REPO_ID))}"
+                              f"/({self._WRITE_COLLECTIONS})")
+        if self._refuse_non_canonical("create at", endpoint, collection_pattern):
+            return None
+        if not isinstance(payload, dict):
+            # Refuse locally before sending, like update_record - a non-dict
+            # payload would be transmitted as garbage (or a body-less POST).
+            self.last_failure_definitive = True
+            logging.error(f"REFUSING to create at {endpoint}: payload is not "
+                          f"a JSON object ({type(payload).__name__})")
             return None
         result = self._request("POST", endpoint, payload)
-        if result is not None and not result.get("uri"):
-            logging.error(f"POST {endpoint} succeeded but the response has no "
-                          f"uri - treating as ambiguous failure")
+        if result is None:
+            return None
+        if not self._canonical(result.get("uri"), f"{re.escape(endpoint)}/[0-9]+"):
+            logging.error(f"POST {endpoint} succeeded but response uri "
+                          f"{result.get('uri')!r} is not a canonical record uri "
+                          f"- treating as ambiguous failure")
             self.last_failure_definitive = False
             return None
         return result
@@ -259,19 +343,24 @@ class ASpaceClient:
     def update_record(self, uri: str, payload: Dict) -> Optional[Dict]:
         """POST a full modified record back to its own uri.
 
-        Scope-locked: refuses an endpoint outside our repository, a payload
-        whose own uri doesn't match the endpoint, or a record outside the
-        configured AV resource - the repository also holds millions of
-        records from other resources.
+        Scope-locked: refuses a non-canonical record uri, a payload whose own
+        uri doesn't match the endpoint, or a record outside the configured AV
+        resource - the repository also holds millions of records from other
+        resources.
         """
-        if self._refuse_out_of_repo("update", uri):
+        record_pattern = (f"/repositories/{re.escape(str(REPO_ID))}"
+                          f"/({self._WRITE_COLLECTIONS})/[0-9]+")
+        if self._refuse_non_canonical("update", uri, record_pattern):
             return None
-        if payload.get("uri") != uri:
+        if not isinstance(payload, dict) or payload.get("uri") != uri:
             self.last_failure_definitive = True  # nothing sent
-            logging.error(f"REFUSING to write {uri}: payload uri "
-                          f"{payload.get('uri')!r} does not match endpoint")
+            logging.error(f"REFUSING to write {uri}: payload uri does not "
+                          f"match endpoint")
             return None
-        if payload.get("resource", {}).get("ref") != RESOURCE_URI:
+        # resource must be a well-formed ref in OUR resource; a malformed
+        # nesting (resource: None / list) is refused, not raised on.
+        resource = payload.get("resource")
+        if not isinstance(resource, dict) or resource.get("ref") != RESOURCE_URI:
             self.last_failure_definitive = True  # nothing sent
             logging.error(f"REFUSING to write {uri}: record is not in "
                           f"{RESOURCE_URI} (scope lock)")
@@ -281,11 +370,11 @@ class ASpaceClient:
     def delete_record(self, uri: str) -> bool:
         """DELETE - restricted to top containers in our repository, the only
         legitimate use today (compensation-deleting a container this run just
-        created). Widen the prefix deliberately if a future tool needs more.
+        created). Widen the pattern deliberately if a future tool needs more.
         """
-        if self._refuse_out_of_repo(
-                "delete", uri,
-                required_prefix=f"/repositories/{REPO_ID}/top_containers/"):
+        container_pattern = (f"/repositories/{re.escape(str(REPO_ID))}"
+                             f"/top_containers/[0-9]+")
+        if self._refuse_non_canonical("delete", uri, container_pattern):
             return False
         return self._request("DELETE", uri) is not None
 
@@ -336,12 +425,13 @@ class ASpaceClient:
                     # skipping it could turn a real match into a false "none",
                     # which callers read as "safe to create". Fail the lookup.
                     return None
-                if not isinstance(uri, str) or not uri.startswith(uri_prefix):
-                    # Wrong type, wrong repository, or wrong collection. A
-                    # verified cross-repository uri would be handed back to
-                    # callers that embed it in records they write.
-                    logging.error(f"Search hit uri {uri!r} is not under "
-                                  f"{uri_prefix} - failing lookup")
+                if not self._canonical(uri, f"{re.escape(uri_prefix)}[0-9]+"):
+                    # Wrong type, wrong repository, wrong collection, or a
+                    # non-canonical path (../, query strings). A verified
+                    # cross-scope uri would be handed back to callers that
+                    # embed it in records they write.
+                    logging.error(f"Search hit uri {uri!r} is not a canonical "
+                                  f"record uri under {uri_prefix} - failing lookup")
                     return None
                 if uri in seen_uris:
                     # A repeated hit means the hit count reconciles while a
@@ -413,24 +503,30 @@ class ASpaceClient:
         ANY level is a conflict); level="item" additionally requires an
         item-level record (the rename tool only ever operates on items).
         """
+        if not isinstance(component_id, str) or not component_id:
+            return Lookup("failed", problem="component_id must be a non-empty string")
         hits = self._verified_search(
             {"q": f"component_id:{lucene_escape(component_id)}",
              "type[]": "archival_object"},
-            lambda r: (r.get("component_id") == component_id
-                       and r.get("resource", {}).get("ref") == RESOURCE_URI
-                       and (level is None or r.get("level") == level)),
+            lambda r: (_str_field(r, "component_id") == component_id
+                       and _resource_ref(r) == RESOURCE_URI
+                       and (level is None or _str_field(r, "level") == level)),
             uri_prefix=f"/repositories/{REPO_ID}/archival_objects/")
         return self._as_lookup(hits, f"component_id {component_id}")
 
     def find_parent(self, ref_id: str) -> Lookup:
         """Resolve a ref_id to its record in our resource (any level - parents
         are series/subseries). ref_id is ASpace-generated and unique."""
-        if not ref_id:
-            return Lookup("none", count=0)
+        if ref_id is None or ref_id == "":
+            return Lookup("none", count=0)  # blank CSV cell: nothing to look up
+        if not isinstance(ref_id, str):
+            # Other falsy values (0, False) are type errors, not blank cells -
+            # they must fail closed, not read as "verified absent".
+            return Lookup("failed", problem="ref_id must be a string")
         hits = self._verified_search(
             {"q": f"ref_id:{lucene_escape(ref_id)}", "type[]": "archival_object"},
-            lambda r: (r.get("ref_id") == ref_id
-                       and r.get("resource", {}).get("ref") == RESOURCE_URI),
+            lambda r: (_str_field(r, "ref_id") == ref_id
+                       and _resource_ref(r) == RESOURCE_URI),
             uri_prefix=f"/repositories/{REPO_ID}/archival_objects/")
         return self._as_lookup(hits, f"ref_id {ref_id}")
 
@@ -441,10 +537,13 @@ class ASpaceClient:
         what pins the match to OUR repository - without it a same-indicator
         container from another repository could be linked into new records.
         """
+        if not isinstance(indicator, str) or not indicator:
+            return Lookup("failed", problem="indicator must be a non-empty string")
         # Phrase query; embedded quotes/backslashes must not break out of it.
-        phrase = str(indicator).replace('\\', '\\\\').replace('"', '\\"')
+        phrase = indicator.replace('\\', '\\\\').replace('"', '\\"')
         hits = self._verified_search(
             {"q": f'"{phrase}"', "type[]": "top_container"},
-            lambda r: r.get("indicator") == indicator and r.get("type") == "AV Case",
+            lambda r: (_str_field(r, "indicator") == indicator
+                       and _str_field(r, "type") == "AV Case"),
             uri_prefix=f"/repositories/{REPO_ID}/top_containers/")
         return self._as_lookup(hits, f"top container {indicator}")

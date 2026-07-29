@@ -256,6 +256,24 @@ def validate_csv_before_import(filename: str, update_only: bool = False) -> Tupl
             reader = csv.DictReader(csvfile)
             headers = reader.fieldnames or []
 
+            # Duplicate header names are a wrong-record hazard: DictReader
+            # silently keeps only the LAST exact duplicate's value, and a
+            # case/whitespace variant ("CATALOG_NUMBER ") looks identical to
+            # a human while being a separate stale column. Compare normalized
+            # names; empty header cells (stray trailing commas) are ignored -
+            # they carry no data the importer reads.
+            groups = {}
+            for header in headers:
+                key = (header or '').strip().casefold()
+                if key:
+                    groups.setdefault(key, []).append(header)
+            duplicates = sorted(', '.join(repr(n) for n in names)
+                                for names in groups.values() if len(names) > 1)
+            if duplicates:
+                errors.append(f"Duplicate column header(s): {'; '.join(duplicates)} "
+                              f"- remove the stale duplicate column(s) first")
+                return False, errors, warnings
+
             if update_only:
                 if col.CATALOG not in headers:
                     errors.append(f"Missing required column: {col.CATALOG}")
@@ -1118,7 +1136,8 @@ def process_csv_row(row: Dict, row_num: int, client: ArchivesSpaceClient,
     return result
 
 def process_csv_file_update_only(filename: str, client: ArchivesSpaceClient,
-                                 dry_run: bool = False) -> Tuple[List[Dict], Dict]:
+                                 dry_run: bool = False,
+                                 state: Dict = None) -> Tuple[List[Dict], Dict]:
     """Process a (possibly narrow) CSV in strict update-only mode.
 
     Never creates records. Phase 1 resolves EVERY catalog number to exactly one
@@ -1134,6 +1153,11 @@ def process_csv_file_update_only(filename: str, client: ArchivesSpaceClient,
         "start_time": datetime.now().isoformat(), "end_time": None,
         "dry_run": dry_run, "duplicate_mode": "update-only",
     }
+    if state is not None:
+        # Live objects: an escaping KeyboardInterrupt still leaves main()
+        # holding everything accumulated so far (see process_csv_file).
+        state["results"] = results
+        state["summary"] = summary
 
     try:
         with open(filename, 'r', encoding='utf-8-sig') as csvfile:
@@ -1235,22 +1259,48 @@ def process_csv_file_update_only(filename: str, client: ArchivesSpaceClient,
                                          uri=resolved[row_num], changes=changes)
             else:
                 result = make_row_result(row_num, row, "error", "Failed to update")
+        except KeyboardInterrupt:
+            # Ctrl-C DURING the row's write: the outcome is UNKNOWN - the
+            # server may have committed it. Flag first, then record, so even
+            # a second Ctrl-C mid-bookkeeping leaves the flag set and the row
+            # appended at most once (main() recovers partials via `state`).
+            summary["interrupted"] = True
+            logging.error(f"Interrupted by operator at row {row_num} - "
+                          f"stopping; a partial report will be written")
+            results.append(make_row_result(row_num, row, "error",
+                           "Interrupted by operator (Ctrl-C) mid-row - write outcome UNKNOWN (it may have committed); verify this record in ArchivesSpace before rerunning"))
+            break
         except Exception as e:
             result = make_row_result(row_num, row, "error", str(e))
             logging.error(f"Error updating row {row_num}: {e}")
+        # Bookkeeping outside the handlers: a Ctrl-C during the status print
+        # escapes with this completed row already appended exactly once.
         results.append(result)
         record_row_outcome(result, summary)
 
         if row_num % BATCH_SIZE == 0 and not dry_run:
-            time.sleep(1)
+            try:
+                time.sleep(1)
+            except KeyboardInterrupt:
+                logging.error("Interrupted by operator - stopping; "
+                              "a partial report will be written")
+                summary["interrupted"] = True
+                break
 
     summary["end_time"] = datetime.now().isoformat()
     return results, summary
 
 
 def process_csv_file(filename: str, client: ArchivesSpaceClient,
-                    dry_run: bool = False, duplicate_mode: str = 'skip') -> Tuple[List[Dict], Dict]:
-    """Process entire CSV file and return results."""
+                    dry_run: bool = False, duplicate_mode: str = 'skip',
+                    state: Dict = None) -> Tuple[List[Dict], Dict]:
+    """Process entire CSV file and return results.
+
+    `state`, when provided, is populated with the LIVE results/summary
+    objects up front, so a KeyboardInterrupt that escapes this function
+    still leaves the caller holding everything accumulated so far - the
+    partial audit trail must survive any interrupt (see main()).
+    """
     results = []
     summary = {
         "total_rows": 0,
@@ -1264,22 +1314,19 @@ def process_csv_file(filename: str, client: ArchivesSpaceClient,
         "dry_run": dry_run,
         "duplicate_mode": duplicate_mode
     }
-    
+    if state is not None:
+        state["results"] = results
+        state["summary"] = summary
+
     try:
         with open(filename, 'r', encoding='utf-8-sig') as csvfile:
             reader = csv.DictReader(csvfile)
-            
+
             for row_num, row in enumerate(reader, 1):
                 summary["total_rows"] += 1
-                
+
                 try:
                     result = process_csv_row(row, row_num, client, dry_run, duplicate_mode)
-                    results.append(result)
-                    record_row_outcome(result, summary)
-
-                    if row_num % BATCH_SIZE == 0 and not dry_run:
-                        time.sleep(1)
-
                 except DuplicateStop as stop:
                     # --fail-on-duplicate: record this row and stop processing, but
                     # break (do not re-raise) so the caller still writes the reports.
@@ -1288,17 +1335,44 @@ def process_csv_file(filename: str, client: ArchivesSpaceClient,
                     results.append(result)
                     record_row_outcome(result, summary)
                     break
+                except KeyboardInterrupt:
+                    # Ctrl-C DURING row processing: the interrupt may have
+                    # landed mid-API-write, so the outcome is UNKNOWN - the
+                    # server may have committed it. Flag first, then record -
+                    # if a second Ctrl-C lands mid-bookkeeping, main() still
+                    # sees the flag and the row was appended at most once.
+                    summary["interrupted"] = True
+                    logging.error(f"Interrupted by operator at row {row_num} - "
+                                  f"stopping; a partial report will be written")
+                    results.append(make_row_result(row_num, row, "error",
+                                   "Interrupted by operator (Ctrl-C) mid-row - write outcome UNKNOWN (it may have committed); verify this record in ArchivesSpace before rerunning"))
+                    break
                 except Exception as row_error:
                     logging.error(f"Unexpected error at row {row_num}: {str(row_error)}")
                     result = make_row_result(row_num, row, "error",
                                              f"Unexpected error: {str(row_error)}")
-                    results.append(result)
-                    record_row_outcome(result, summary)
-    
+
+                # Bookkeeping OUTSIDE the handlers: a Ctrl-C during the status
+                # print lands AFTER the row completed, so it must never relabel
+                # or double-record it - it escapes with the row appended once,
+                # and main() recovers the partials via `state`.
+                results.append(result)
+                record_row_outcome(result, summary)
+
+                # Batch pause: same reasoning - the row is done, just stop.
+                if row_num % BATCH_SIZE == 0 and not dry_run:
+                    try:
+                        time.sleep(1)
+                    except KeyboardInterrupt:
+                        logging.error("Interrupted by operator - stopping; "
+                                      "a partial report will be written")
+                        summary["interrupted"] = True
+                        break
+
     except Exception as e:
         logging.error(f"Error reading CSV file: {str(e)}")
         raise
-    
+
     summary["end_time"] = datetime.now().isoformat()
     return results, summary
 
@@ -1315,12 +1389,17 @@ def generate_reports(results: List[Dict], summary: Dict) -> bool:
     """
     ok = True
     try:
-        with open(CSV_REPORT, 'w', newline='', encoding='utf-8') as csvfile:
+        # Write-then-rename: the final report path only ever holds a COMPLETE
+        # file. An interrupt mid-write leaves a .tmp (never mistakable for the
+        # audit trail), not a well-formed-looking truncated report.
+        tmp_path = CSV_REPORT + '.tmp'
+        with open(tmp_path, 'w', newline='', encoding='utf-8') as csvfile:
             fieldnames = ['row_number', 'catalog_number', 'title', 'status',
                          'message', 'uri']
             writer = csv.DictWriter(csvfile, fieldnames=fieldnames, extrasaction='ignore')
             writer.writeheader()
             writer.writerows(results)
+        os.replace(tmp_path, CSV_REPORT)
         logging.info(f"CSV report saved: {CSV_REPORT}")
     except Exception as e:
         ok = False
@@ -1331,13 +1410,31 @@ def generate_reports(results: List[Dict], summary: Dict) -> bool:
             "summary": summary,
             "results": results
         }
-        with open(JSON_REPORT, 'w', encoding='utf-8') as jsonfile:
+        tmp_path = JSON_REPORT + '.tmp'
+        with open(tmp_path, 'w', encoding='utf-8') as jsonfile:
             json.dump(report_data, jsonfile, indent=2)
+        os.replace(tmp_path, JSON_REPORT)
         logging.info(f"JSON report saved: {JSON_REPORT}")
     except Exception as e:
         ok = False
         logging.error(f"Failed to write JSON report: {str(e)}")
     return ok
+
+
+def reconcile_summary(results: List[Dict], summary: Dict):
+    """Recount the summary tallies from the results list.
+
+    Used after an interrupt: a Ctrl-C can land between a row being appended
+    and its counter being incremented, so the recorded rows are the truth and
+    the tallies are recomputed from them before the report is written.
+    """
+    for key in ("created", "updated", "unchanged", "failed", "skipped"):
+        summary[key] = 0
+    for result in results:
+        status = result.get("status")
+        key = "failed" if status == "error" else status
+        if key in summary:
+            summary[key] += 1
 
 def print_summary(summary: Dict, elapsed_time: str = None):
     """Print import summary to console."""
@@ -1592,11 +1689,42 @@ def main():
     
     print_section("PROCESSING RECORDS")
     
+    # `state` receives the LIVE results/summary objects before processing
+    # starts, so a KeyboardInterrupt that escapes the processing functions
+    # (e.g. during a status print) still leaves the partial audit trail
+    # recoverable here - it must be written no matter where the interrupt hit.
+    state = {}
     try:
         if args.update_only:
-            results, summary = process_csv_file_update_only(csv_file, client, args.dry_run)
+            results, summary = process_csv_file_update_only(csv_file, client, args.dry_run,
+                                                            state=state)
         else:
-            results, summary = process_csv_file(csv_file, client, args.dry_run, duplicate_mode)
+            results, summary = process_csv_file(csv_file, client, args.dry_run,
+                                                duplicate_mode, state=state)
+    except KeyboardInterrupt:
+        results = state.get("results")
+        summary = state.get("summary")
+        if results is None or summary is None:
+            # Interrupted before processing began - nothing to report.
+            print_status("error", "Interrupted by operator (Ctrl-C)")
+            logging.error("Interrupted by operator before processing began")
+            client.logout()
+            sys.exit(130)
+        summary["interrupted"] = True
+        logging.error("Interrupted by operator - writing the partial report")
+    except Exception as e:
+        print_status("error", f"Fatal error: {str(e)}")
+        logging.error(f"Fatal error during import: {str(e)}")
+        client.logout()
+        sys.exit(1)
+
+    try:
+        if summary.get("interrupted"):
+            # A Ctrl-C can land between a row's append and its tally - the
+            # recorded rows are the truth; recompute the tallies from them.
+            reconcile_summary(results, summary)
+            if not summary.get("end_time"):
+                summary["end_time"] = datetime.now().isoformat()
         reports_ok = generate_reports(results, summary)
 
         # Calculate elapsed time
@@ -1615,10 +1743,25 @@ def main():
             client.logout()
             sys.exit(3)
 
+        if summary.get('interrupted'):
+            print_status("error", "Run was interrupted (Ctrl-C) - the report above "
+                                  "covers only the rows reached before the stop")
+            client.logout()
+            sys.exit(130)
+
         if summary['failed'] > 0:
             client.logout()
             sys.exit(2)
-            
+
+    except KeyboardInterrupt:
+        # A second Ctrl-C during report writing/summary. Atomic write-then-
+        # rename means the final report paths hold either a complete report
+        # or nothing (a .tmp is never mistakable for the audit trail).
+        print_status("error", "Interrupted during report writing - any report file "
+                              "present is complete; a leftover .tmp file is not a report")
+        logging.error("Interrupted by operator during report writing")
+        client.logout()
+        sys.exit(130)
     except Exception as e:
         print_status("error", f"Fatal error: {str(e)}")
         logging.error(f"Fatal error during import: {str(e)}")

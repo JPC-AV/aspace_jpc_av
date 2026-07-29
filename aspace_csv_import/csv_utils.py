@@ -195,6 +195,23 @@ def validate_csv_structure(filename: str, update_only: bool = False) -> Dict:
             reader = csv.DictReader(csvfile)
             headers = reader.fieldnames or []
 
+            # Duplicate headers: DictReader silently keeps only the LAST exact
+            # duplicate's value, and case/whitespace variants look identical
+            # to a human while being separate stale columns. Compare
+            # normalized names; empty header cells are ignored.
+            groups = {}
+            for header in headers:
+                key = (header or '').strip().casefold()
+                if key:
+                    groups.setdefault(key, []).append(header)
+            duplicates = sorted(', '.join(repr(n) for n in names)
+                                for names in groups.values() if len(names) > 1)
+            if duplicates:
+                results["valid"] = False
+                results["errors"].append(
+                    f"Duplicate column header(s): {'; '.join(duplicates)} "
+                    f"- remove the stale duplicate column(s) first")
+
             # Check for required columns
             if update_only:
                 if col.CATALOG not in headers:
