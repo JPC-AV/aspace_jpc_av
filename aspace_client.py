@@ -299,6 +299,8 @@ class ASpaceClient:
         """
         from urllib.parse import urlencode
         verified = []
+        hits_seen = 0
+        total_hits = None
         page = 1
         while True:
             query = urlencode({**params, "page": page, "page_size": 10}, doseq=True)
@@ -309,6 +311,17 @@ class ASpaceClient:
             # other bad response, not escape as a TypeError.
             if not isinstance(result, dict) or not isinstance(result.get("results"), list):
                 return None
+            # total_hits must be a real, stable non-negative int (type() not
+            # isinstance() - JSON booleans are ints to isinstance). It is
+            # derived from the same Solr response as results/last_page, so
+            # any disagreement below means the response is mangled.
+            if type(result.get("total_hits")) is not int or result["total_hits"] < 0:
+                return None
+            if total_hits is None:
+                total_hits = result["total_hits"]
+            elif result["total_hits"] != total_hits:
+                return None  # total changed between pages - can't trust the walk
+            hits_seen += len(result["results"])
             for hit in result["results"]:
                 if not isinstance(hit, dict):
                     return None  # untrustworthy response - don't guess
@@ -333,14 +346,25 @@ class ASpaceClient:
                 if matched:
                     verified.append((uri, record))
             last_page = result.get("last_page")
-            if not isinstance(last_page, int):
+            if type(last_page) is not int:
                 # Missing/invalid pagination metadata means we can't know
                 # whether more result pages exist - a partial walk returned as
                 # success could hide the very record being checked for.
+                # (type() not isinstance(): JSON true/false pass isinstance.)
                 return None
+            if last_page < 1 and total_hits > 0:
+                return None  # hits exist but no pages to hold them - mangled
             if page >= last_page:
                 break
             page += 1
+        # The walked pages must account for every promised hit. A shortfall
+        # means last_page understated the walk (hidden hits - possibly the
+        # very record being checked for); a surplus means the response is
+        # internally inconsistent. Either way: can't trust it, fail closed.
+        if hits_seen != total_hits:
+            logging.error(f"Search returned {hits_seen} hits but claimed "
+                          f"total_hits={total_hits} - failing lookup")
+            return None
         return verified
 
     @staticmethod
