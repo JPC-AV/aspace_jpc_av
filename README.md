@@ -14,6 +14,7 @@ This repository contains two scripts that work together for the Johnson Publishi
 ```
 aspace_jpc_av/
 ├── README.md                     # This file
+├── aspace_client.py              # Shared ArchivesSpace API client (used by both scripts)
 ├── creds_template.py             # Credential template (see Setup below)
 ├── creds.py                      # Your local credentials (gitignored, you create this)
 ├── requirements.txt              # Python dependencies
@@ -43,6 +44,7 @@ More detailed descriptions of each file and usage in directory-specific README.m
 
 | File | User Interaction | Description |
 |------|------------------|-------------|
+| `aspace_client.py` | Backend | Shared API client: credentials loading, one keep-alive session, login/logout, retries, verified lookups, and scope-locked writes. Both main scripts build on it. |
 | `creds_template.py` | Reference only | Template showing required credential format. Do not edit directly. |
 | `creds.py` | User creates/edits | Your local credentials file. You create this from the template. |
 | `requirements.txt` | One-time setup | Python package dependencies. Run `pip install -r requirements.txt` once. |

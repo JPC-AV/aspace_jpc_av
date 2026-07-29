@@ -2,8 +2,6 @@
 ASpace phystech (Physical Characteristics and Technical Requirements) note, and
 renames directories to include the record's ref_id."""
 
-import json  # Library for working with JSON data structures
-import requests  # Library for making HTTP requests
 import os  # Library for interacting with the operating system (e.g., files, directories)
 import sys  # Library for system-specific parameters and functions
 import logging  # Library for logging messages (e.g., info, warnings, errors)
@@ -15,14 +13,14 @@ from datetime import datetime  # Library for date/time formatting
 from colorama import Fore, Style, init  # Library for adding colored output to terminal messages
 from pathlib import Path  # Library for working with file paths
 
-# Add parent directory to path for shared creds.py import
+# Add parent directory to path for the shared client and creds.py import
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-# Import credentials and configuration from creds.py (in repo root)
-try:
-    from creds import baseURL as ASPACE_URL, user as ASPACE_USERNAME, password as ASPACE_PASSWORD
-    from creds import repo_id as REPO_ID, resource_id as RESOURCE_ID
-except ImportError:
+# All ArchivesSpace API safety (HTTP, retries, verified lookups, scope-locked
+# writes) lives in the shared client (aspace_client.py at the repo root).
+from aspace_client import ASpaceClient, ASPACE_URL, REPO_ID, RESOURCE_ID
+
+if ASPACE_URL is None:
     print(f"{Fore.RED}Error: creds.py not found or missing required fields{Style.RESET_ALL}")
     print("Required fields: baseURL, user, password, repo_id, resource_id")
     print("See creds_template.py in repo root for format.")
@@ -82,67 +80,6 @@ class ColoredFormatter(logging.Formatter):
 for handler in logging.getLogger().handlers:
     handler.setFormatter(ColoredFormatter("%(asctime)s [%(levelname)s] %(message)s"))
 
-
-class ArchivesSpaceClient:
-    """Handles ArchivesSpace API authentication and session management."""
-    
-    def __init__(self):
-        self.base_url = ASPACE_URL
-        self.username = ASPACE_USERNAME
-        self.password = ASPACE_PASSWORD
-        self.session = None
-        self.headers = {}
-    
-    def login(self) -> bool:
-        """Authenticate with ArchivesSpace and get session token."""
-        try:
-            response = requests.post(
-                f"{self.base_url}/users/{self.username}/login",
-                data={"password": self.password},
-                timeout=30
-            )
-            
-            if response.status_code == 200:
-                token = response.json().get('session')
-                if not token:
-                    logging.error("Authentication failed: 200 response but no session token in body")
-                    return False
-                self.session = token
-                self.headers = {"X-ArchivesSpace-Session": self.session}
-                logging.info("Successfully authenticated with ArchivesSpace")
-                return True
-            else:
-                logging.error(f"Authentication failed: {response.status_code} - {response.text}")
-                return False
-                
-        except Exception as e:
-            logging.error(f"Authentication error: {str(e)}")
-            return False
-    
-    def logout(self) -> bool:
-        """Log out of ArchivesSpace by invalidating the session token."""
-        if not self.session:
-            return True
-        
-        try:
-            response = requests.post(
-                f"{self.base_url}/logout",
-                headers=self.headers,
-                timeout=30
-            )
-            
-            if response.status_code == 200:
-                logging.info("Successfully logged out of ArchivesSpace")
-                self.session = None
-                self.headers = {}
-                return True
-            else:
-                logging.warning(f"Logout failed: {response.status_code}")
-                return False
-                
-        except Exception as e:
-            logging.warning(f"Logout error: {str(e)}")
-            return False
 
 def log_spacing():
     """
@@ -240,20 +177,18 @@ def get_video_duration(file_path):
         logging.error(f"Error extracting duration: {e}")
         return None  # extraction failed
 
-def get_refid(query, repository, resource, baseURL, headers):
+def get_refid(client, query):
     """
     Resolve a Component Unique Identifier to EXACTLY ONE verified archival object.
 
-    Search hits are fuzzy and the index lags reality, so each candidate is
-    fetched and only counts when its component_id matches exactly AND it
-    belongs to the configured resource. All result pages are checked.
+    The shared client does the hardened lookup (every search candidate fetched
+    and required to match component_id exactly, inside our resource, at item
+    level, across all result pages). This wrapper translates the Lookup into
+    the tuple this script reports on.
 
     Args:
+        client (ASpaceClient): Authenticated shared client.
         query (str): The directory name / catalog number (e.g., JPC_AV_00001).
-        repository (str): The repository path in ArchivesSpace.
-        resource (str): The resource path in ArchivesSpace.
-        baseURL (str): The base URL for the ArchivesSpace API.
-        headers (dict): The headers for API authentication.
     Returns:
         tuple: (ref_id, archival_object_id, problem). problem is None only on
         a verified single match; otherwise it says WHY resolution failed
@@ -261,89 +196,21 @@ def get_refid(query, repository, resource, baseURL, headers):
         report accurately instead of conflating a transient search failure
         with a genuinely missing record. Fail closed on any problem.
     """
-    resource_value = str(repository + resource)  # Combine repository and resource paths
-
-    # Build the search filter query to target Component Unique Identifier field
-    filter = json.dumps(
-        {
-            "query": {
-                "jsonmodel_type": "boolean_query",  # Specify the query type
-                "op": "AND",  # Combine subqueries with a logical AND
-                "subqueries": [
-                    # Target archival objects only
-                    {"jsonmodel_type": "field_query", "field": "primary_type", "value": "archival_object", "literal": True},
-                    # Exclude PUI types
-                    {"jsonmodel_type": "field_query", "field": "types", "value": "pui", "negated": True},
-                    # Limit to specific resource
-                    {"jsonmodel_type": "field_query", "field": "resource", "value": resource_value, "literal": True},
-                    # Target item-level records (level = "item")
-                    {"jsonmodel_type": "field_query", "field": "level", "value": "item", "literal": True},
-                    # Search specifically in Component Unique Identifier field
-                    {"jsonmodel_type": "field_query", "field": "component_id", "value": query, "literal": True}
-                ],
-            }
-        }
-    )
-
-    matches = []  # (ref_id, archival_object_id, title) for VERIFIED hits only
-    page = 1
-    while True:
-        search_query = f"{repository}/search?q=*&page={page}&filter={filter}"
-        try:
-            response = requests.get(baseURL + search_query, headers=headers, timeout=30)
-        except requests.exceptions.RequestException as e:
-            logging.error(f"Search request failed for '{query}': {e}")
-            return None, None, "search failed (network error) - retry later"
-        if response.status_code != 200:
-            logging.error(f"Search returned HTTP {response.status_code} for '{query}': {response.text[:200]}")
-            return None, None, f"search failed (HTTP {response.status_code}) - retry later"
-        try:
-            payload = response.json()
-        except ValueError:
-            return None, None, "search failed (malformed response) - retry later"
-        if not isinstance(payload, dict) or "results" not in payload:
-            return None, None, "search failed (unexpected response shape) - retry later"
-
-        for hit in payload.get("results", []):
-            uri = hit.get("uri") or hit.get("id")
-            if not uri:
-                continue
-            # Verify the candidate: fetch the full record and require an EXACT
-            # component_id match inside our resource. Search 'literal' matching
-            # is not a guarantee, and acting on a near-miss would update the
-            # wrong record AND brand the directory with the wrong ref_id.
-            try:
-                record_response = requests.get(baseURL + uri, headers=headers, timeout=30)
-            except requests.exceptions.RequestException as e:
-                logging.error(f"Could not fetch candidate {uri}: {e}")
-                return None, None, "could not verify a search candidate - retry later"
-            if record_response.status_code != 200:
-                return None, None, "could not verify a search candidate - retry later"
-            try:
-                record = record_response.json()
-            except ValueError:
-                return None, None, "could not verify a search candidate - retry later"
-            if (record.get("component_id") == query
-                    and record.get("resource", {}).get("ref") == resource_value
-                    and record.get("level") == "item"):
-                object_id = uri.rstrip("/").rsplit("/", 1)[-1]
-                matches.append((record.get("ref_id"), object_id, record.get("title", "N/A")))
-
-        last_page = payload.get("last_page", page)
-        if page >= last_page:
-            break
-        page += 1
-
-    if not matches:
+    lookup = client.find_archival_object(query, level="item")
+    if lookup.status == "failed":
+        return None, None, f"search failed - {lookup.problem}"
+    if lookup.status == "none":
         return None, None, "no record with this Component Unique Identifier in the resource"
-    if len(matches) > 1:
-        return None, None, (f"{len(matches)} records share this Component Unique Identifier "
+    if lookup.status == "multiple":
+        return None, None, (f"{lookup.count} records share this Component Unique Identifier "
                             f"- clean up duplicates in ArchivesSpace first")
-    ref_id, archival_object_id, title = matches[0]
+
+    ref_id = lookup.record.get("ref_id")
     if not ref_id:
         return None, None, "matched record has no ref_id"
+    archival_object_id = lookup.uri.rstrip("/").rsplit("/", 1)[-1]
     logging.info(f"Verified archival object with Component Unique Identifier '{query}'")
-    logging.info(f"Title: {title}")
+    logging.info(f"Title: {lookup.record.get('title', 'N/A')}")
     return ref_id, archival_object_id, None
 
 # A processable directory is named exactly like a catalog number. Substring
@@ -501,8 +368,7 @@ def set_extent_physical_details(data):
         logging.info(f"Set physical_details to '{PHYSICAL_DETAILS_DEFAULT}' on {filled} blank extent(s)")
     return data, filled
 
-def rename_and_update_directories(repository, resource, baseURL, headers, 
-                                   target_dir, dry_run=False, no_rename=False, 
+def rename_and_update_directories(client, target_dir, dry_run=False, no_rename=False,
                                    no_update=False, verbose=False, rename_mkv=False,
                                    single=False):
     """
@@ -512,10 +378,7 @@ def rename_and_update_directories(repository, resource, baseURL, headers,
     - Rename directories to include the ASpace RefID.
 
     Args:
-        repository (str): The repository path in ArchivesSpace.
-        resource (str): The resource path in ArchivesSpace.
-        baseURL (str): The base URL for the ArchivesSpace API.
-        headers (dict): The headers containing the session token for API authentication.
+        client (ASpaceClient): Authenticated shared client.
         target_dir (str): Target directory to process (required).
         dry_run (bool): If True, show what would happen without making changes.
         no_rename (bool): If True, update ASpace only, don't rename directories.
@@ -618,7 +481,7 @@ def rename_and_update_directories(repository, resource, baseURL, headers,
             logging.info(f"Processing directory: {directory}")
 
             # Step 1: Resolve the ArchivesSpace record (needed for both rename and update)
-            refid, archival_object_id, problem = get_refid(directory, repository, resource, baseURL, headers)
+            refid, archival_object_id, problem = get_refid(client, directory)
             if problem:
                 logging.error(f"Could not resolve {directory}: {problem}. Skipping.")
                 counters["failed"] += 1
@@ -681,7 +544,7 @@ def rename_and_update_directories(repository, resource, baseURL, headers,
                     logging.info(f"{Fore.YELLOW}[DRY RUN]{Style.RESET_ALL} Would update ASpace record with duration: {video_duration}")
                     logging.info(f"{Fore.YELLOW}[DRY RUN]{Style.RESET_ALL} Would set extent physical_details to: SD video, color, sound")
                 else:
-                    archival_object_data = fetch_archival_object(REPO_ID, archival_object_id, baseURL, headers)
+                    archival_object_data = fetch_archival_object(client, archival_object_id)
                     if not archival_object_data:
                         logging.error(f"Failed to fetch archival object for ID: {archival_object_id}. Skipping.")
                         counters["failed"] += 1
@@ -700,7 +563,7 @@ def rename_and_update_directories(repository, resource, baseURL, headers,
                                      f"(Duration and physical_details unchanged) - nothing written")
                         counters["unchanged"] += 1
                     else:
-                        if not update_archival_object(REPO_ID, archival_object_id, updated_data, baseURL, headers):
+                        if not update_archival_object(client, archival_object_id, updated_data):
                             logging.error(f"Failed to update archival object for ID: {archival_object_id}. Skipping.")
                             counters["failed"] += 1
                             continue
@@ -749,87 +612,38 @@ def rename_and_update_directories(repository, resource, baseURL, headers,
 
     return counters["failed"]
 
-def fetch_archival_object(repository_id, object_id, baseURL, headers):
+def fetch_archival_object(client, object_id):
     """
     Fetch the full JSON representation of an archival object from ArchivesSpace.
     Args:
-        repository_id (str): The repository ID.
+        client (ASpaceClient): Authenticated shared client.
         object_id (str): The archival object ID.
-        baseURL (str): The base URL for the ArchivesSpace API.
-        headers (dict): The headers for API authentication.
     Returns:
         dict: The JSON data of the archival object, or None if the fetch fails.
     """
-    try:
-        # Build the URL to fetch the archival object
-        url = f"{baseURL}/repositories/{repository_id}/archival_objects/{object_id}"
-        # Send a GET request to the ArchivesSpace API
-        response = requests.get(url, headers=headers, timeout=30)
+    return client.get(f"/repositories/{REPO_ID}/archival_objects/{object_id}")
 
-        # Check the response status code
-        if response.status_code == 200:
-            try:
-                return response.json()  # Return the JSON response on success
-            except ValueError:
-                logging.error("Fetched archival object was not valid JSON")
-                return None
-        else:
-            logging.error(f"Failed to fetch archival object: {response.status_code}")
-            logging.error(f"Response content: {response.text}")
-            return None
-    except requests.exceptions.RequestException as e:
-        # Handle network-related exceptions and log an error
-        logging.error(f"Network error fetching archival object: {e}")
-        return None
-
-def update_archival_object(repository_id, object_id, updated_data, baseURL, headers):
+def update_archival_object(client, object_id, updated_data):
     """
     Update an archival object in ArchivesSpace with modified data.
+
+    The shared client's update_record enforces the scope lock: it refuses a
+    payload whose own uri doesn't match the endpoint, or whose record lives
+    outside the configured resource.
+
     Args:
-        repository_id (str): The repository ID.
+        client (ASpaceClient): Authenticated shared client.
         object_id (str): The archival object ID.
         updated_data (dict): The updated JSON data.
-        baseURL (str): The base URL for the ArchivesSpace API.
-        headers (dict): The headers for API authentication.
     Returns:
-        dict: The API response JSON on success, or None if the update fails.
+        dict: The API response JSON on success, or None if the update fails
+        (including a scope-lock refusal - nothing is sent in that case).
     """
-    # Belt-and-suspenders scope lock (matches the CSV importer's write helper):
-    # refuse to write a payload whose own uri doesn't match the endpoint, or
-    # whose record lives outside the configured resource.
-    expected_uri = f"/repositories/{repository_id}/archival_objects/{object_id}"
-    if updated_data.get("uri") != expected_uri:
-        logging.error(f"REFUSING to write {expected_uri}: payload uri "
-                      f"{updated_data.get('uri')!r} does not match endpoint")
-        return None
-    expected_resource = f"/repositories/{repository_id}/resources/{RESOURCE_ID}"
-    if updated_data.get("resource", {}).get("ref") != expected_resource:
-        logging.error(f"REFUSING to write {expected_uri}: record is not in "
-                      f"{expected_resource} (scope lock)")
-        return None
-
-    try:
-        # Build the URL for updating the archival object
-        url = f"{baseURL}{expected_uri}"
-        # Send a POST request to update the archival object
-        response = requests.post(url, headers=headers, data=json.dumps(updated_data), timeout=30)
-
-        # Check the response status code
-        if response.status_code == 200:
-            logging.info("Archival object updated successfully!")
-            try:
-                return response.json()  # Return the JSON response on success
-            except ValueError:
-                logging.error("Update returned 200 but the response was not valid JSON")
-                return None
-        else:
-            logging.error(f"Failed to update archival object: {response.status_code}")
-            logging.error(f"Response content: {response.text}")
-            return None
-    except requests.exceptions.RequestException as e:
-        # Handle network-related exceptions and log an error
-        logging.error(f"Network error updating archival object: {e}")
-        return None
+    uri = f"/repositories/{REPO_ID}/archival_objects/{object_id}"
+    result = client.update_record(uri, updated_data)
+    if result is not None:
+        logging.info("Archival object updated successfully!")
+    return result
 
 def main():
     """
@@ -933,10 +747,6 @@ def main():
         logging.info(f"{Fore.YELLOW}DRY RUN MODE - No changes will be made{Style.RESET_ALL}")
         log_spacing()
     
-    # Define repository and resource paths for ArchivesSpace (from creds.py)
-    repository = f"/repositories/{REPO_ID}"
-    resource = f"/resources/{RESOURCE_ID}"
-
     # Start timing
     start_time = time.time()
     
@@ -949,7 +759,7 @@ def main():
 
     # Step 1: Authenticate with ArchivesSpace
     # (Always needed - even --no-update requires ASpace lookup for ref_id)
-    client = ArchivesSpaceClient()
+    client = ASpaceClient()
     if not client.login():
         logging.error("Authentication failed! Exiting the script.")
         sys.exit(1)  # pre-loop failure - nothing was processed
@@ -964,10 +774,7 @@ def main():
         # Step 2: Process directories and perform updates
         logging.info("Starting to process directories...")
         failed_count = rename_and_update_directories(
-            repository=repository,
-            resource=resource,
-            baseURL=client.base_url,
-            headers=client.headers,
+            client=client,
             target_dir=args.directory,
             dry_run=args.dry_run,
             no_rename=args.no_rename,

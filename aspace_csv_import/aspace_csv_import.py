@@ -163,17 +163,12 @@ def get_colored_help():
 # Add parent directory to path for shared creds.py import
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-# ArchivesSpace API Configuration
-# Credentials and URL - imported from creds.py (in repo root)
-try:
-    from creds import baseURL as ASPACE_URL, user as ASPACE_USERNAME, password as ASPACE_PASSWORD
-    from creds import repo_id as REPO_ID, resource_id as RESOURCE_ID
-except ImportError:
-    ASPACE_URL = None
-    ASPACE_USERNAME = None
-    ASPACE_PASSWORD = None
-    REPO_ID = None
-    RESOURCE_ID = None
+# ArchivesSpace API Configuration - creds loading and all HTTP/lookup/write
+# safety now live in the shared client (aspace_client.py at the repo root).
+from aspace_client import (ASpaceClient, ASPACE_URL, ASPACE_USERNAME,
+                           ASPACE_PASSWORD, REPO_ID, RESOURCE_ID, RESOURCE_URI)
+
+if ASPACE_URL is None:
     print("Warning: creds.py not found. See creds_template.py in repo root for format.")
 
 # Import optional logs_dir (may not exist in older creds.py files)
@@ -181,9 +176,6 @@ try:
     from creds import logs_dir
 except ImportError:
     logs_dir = ""
-
-# Repository and Resource Configuration
-RESOURCE_URI = f"/repositories/{REPO_ID}/resources/{RESOURCE_ID}" if REPO_ID and RESOURCE_ID else None
 
 # CSV File Configuration
 CSV_FILE = "JPCA-AV_SOURCE-ASpace_CSV_export.csv"  # Input CSV file
@@ -197,8 +189,6 @@ JSON_REPORT = f"{OUTPUT_DIR}/import_report_{datetime.now().strftime('%Y%m%d_%H%M
 
 # Processing Configuration
 BATCH_SIZE = 10  # Process in batches to avoid overwhelming the API
-RETRY_ATTEMPTS = 3  # Number of retry attempts for failed API calls
-RETRY_DELAY = 2  # Seconds to wait between retries
 
 # Extent Type Validation
 VALID_EXTENT_TYPES = [
@@ -339,221 +329,46 @@ class DuplicateStop(Exception):
     pass
 
 
-class ArchivesSpaceClient:
-    """Handles all ArchivesSpace API interactions."""
-    
-    def __init__(self, username: str = None, password: str = None):
-        self.base_url = ASPACE_URL
-        self.username = username or ASPACE_USERNAME or ""
-        self.password = password or ASPACE_PASSWORD or ""
-        self.session = None
-        self.headers = {}
-        # See make_request: whether the most recent failure was a definitive
-        # server rejection (True) or an ambiguous transport failure (False).
-        self.last_failure_definitive = True
-        
-    def login(self) -> bool:
-        """Authenticate with ArchivesSpace and get session token."""
-        try:
-            response = requests.post(
-                f"{self.base_url}/users/{self.username}/login",
-                data={"password": self.password},
-                timeout=30
-            )
-            
-            if response.status_code == 200:
-                self.session = response.json()['session']
-                self.headers = {"X-ArchivesSpace-Session": self.session}
-                logging.info("Successfully authenticated with ArchivesSpace")
-                return True
-            else:
-                logging.error(f"Authentication failed: {response.status_code} - {response.text}")
-                return False
-                
-        except Exception as e:
-            logging.error(f"Authentication error: {str(e)}")
-            return False
-    
-    def logout(self) -> bool:
-        """Log out of ArchivesSpace by invalidating the session token."""
-        if not self.session:
-            return True
-        
-        try:
-            response = requests.post(
-                f"{self.base_url}/logout",
-                headers=self.headers,
-                timeout=30
-            )
-            
-            if response.status_code == 200:
-                logging.info("Successfully logged out of ArchivesSpace")
-                self.session = None
-                self.headers = {}
-                return True
-            else:
-                logging.warning(f"Logout failed: {response.status_code}")
-                return False
-                
-        except Exception as e:
-            logging.warning(f"Logout error: {str(e)}")
-            return False
-    
-    def make_request(self, method: str, endpoint: str, data: Dict = None,
-                     retry_count: int = 0) -> Optional[Dict]:
-        """Make API request. Automatic retries are limited to reads.
+class ArchivesSpaceClient(ASpaceClient):
+    """Importer-facing adapter over the shared aspace_client.ASpaceClient.
 
-        Only GETs are retried on failure. A POST/PUT that times out or errors
-        may already have been committed server-side, so blindly retrying it can
-        create duplicate records — writes fail fast instead and the row is
-        reported as an error. The one exception is a 412 (expired session):
-        the request was rejected outright, so re-authenticating and retrying is
-        safe for any method.
-
-        After a failed call, self.last_failure_definitive says what kind of
-        failure it was: True means the server responded with an error status
-        (the write was definitively rejected, nothing committed); False means
-        a timeout/transport error where the server MAY have committed the
-        write even though we never saw the response. Compensating actions
-        (like deleting a just-created record) are only safe after a
-        definitive rejection.
-        """
-        url = f"{self.base_url}{endpoint}"
-        self.last_failure_definitive = True
-
-        try:
-            if method == "GET":
-                response = requests.get(url, headers=self.headers, timeout=30)
-            elif method == "POST":
-                response = requests.post(url, headers=self.headers, json=data, timeout=30)
-            elif method == "PUT":
-                response = requests.put(url, headers=self.headers, json=data, timeout=30)
-            elif method == "DELETE":
-                response = requests.delete(url, headers=self.headers, timeout=30)
-            else:
-                raise ValueError(f"Unsupported HTTP method: {method}")
-
-            if response.status_code in [200, 201]:
-                return response.json()
-            elif response.status_code == 412 and retry_count < RETRY_ATTEMPTS:
-                # Rejected before processing - safe to retry any method after re-auth
-                logging.warning("Session expired, re-authenticating...")
-                if self.login():
-                    time.sleep(RETRY_DELAY)
-                    return self.make_request(method, endpoint, data, retry_count + 1)
-                return None
-            else:
-                # Only a 4xx is proof the server rejected the request before
-                # committing. A 5xx (or a gateway 502/504) can be emitted AFTER
-                # the backend committed the write, so treat it as ambiguous.
-                self.last_failure_definitive = 400 <= response.status_code < 500
-                logging.error(f"API request failed: {method} {endpoint}")
-                logging.error(f"Status: {response.status_code}")
-                logging.error(f"Response: {response.text}")
-
-                if method == "GET" and retry_count < RETRY_ATTEMPTS:
-                    time.sleep(RETRY_DELAY)
-                    return self.make_request(method, endpoint, data, retry_count + 1)
-
-                return None
-
-        except Exception as e:
-            # No response received - for a write, the server may still have
-            # committed it. Flag the ambiguity for compensation logic.
-            self.last_failure_definitive = False
-            logging.error(f"Request error: {str(e)}")
-            if method == "GET" and retry_count < RETRY_ATTEMPTS:
-                time.sleep(RETRY_DELAY)
-                return self.make_request(method, endpoint, data, retry_count + 1)
-            return None
-    
-    def _verified_search(self, query: str, record_type: str, matches):
-        """Paginated search returning (uri, record) pairs for verified hits only.
-
-        Search hits are fuzzy and repository-wide (and the index lags reality),
-        so each candidate is fetched and must pass `matches(record)` before it
-        counts. The uri is the one the candidate was fetched by. All result
-        pages are walked. Returns None when the search or any candidate fetch
-        fails - callers must fail closed on None, never treat it as "no
-        match". This is the single hardening point for every record lookup;
-        fixes here apply to duplicates, parents, and containers alike.
-        """
-        endpoint = f"/repositories/{REPO_ID}/search"
-        verified = []
-        page = 1
-        while True:
-            search_params = {
-                "q": query,
-                "type[]": record_type,
-                "page": page,
-                "page_size": 10
-            }
-            result = self.make_request("GET",
-                                       f"{endpoint}?{self._build_query_string(search_params)}")
-            if not isinstance(result, dict) or 'total_hits' not in result:
-                return None  # search failed
-            for hit in result.get('results', []):
-                uri = hit.get('uri')
-                if not uri:
-                    continue
-                record = self.make_request("GET", uri)
-                if record is None:
-                    return None  # can't verify the candidate - don't guess
-                if matches(record):
-                    verified.append((uri, record))
-            last_page = result.get('last_page', page)
-            if page >= last_page:
-                break
-            page += 1
-        return verified
+    HTTP, retries, session handling, verified lookups, and scope-locked
+    writes all live in the shared client - fixing them there fixes every
+    tool at once. This subclass only (a) keeps the importer's existing call
+    surface (legacy tuple returns) and (b) carries the extent-vocabulary
+    domain logic, which is importer policy, not API-boundary behavior.
+    """
 
     def check_component_unique_id(self, component_id: str) -> Tuple[Optional[int], Optional[str]]:
-        """Check if a component unique identifier already exists IN OUR RESOURCE.
-
-        Only exact component_id matches inside RESOURCE_URI count - the
-        repository also holds other resources (millions of photo records) and
-        a cross-resource hit must never be treated as our duplicate.
+        """Legacy tuple adapter over find_archival_object.
 
         Returns (match_count, first_uri): (0, None) only when a SUCCESSFUL
         search verified zero matches; (1, uri) for the normal single match;
-        (2+, uri) when the resource already contains MULTIPLE records with
-        this component_id - existing corruption that callers must surface as
-        an error rather than silently picking one; and (None, None) when the
-        search or a candidate fetch failed. Callers must treat None as "could
-        not verify" and abort the row (fail closed).
+        (2+, uri) for existing duplicates the caller must surface as an
+        error; (None, None) when the lookup failed - treat as "could not
+        verify" and abort the row (fail closed).
         """
-        hits = self._verified_search(
-            f"component_id:{component_id}", "archival_object",
-            lambda r: (r.get('component_id') == component_id
-                       and r.get('resource', {}).get('ref') == RESOURCE_URI))
-        if hits is None:
+        lookup = self.find_archival_object(component_id)
+        if lookup.status == "failed":
             return None, None
-        return len(hits), (hits[0][0] if hits else None)
+        first_uri = lookup.matches[0][0] if lookup.matches else None
+        return lookup.count, first_uri
 
     def get_parent_object(self, parent_ref_id: str) -> Optional[Dict]:
-        """Retrieve the parent archival object by EXACT ref_id in our resource.
-
-        A partial or cross-resource hit must never become the parent a new
-        record is attached under. (ref_id is ArchivesSpace-generated and
-        unique, so multiple exact matches cannot occur.)
-
-        Returns the parent record, or None when no verified parent was found
-        or the search/fetch failed - callers already fail the row on None.
-        """
+        """Legacy adapter over find_parent: returns the verified parent record,
+        or None when it wasn't found or the lookup failed (callers already
+        fail the row on None)."""
         if not parent_ref_id:
             return None
-        hits = self._verified_search(
-            f"ref_id:{parent_ref_id}", "archival_object",
-            lambda r: (r.get('ref_id') == parent_ref_id
-                       and r.get('resource', {}).get('ref') == RESOURCE_URI))
-        if hits is None:
+        lookup = self.find_parent(parent_ref_id)
+        if lookup.status == "failed":
             logging.error(f"Parent search failed for ref_id: {parent_ref_id}")
             return None
-        if not hits:
+        if lookup.status != "found":
             logging.warning(f"Parent object not found with ref_id: {parent_ref_id}")
             return None
-        return hits[0][1]
-    
+        return lookup.record
+
     def get_extent_types(self) -> Optional[List[str]]:
         """Get the list of valid extent types from ArchivesSpace.
 
@@ -565,7 +380,7 @@ class ArchivesSpaceClient:
         try:
             # Resolve the extent_extent_type enumeration by name — enumeration IDs
             # are not stable across ArchivesSpace instances.
-            enums = self.make_request("GET", "/config/enumerations")
+            enums = self.get("/config/enumerations")
             enum_id = None
             if isinstance(enums, list):
                 for enum in enums:
@@ -575,13 +390,13 @@ class ArchivesSpaceClient:
             # Guarded fallback to the conventional ID 14, but only if it really is
             # the extent_extent_type enumeration on this instance.
             if enum_id is None:
-                candidate = self.make_request("GET", "/config/enumerations/14")
+                candidate = self.get("/config/enumerations/14")
                 if candidate and candidate.get('name') == 'extent_extent_type':
                     enum_id = 14
             if enum_id is None:
                 logging.error("Could not locate the 'extent_extent_type' enumeration in ArchivesSpace")
                 return None
-            result = self.make_request("GET", f"/config/enumerations/{enum_id}")
+            result = self.get(f"/config/enumerations/{enum_id}")
             if result and 'enumeration_values' in result:
                 return [v['value'] for v in result['enumeration_values']] or None
         except (requests.RequestException, KeyError, TypeError) as e:
@@ -600,21 +415,23 @@ class ArchivesSpaceClient:
         return extent_type in self._valid_extent_types
     
     def find_top_container(self, indicator: str) -> Optional[str]:
-        """Find an existing 'AV Case' top container with this exact indicator.
+        """Legacy sentinel adapter over the shared find_top_container.
 
         Returns its uri, None when a successful search found no match, or the
-        sentinel "ERROR" when the search (or a candidate fetch) failed - callers
-        must not create a container on "ERROR", or reruns after transient
-        failures will accumulate duplicates (fail closed). Note: a container
-        created moments ago may not be indexed yet (Solr lag), so reuse is
-        best-effort; the delete-on-failure compensation covers the rest.
+        sentinel "ERROR" when the lookup failed - callers must not create a
+        container on "ERROR", or reruns after transient failures will
+        accumulate duplicates (fail closed). Note: a container created moments
+        ago may not be indexed yet (Solr lag), so reuse is best-effort; the
+        delete-on-failure compensation covers the rest.
         """
-        hits = self._verified_search(
-            f'"{indicator}"', "top_container",
-            lambda r: r.get('indicator') == indicator and r.get('type') == 'AV Case')
-        if hits is None:
+        lookup = ASpaceClient.find_top_container(self, indicator)
+        if lookup.status == "failed":
             return "ERROR"
-        return hits[0][0] if hits else None
+        if lookup.status == "none":
+            return None
+        # "found" or "multiple" - reuse the first existing container rather
+        # than creating yet another duplicate.
+        return lookup.matches[0][0]
 
     def create_top_container(self, indicator: str) -> Optional[str]:
         """Create a new top container."""
@@ -624,22 +441,11 @@ class ArchivesSpaceClient:
             "repository": {"ref": f"/repositories/{REPO_ID}"}
         }
 
-        endpoint = f"/repositories/{REPO_ID}/top_containers"
-        result = self.make_request("POST", endpoint, container_data)
-
+        result = self.create_record(f"/repositories/{REPO_ID}/top_containers",
+                                    container_data)
         if result:
             return result['uri']
         return None
-
-    def delete_record(self, uri: str) -> bool:
-        """Delete a record (used to clean up a just-created top container when
-        the archival object it was made for fails to create)."""
-        return self.make_request("DELETE", uri) is not None
-    
-    def _build_query_string(self, params: Dict) -> str:
-        """Build URL query string from parameters."""
-        from urllib.parse import urlencode
-        return urlencode(params, doseq=True)
 
 # ==============================
 # DATE PROCESSING
@@ -977,7 +783,7 @@ def create_archival_object(row: Dict, client: ArchivesSpaceClient,
         return {"uri": f"/dry_run/{catalog_number}", "dry_run": True}, []
     else:
         endpoint = f"/repositories/{REPO_ID}/archival_objects"
-        result = client.make_request("POST", endpoint, ao_data)
+        result = client.create_record(endpoint, ao_data)
 
         if result:
             logging.info(f"Successfully created archival object: {catalog_number}")
@@ -1032,7 +838,7 @@ def update_archival_object(row: Dict, client: ArchivesSpaceClient,
     
     catalog_number = row.get(col.CATALOG, '').strip()
     
-    existing_obj = client.make_request("GET", existing_uri)
+    existing_obj = client.get(existing_uri)
     if not existing_obj:
         logging.error(f"Failed to retrieve existing object for update: {existing_uri}")
         return None, {}, ["Failed to retrieve existing object"]
@@ -1124,7 +930,7 @@ def update_archival_object(row: Dict, client: ArchivesSpaceClient,
         logging.info(f"[DRY RUN] Would update archival object: {catalog_number} at {existing_uri}")
         return {"uri": existing_uri, "dry_run": True, "updated": True}, changes, []
     else:
-        result = client.make_request("POST", existing_uri, existing_obj)
+        result = client.update_record(existing_uri, existing_obj)
         
         if result:
             logging.info(f"Successfully updated archival object: {catalog_number}")
@@ -1362,7 +1168,7 @@ def process_csv_file_update_only(filename: str, client: ArchivesSpaceClient,
             # the row supplies anything those guards need.
             supplies_dates = any(row.get(c, '').strip() for c, _ in col.DATE_COLUMNS)
             if original_format or supplies_dates:
-                record = client.make_request("GET", uri)
+                record = client.get(uri)
                 if record is None:
                     problems.append((row_num, row, f"Could not fetch {catalog_number} to preflight the row"))
                     continue
