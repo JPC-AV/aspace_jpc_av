@@ -76,9 +76,22 @@ class ColoredFormatter(logging.Formatter):
         formatted_message = super().format(record)  # Format the message
         return f"{level_color}{formatted_message}{Style.RESET_ALL}"  # Add color
 
-# Apply the custom formatter to all logging handlers
+class PlainFormatter(logging.Formatter):
+    """Strips ANSI escape codes - the on-disk log is the audit trail of what
+    was written to the catalog and must be readable as plain text."""
+
+    ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+    def format(self, record):
+        return self.ANSI_RE.sub("", super().format(record))
+
+
+# Colors on the console; plain text in the log file.
 for handler in logging.getLogger().handlers:
-    handler.setFormatter(ColoredFormatter("%(asctime)s [%(levelname)s] %(message)s"))
+    if isinstance(handler, logging.FileHandler):
+        handler.setFormatter(PlainFormatter("%(asctime)s [%(levelname)s] %(message)s"))
+    else:
+        handler.setFormatter(ColoredFormatter("%(asctime)s [%(levelname)s] %(message)s"))
 
 
 def log_spacing():
@@ -167,7 +180,7 @@ def get_video_duration(file_path):
 
         # Parse the output line by line to find the "Duration" field
         for line in result.stdout.splitlines():
-            match = re.search(r"Duration\s+:\s+(\d{2}:\d{2}:\d{2})", line)  # Regex for hh:mm:ss
+            match = re.match(r"Duration\s+:\s+(\d{2,}:\d{2}:\d{2})", line)  # anchored: Source_Duration must not match; 100+ hour runtimes allowed
             if match:
                 return match.group(1)  # Return the captured duration
         logging.error(f"No hh:mm:ss Duration field found in mediainfo output for: {file_path}")
@@ -216,7 +229,7 @@ def get_refid(client, query):
 # A processable directory is named exactly like a catalog number. Substring
 # matching ("JPC_AV" in name) used to catch things like JPC_AV_NOTES and send
 # them to ArchivesSpace as lookups.
-JPC_AV_DIR_RE = re.compile(r"^JPC_AV_\d+$")
+JPC_AV_DIR_RE = re.compile(r"^JPC_AV_[0-9]+$")  # ASCII digits only
 
 PHYSICAL_DETAILS_DEFAULT = "SD video, color, sound"
 
@@ -238,12 +251,16 @@ def find_media_file(dir_path, extensions=DEFAULT_MEDIA_EXTENSIONS):
     file with 00002's ref_id - a silent cross-labeling that survives forever.
     """
     ext_tuple = tuple(ext.lower() for ext in extensions)
+    # macOS AppleDouble sidecars (._foo.mkv, created by Finder on SMB/exFAT
+    # transfers) are metadata, not media - without this filter every
+    # directory in a freshly transferred batch would fail "2 media files".
+    entries = [f for f in os.listdir(dir_path) if not f.startswith("._")]
     # A symlinked media file must be refused loudly: isfile() follows links,
     # so mediainfo would measure content OUTSIDE this directory and the
     # rename would stamp the link - the same cross-labeling/stranding hazard
     # as symlinked directories.
     linked = sorted(
-        f for f in os.listdir(dir_path)
+        f for f in entries
         if f.lower().endswith(ext_tuple)
         and os.path.islink(os.path.join(dir_path, f))
     )
@@ -251,7 +268,7 @@ def find_media_file(dir_path, extensions=DEFAULT_MEDIA_EXTENSIONS):
         return None, (f"symlinked media present ({', '.join(linked)}) - refusing "
                       f"(place the real file in this directory instead)")
     media_names = sorted(
-        f for f in os.listdir(dir_path)
+        f for f in entries
         if f.lower().endswith(ext_tuple)
         # A directory/FIFO/socket named *.mkv is not media - selecting one
         # could rename a non-file as though it were (--no-update --rename-mkv
@@ -280,8 +297,10 @@ def find_media_file(dir_path, extensions=DEFAULT_MEDIA_EXTENSIONS):
     expected = os.path.basename(os.path.normpath(dir_path))
     base = os.path.splitext(candidates[0])[0]
     if base != expected:
+        hint = (" (names differ only in upper/lower case - fix the file's case)"
+                if base.lower() == expected.lower() else " - misfiled content?")
         return None, (f"media file {candidates[0]} does not match directory name "
-                      f"{expected} - misfiled content? (nothing written)")
+                      f"{expected}{hint} (nothing written)")
     return candidates[0], None
 
 
@@ -469,7 +488,12 @@ def rename_and_update_directories(client, target_dir, dry_run=False, no_rename=F
         seen_paths = set()
 
         for path in single:
-            path = os.path.abspath(path.rstrip('/'))
+            stripped = path.rstrip('/')
+            if not stripped:
+                logging.error(f"Invalid --single target: {path!r}")
+                invalid_single_count += 1
+                continue
+            path = os.path.abspath(stripped)
             directory_name = os.path.basename(path)
             parent_dir = os.path.dirname(path)
 
@@ -560,7 +584,7 @@ def rename_and_update_directories(client, target_dir, dry_run=False, no_rename=F
     counters = {"selected": len(targets) + invalid_single_count,
                 "processed": 0, "updated": 0,
                 "unchanged": 0, "dir_renamed": 0, "mkv_renamed": 0,
-                "skipped": 0, "failed": invalid_single_count}
+                "failed": invalid_single_count}
 
     # Process each directory
     for parent_path, directory in targets:
@@ -683,6 +707,7 @@ def rename_and_update_directories(client, target_dir, dry_run=False, no_rename=F
                 new_mkv_path = os.path.join(dir_path, mkv_target_name)
                 if dry_run:
                     logging.info(f"{Fore.YELLOW}[DRY RUN]{Style.RESET_ALL} Would rename .mkv: {mkv_filename} → {mkv_target_name}")
+                    counters["mkv_renamed"] += 1
                 else:
                     os.rename(old_mkv_path, new_mkv_path)
                     logging.info(f".mkv file renamed to: {mkv_target_name}")
@@ -695,6 +720,7 @@ def rename_and_update_directories(client, target_dir, dry_run=False, no_rename=F
             if not no_rename:
                 if dry_run:
                     logging.info(f"{Fore.YELLOW}[DRY RUN]{Style.RESET_ALL} Would rename directory: {directory} → {os.path.basename(dir_target)}")
+                    counters["dir_renamed"] += 1
                 else:
                     try:
                         os.rename(dir_path, dir_target)
@@ -715,7 +741,8 @@ def rename_and_update_directories(client, target_dir, dry_run=False, no_rename=F
                     counters["dir_renamed"] += 1
 
         except Exception as e:
-            logging.error(f"An error occurred while processing directory {directory}: {e}")
+            logging.error(f"An error occurred while processing directory {directory}: {e}",
+                          exc_info=True)
             counters["failed"] += 1
 
         log_spacing()  # Add spacing between directories

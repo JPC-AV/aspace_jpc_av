@@ -173,6 +173,7 @@ Written to `~/aspace_rename_reports/` by default. Override by setting `logs_dir`
 - Directory names must be exactly `JPC_AV_<digits>`; anything else (including already-renamed `_refid_` directories) is not processed.
 - If `.mkv` extraction or API updates fail for a directory, the script logs the error and moves on to the next directory.
 - Authentication is always required, even when using `--no-update`, because the ArchivesSpace lookup for `ref_id` is needed for renaming.
+- `--no-update` renames directories **without** requiring a media file. A directory renamed this way (e.g. before its transfer finished) gets the `_refid_` suffix and is therefore **excluded from all future runs** — its record will never receive a Duration unless you process it manually. Only use `--no-update` on directories whose records are already up to date.
 
 ## Troubleshooting
 

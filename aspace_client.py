@@ -44,6 +44,14 @@ from typing import Dict, List, Optional
 
 import requests
 
+try:
+    # A payload that cannot be serialized raises BEFORE anything is sent -
+    # that's a definitive local failure, not an ambiguous transport one.
+    from requests.exceptions import InvalidJSONError as _InvalidJSONError
+except ImportError:  # stubbed test environments
+    class _InvalidJSONError(Exception):
+        pass
+
 # ---------------------------------------------------------------------------
 # Credentials (tolerant load - scripts decide how to react to missing creds)
 # ---------------------------------------------------------------------------
@@ -147,6 +155,20 @@ class ASpaceClient:
             logging.error("Refusing to operate: creds.py must set baseURL, "
                           "repo_id and resource_id (see creds_template.py)")
             return False
+        # Shape check, not just presence: a copied-but-unedited template
+        # (baseURL="URL", repo_id="number") is truthy and would otherwise die
+        # later with a confusing network error instead of this message.
+        if not (isinstance(self.base_url, str)
+                and self.base_url.startswith(("http://", "https://"))
+                and str(REPO_ID).isdigit() and str(RESOURCE_ID).isdigit()):
+            logging.error("Refusing to operate: creds.py looks unconfigured - "
+                          "baseURL must be an http(s) URL and repo_id/"
+                          "resource_id must be numeric (see creds_template.py)")
+            return False
+        # Fresh attempt: drop any stale token so a failed re-login can't
+        # leave a dead session header installed on the connection.
+        self.session_token = None
+        self.http.headers.pop("X-ArchivesSpace-Session", None)
         try:
             response = self.http.post(
                 f"{self.base_url}/users/{self.username}/login",
@@ -263,11 +285,20 @@ class ASpaceClient:
             logging.error(f"API request failed: {method} {endpoint}")
             logging.error(f"Status: {response.status_code}")
             logging.error(f"Response: {response.text[:300]}")
-            if method == "GET" and retry_count < RETRY_ATTEMPTS:
+            # Retry GETs on 5xx only: a 4xx is a definitive rejection that
+            # will not change on retry - re-asking three times just makes
+            # every fail-closed path slower.
+            if method == "GET" and response.status_code >= 500 and retry_count < RETRY_ATTEMPTS:
                 _time.sleep(RETRY_DELAY)
                 return self._request(method, endpoint, data, retry_count + 1)
             return None
 
+        except _InvalidJSONError as e:
+            # The payload could not be serialized - nothing was ever sent, so
+            # this is a definitive local failure (safe to compensate).
+            self.last_failure_definitive = True
+            logging.error(f"Unserializable payload for {method} {endpoint}: {e}")
+            return None
         except requests.RequestException as e:
             # No response received - a write may still have committed.
             self.last_failure_definitive = False
@@ -413,6 +444,13 @@ class ASpaceClient:
                 return None
             if total_hits is None:
                 total_hits = result["total_hits"]
+                # Our queries target a single identifier; thousands of hits
+                # means a mangled response or a broken query, and walking a
+                # bottomless result set would hang the run. Fail closed.
+                if total_hits > 10000:
+                    logging.error(f"Search claims {total_hits} hits for a "
+                                  f"single-identifier query - failing lookup")
+                    return None
             elif result["total_hits"] != total_hits:
                 return None  # total changed between pages - can't trust the walk
             hits_seen += len(result["results"])
@@ -470,6 +508,15 @@ class ASpaceClient:
             if last_page < 0 or (last_page < 1 and total_hits > 0):
                 # Negative page counts are nonsense; last_page == 0 is only
                 # coherent alongside zero hits.
+                return None
+            # last_page must agree with total_hits (both come from the same
+            # Solr response). Without this bound, a response advertising an
+            # ever-growing last_page walks forever - and the hits_seen check
+            # sits AFTER the loop, so it would never fire.
+            pages_for_total = max(1, -(-total_hits // 10))  # ceil(total/10)
+            if last_page > pages_for_total:
+                logging.error(f"Search claims last_page={last_page} but only "
+                              f"{total_hits} hits - failing lookup")
                 return None
             if page >= last_page:
                 break

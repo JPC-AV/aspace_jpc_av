@@ -183,9 +183,12 @@ CSV_FILE = "JPCA-AV_SOURCE-ASpace_CSV_export.csv"  # Input CSV file
 # Output Configuration - use custom logs_dir if provided, otherwise default
 DEFAULT_OUTPUT_DIR = os.path.expanduser("~/aspace_import_reports")
 OUTPUT_DIR = logs_dir if logs_dir else DEFAULT_OUTPUT_DIR
-LOG_FILE = f"{OUTPUT_DIR}/csv_import_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
-CSV_REPORT = f"{OUTPUT_DIR}/import_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-JSON_REPORT = f"{OUTPUT_DIR}/import_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+# Timestamp + PID: two runs started in the same second must not share
+# report paths (the second would overwrite the first's audit trail).
+_RUN_STAMP = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{os.getpid()}"
+LOG_FILE = f"{OUTPUT_DIR}/csv_import_{_RUN_STAMP}.log"
+CSV_REPORT = f"{OUTPUT_DIR}/import_report_{_RUN_STAMP}.csv"
+JSON_REPORT = f"{OUTPUT_DIR}/import_report_{_RUN_STAMP}.json"
 
 # Processing Configuration
 BATCH_SIZE = 10  # Process in batches to avoid overwhelming the API
@@ -656,6 +659,29 @@ def get_note_content(notes: List[Dict], note_type: str) -> Optional[str]:
                 return note['content']
     return None
 
+def _note_index_to_replace(notes: List[Dict], note_type: str) -> Optional[int]:
+    """Index of the note the apply step must replace: the SAME note
+    get_note_content reads.
+
+    Detection reads the first note of the type that carries text content
+    (walking all same-type notes); replacing simply the first note of the
+    type could write the new text into note A while note B keeps the old
+    text the change report claimed was replaced. Falls back to the first
+    note of the type when none carries text."""
+    first_of_type = None
+    for i, note in enumerate(notes):
+        if note.get('type') != note_type:
+            continue
+        if first_of_type is None:
+            first_of_type = i
+        if 'subnotes' in note:
+            if any(sn.get('content') for sn in note['subnotes']):
+                return i
+        elif note.get('content'):
+            return i
+    return first_of_type
+
+
 def _note_preview(value: Optional[str]) -> Optional[str]:
     """Truncate a note value for change-report display."""
     if value and len(value) > 40:
@@ -805,6 +831,20 @@ def create_archival_object(row: Dict, client: ArchivesSpaceClient,
             ao_data["instances"] = instances
 
     if dry_run:
+        # Run the container LOOKUP for real (read-only): a row whose
+        # indicator has duplicate containers, or whose lookup fails, would
+        # error in a real run - a dry run claiming "would create" for it is
+        # false optimism.
+        container_uri = client.find_top_container(catalog_number)
+        if container_uri == "ERROR":
+            return None, ["Top container lookup failed - row would not process (retry later)"]
+        if container_uri == "MULTIPLE":
+            return None, [f"Multiple 'AV Case' top containers already share indicator "
+                          f"{catalog_number} - clean up duplicates in ArchivesSpace first"]
+        if container_uri:
+            logging.info(f"[DRY RUN] Would reuse existing top container: {container_uri}")
+        else:
+            logging.info(f"[DRY RUN] Would create top container: {catalog_number}")
         logging.info(f"[DRY RUN] Would create archival object: {catalog_number}")
         return {"uri": f"/dry_run/{catalog_number}", "dry_run": True}, []
     else:
@@ -935,10 +975,16 @@ def update_archival_object(row: Dict, client: ArchivesSpaceClient,
     new_notes = [n for n in create_notes(row) if n['type'] in changed_note_types]
     if new_notes:
         replacements = {n['type']: n for n in new_notes}
+        existing_notes_list = existing_obj.get('notes', [])
+        # Replace the SAME note detection read (the first of the type carrying
+        # text), not blindly the first of the type - otherwise the "old" value
+        # the change report names could survive in a sibling note.
+        target_index = {t: _note_index_to_replace(existing_notes_list, t)
+                        for t in replacements}
         merged_notes = []
-        for note in existing_obj.get('notes', []):
+        for i, note in enumerate(existing_notes_list):
             note_type = note.get('type')
-            if note_type in replacements:
+            if note_type in replacements and i == target_index.get(note_type):
                 new_note = replacements.pop(note_type)
                 carried = [sn for sn in note.get('subnotes', [])
                            if sn.get('jsonmodel_type') != 'note_text']
@@ -968,6 +1014,16 @@ def update_archival_object(row: Dict, client: ArchivesSpaceClient,
 # ==============================
 # CSV PROCESSING
 # ==============================
+
+def normalize_row(row: Dict) -> Dict:
+    """Blank out DictReader's None cells.
+
+    A row shorter than the header gets None for its missing trailing cells
+    (restval), which validation never touches but .strip() calls crash on
+    with a cryptic message. A missing cell means the same thing as an empty
+    one: leave that field alone."""
+    return {k: (v if v is not None else '') for k, v in row.items() if k is not None}
+
 
 def make_row_result(row_num: int, row: Dict, status: str = "pending",
                     message: str = "", uri: str = None, changes: Dict = None) -> Dict:
@@ -1099,12 +1155,22 @@ def process_csv_row(row: Dict, row_num: int, client: ArchivesSpaceClient,
             logging.error(f"Missing Parent RefID for {catalog_number}")
             return result
         
-        parent = client.get_parent_object(parent_ref_id)
-        if parent:
-            parent_uri = parent['uri']
-        else:
+        # find_parent distinguishes "verified absent" from "lookup failed" -
+        # during an API outage the operator must not be told the parent is
+        # missing (they might waste time "fixing" it, or create a duplicate).
+        parent_lookup = client.find_parent(parent_ref_id)
+        if parent_lookup.status == "found":
+            parent_uri = parent_lookup.uri
+        elif parent_lookup.status == "none":
             result["status"] = "error"
             result["message"] = f"Parent not found: {parent_ref_id}"
+            logging.warning(f"Parent object not found with ref_id: {parent_ref_id}")
+            return result
+        else:
+            result["status"] = "error"
+            result["message"] = (f"Parent lookup failed for {parent_ref_id} "
+                                 f"({parent_lookup.problem}) - row not processed")
+            logging.error(f"Parent search failed for ref_id: {parent_ref_id}")
             return result
         
         ao_result, errors = create_archival_object(row, client, parent_uri, dry_run)
@@ -1135,6 +1201,65 @@ def process_csv_row(row: Dict, row_num: int, client: ArchivesSpaceClient,
 
     return result
 
+def _preflight_update_only_row(row_num: int, row: Dict, client: ArchivesSpaceClient,
+                               resolved: Dict, problems: List):
+    """Phase-1 resolution/preflight for ONE update-only row.
+
+    Appends to `problems` on any issue, or records the row's uri in
+    `resolved`. No writes happen here. Split out so the caller can contain
+    per-row exceptions (a malformed server record must fail the row, not
+    crash the run)."""
+    catalog_number = row.get(col.CATALOG, '').strip()
+    if not catalog_number:
+        problems.append((row_num, row, "Missing catalog number"))
+        return
+
+    # Extent type must be in the live controlled vocabulary (normal mode
+    # checks this in process_csv_row, which update-only bypasses).
+    original_format = row.get(col.ORIGINAL_FORMAT, '').strip()
+    if original_format and not client.validate_extent_type(original_format):
+        problems.append((row_num, row, f"Invalid extent type: '{original_format}'"))
+        return
+
+    count, uri = client.check_component_unique_id(catalog_number)
+    if count is None:
+        problems.append((row_num, row, f"Lookup failed for {catalog_number}"))
+    elif count == 0:
+        problems.append((row_num, row,
+                         f"No record found for {catalog_number} (update-only never creates)"))
+    elif count > 1:
+        problems.append((row_num, row,
+                         f"{count} records found for {catalog_number} - clean up duplicates first"))
+    else:
+        # Preflight the guards that would otherwise fire mid-run in phase 2
+        # after earlier rows were already updated: the multi-extent guard
+        # and the multi-same-label-date guard. Fetch the record once when
+        # the row supplies anything those guards need.
+        supplies_dates = any(row.get(c, '').strip() for c, _ in col.DATE_COLUMNS)
+        if original_format or supplies_dates:
+            record = client.get(uri)
+            if record is None:
+                problems.append((row_num, row, f"Could not fetch {catalog_number} to preflight the row"))
+                return
+            if original_format:
+                existing_extents = record.get('extents', [])
+                existing_types = [e.get('extent_type') for e in existing_extents]
+                if len(existing_extents) > 1 and original_format not in existing_types:
+                    problems.append((row_num, row,
+                                     f"{catalog_number} has {len(existing_extents)} extents and "
+                                     f"'{original_format}' is not among them - update extents manually"))
+                    return
+            if supplies_dates:
+                conflicts = multi_date_conflicts(record, detect_changes(record, row))
+                if conflicts:
+                    detail = ", ".join(f"{count}x '{label}'" for label, count in conflicts)
+                    problems.append((row_num, row,
+                                     f"{catalog_number} has multiple same-label dates ({detail}) "
+                                     f"- update dates manually"))
+                    return
+        resolved[row_num] = uri
+
+
 def process_csv_file_update_only(filename: str, client: ArchivesSpaceClient,
                                  dry_run: bool = False,
                                  state: Dict = None) -> Tuple[List[Dict], Dict]:
@@ -1161,7 +1286,7 @@ def process_csv_file_update_only(filename: str, client: ArchivesSpaceClient,
 
     try:
         with open(filename, 'r', encoding='utf-8-sig') as csvfile:
-            rows = list(csv.DictReader(csvfile))
+            rows = [normalize_row(r) for r in csv.DictReader(csvfile)]
     except Exception as e:
         logging.error(f"Error reading CSV file: {str(e)}")
         raise
@@ -1177,55 +1302,14 @@ def process_csv_file_update_only(filename: str, client: ArchivesSpaceClient,
     resolved = {}
     problems = []
     for row_num, row in enumerate(rows, 1):
-        catalog_number = row.get(col.CATALOG, '').strip()
-        if not catalog_number:
-            problems.append((row_num, row, "Missing catalog number"))
-            continue
-
-        # Extent type must be in the live controlled vocabulary (normal mode
-        # checks this in process_csv_row, which update-only bypasses).
-        original_format = row.get(col.ORIGINAL_FORMAT, '').strip()
-        if original_format and not client.validate_extent_type(original_format):
-            problems.append((row_num, row, f"Invalid extent type: '{original_format}'"))
-            continue
-
-        count, uri = client.check_component_unique_id(catalog_number)
-        if count is None:
-            problems.append((row_num, row, f"Lookup failed for {catalog_number}"))
-        elif count == 0:
-            problems.append((row_num, row,
-                             f"No record found for {catalog_number} (update-only never creates)"))
-        elif count > 1:
-            problems.append((row_num, row,
-                             f"{count} records found for {catalog_number} - clean up duplicates first"))
-        else:
-            # Preflight the guards that would otherwise fire mid-run in phase 2
-            # after earlier rows were already updated: the multi-extent guard
-            # and the multi-same-label-date guard. Fetch the record once when
-            # the row supplies anything those guards need.
-            supplies_dates = any(row.get(c, '').strip() for c, _ in col.DATE_COLUMNS)
-            if original_format or supplies_dates:
-                record = client.get(uri)
-                if record is None:
-                    problems.append((row_num, row, f"Could not fetch {catalog_number} to preflight the row"))
-                    continue
-                if original_format:
-                    existing_extents = record.get('extents', [])
-                    existing_types = [e.get('extent_type') for e in existing_extents]
-                    if len(existing_extents) > 1 and original_format not in existing_types:
-                        problems.append((row_num, row,
-                                         f"{catalog_number} has {len(existing_extents)} extents and "
-                                         f"'{original_format}' is not among them - update extents manually"))
-                        continue
-                if supplies_dates:
-                    conflicts = multi_date_conflicts(record, detect_changes(record, row))
-                    if conflicts:
-                        detail = ", ".join(f"{count}x '{label}'" for label, count in conflicts)
-                        problems.append((row_num, row,
-                                         f"{catalog_number} has multiple same-label dates ({detail}) "
-                                         f"- update dates manually"))
-                        continue
-            resolved[row_num] = uri
+        try:
+            _preflight_update_only_row(row_num, row, client, resolved, problems)
+        except Exception as e:
+            # A malformed record shape must fail the ROW (aborting the run,
+            # since phase 1 aborts on any problem) with a diagnosis - not
+            # crash the whole run with a generic fatal error and no report.
+            logging.error(f"Preflight failed for row {row_num}: {e}")
+            problems.append((row_num, row, f"Preflight error (malformed row or record): {e}"))
 
     if problems:
         print_status("error", f"{len(problems)} row(s) failed to resolve - ABORTING, nothing was written:")
@@ -1323,6 +1407,7 @@ def process_csv_file(filename: str, client: ArchivesSpaceClient,
             reader = csv.DictReader(csvfile)
 
             for row_num, row in enumerate(reader, 1):
+                row = normalize_row(row)
                 summary["total_rows"] += 1
 
                 try:
@@ -1750,6 +1835,10 @@ def main():
             sys.exit(130)
 
         if summary['failed'] > 0:
+            if summary.get('created', 0) > 0 and not summary.get('dry_run'):
+                print_status("warning", "Records were created this run - wait ~1 minute "
+                                        "for the search index before rerunning failed rows, "
+                                        "or the duplicate check may not see them yet")
             client.logout()
             sys.exit(2)
 

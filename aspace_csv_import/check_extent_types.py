@@ -4,8 +4,6 @@ Utility to fetch and display valid extent types from ArchivesSpace
 This helps ensure your CSV uses the correct controlled vocabulary values
 """
 
-import requests
-import json
 import sys
 import os
 import argparse
@@ -81,16 +79,14 @@ def print_section(text: str):
 # CONFIGURATION
 # ==============================
 
-# Add parent directory to path for shared creds.py import
+# Add parent directory to path for the shared client and creds.py import
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-# Import credentials from creds.py (in repo root)
-try:
-    from creds import baseURL as ASPACE_URL, user as ASPACE_USERNAME, password as ASPACE_PASSWORD
-except ImportError:
-    ASPACE_URL = None
-    ASPACE_USERNAME = None
-    ASPACE_PASSWORD = None
+# API access goes through the importer's client, which carries the shared
+# fail-safe HTTP core (aspace_client.py) plus the extent-vocabulary logic -
+# this diagnostic resolves the enumeration exactly the way the import does.
+from aspace_client import ASPACE_URL, ASPACE_USERNAME, ASPACE_PASSWORD
+from aspace_csv_import import ArchivesSpaceClient
 
 # ==============================
 # HELP MENU
@@ -136,95 +132,36 @@ def get_colored_help():
 # ==============================
 
 def get_extent_types(username=None, password=None):
-    """Fetch valid extent types from ArchivesSpace."""
-    
-    # Use provided credentials or fall back to imported/None
-    user = username or ASPACE_USERNAME
-    passwd = password or ASPACE_PASSWORD
-    aspace_url = ASPACE_URL
-    
-    if not user or not passwd:
+    """Fetch valid extent types via the shared client.
+
+    Same login, retries, and enumeration resolution (by name, with the
+    guarded ID-14 fallback) as the importer itself - so what this reports
+    is exactly what an import run would accept."""
+    if not (username or ASPACE_USERNAME) or not (password or ASPACE_PASSWORD):
         print_status("error", "No credentials available")
         print(f"         Either add creds.py to repo root, or use {Colors.CYAN}-u{Colors.RESET} and {Colors.CYAN}-p{Colors.RESET} flags")
         return None
-    
-    if not aspace_url:
+
+    if not ASPACE_URL:
         print_status("error", "No ArchivesSpace URL configured in creds.py")
         return None
-    
-    # Authenticate
-    print_status("info", f"Connecting to {aspace_url}...")
+
+    client = ArchivesSpaceClient(username, password)
+    print_status("info", f"Connecting to {ASPACE_URL}...")
+    if not client.login():
+        print_status("error", "Authentication failed (see log)")
+        return None
+    print_status("success", "Authenticated")
+
+    print_status("info", "Fetching extent types...")
     try:
-        response = requests.post(
-            f"{aspace_url}/users/{user}/login",
-            data={"password": passwd},
-            timeout=30
-        )
-        
-        if response.status_code != 200:
-            print_status("error", f"Authentication failed: {response.status_code}")
-            return None
-            
-        session = response.json()['session']
-        headers = {"X-ArchivesSpace-Session": session}
-        print_status("success", "Authenticated")
-        
-        print_status("info", "Fetching extent types...")
-        
-        # Try to get the enumerations list first
-        enum_response = requests.get(
-            f"{aspace_url}/config/enumerations",
-            headers=headers,
-            timeout=30
-        )
-        
-        if enum_response.status_code == 200:
-            enumerations = enum_response.json()
-            
-            # Find the extent_extent_type enumeration
-            extent_enum = None
-            for enum in enumerations:
-                if enum.get('name') == 'extent_extent_type':
-                    extent_enum = enum
-                    break
-            
-            if extent_enum:
-                enum_id = extent_enum['id']
-                print_status("success", f"Found extent_extent_type enumeration (ID: {enum_id})")
-                
-                # Get the specific enumeration values
-                values_response = requests.get(
-                    f"{aspace_url}/config/enumerations/{enum_id}",
-                    headers=headers,
-                    timeout=30
-                )
-                
-                if values_response.status_code == 200:
-                    data = values_response.json()
-                    values = [v['value'] for v in data.get('enumeration_values', [])]
-                    return sorted(values)
-                else:
-                    print_status("error", f"Failed to get enumeration values: {values_response.status_code}")
-            else:
-                print_status("warning", "Could not find extent_extent_type enumeration")
-                
-                # Try common ID as fallback
-                print_status("info", "Trying fallback enumeration ID 14...")
-                values_response = requests.get(
-                    f"{aspace_url}/config/enumerations/14",
-                    headers=headers,
-                    timeout=30
-                )
-                
-                if values_response.status_code == 200:
-                    data = values_response.json()
-                    if data.get('name') == 'extent_extent_type':
-                        values = [v['value'] for v in data.get('enumeration_values', [])]
-                        return sorted(values)
-        
-    except Exception as e:
-        print_status("error", f"Error: {str(e)}")
-    
+        values = client.get_extent_types()
+    finally:
+        client.logout()
+
+    if values:
+        return sorted(values)
+    print_status("error", "Could not resolve the 'extent_extent_type' enumeration")
     return None
 
 def check_csv_values(csv_file):

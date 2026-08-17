@@ -6,7 +6,6 @@ Helps prepare CSV files for ArchivesSpace import
 
 import csv
 import json
-import requests
 import sys
 from datetime import datetime
 from typing import Dict, List, Set
@@ -86,30 +85,26 @@ def print_section(text: str):
 # CONFIGURATION
 # ==============================
 
-# Add parent directory to path for shared creds.py import
+# Add parent directory to path for the shared client and creds.py import
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-# Import settings from creds.py (in repo root)
-try:
-    from creds import baseURL as ASPACE_URL, user as ASPACE_USERNAME, password as ASPACE_PASSWORD
-    from creds import repo_id as REPO_ID
-except ImportError:
-    ASPACE_URL = None
-    ASPACE_USERNAME = None
-    ASPACE_PASSWORD = None
-    REPO_ID = None
+# API access goes through the shared client (aspace_client.py at the repo
+# root) - same verified, escaped, fail-closed lookups as the importer.
+from aspace_client import ASpaceClient, ASPACE_URL, ASPACE_USERNAME, ASPACE_PASSWORD
 
 # Try to import parse_date from main script
 try:
     from aspace_csv_import import parse_date
 except ImportError:
-    # Fallback parse_date function
+    # Fallback parse_date: must mirror the importer's date contract EXACTLY
+    # (US month-first or ISO; day-first is malformed). A validator that
+    # accepts what the import rejects hands out false green lights.
     from datetime import datetime as dt
     def parse_date(date_string):
         if not date_string or date_string.strip() == "":
             return None
         date_string = date_string.strip()
-        formats = ["%m/%d/%Y", "%m/%d/%y", "%Y-%m-%d", "%Y/%m/%d", "%d/%m/%Y"]
+        formats = ["%m/%d/%Y", "%m/%d/%y", "%Y-%m-%d", "%Y/%m/%d"]
         for fmt in formats:
             try:
                 date_obj = dt.strptime(date_string, fmt)
@@ -323,79 +318,59 @@ def validate_csv_structure(filename: str, update_only: bool = False) -> Dict:
     
     return results
 
-def check_parent_refs(parent_refs: List[str], url: str = None, username: str = None, 
+def check_parent_refs(parent_refs: List[str], url: str = None, username: str = None,
                       password: str = None, repo_id: str = None) -> Dict[str, bool]:
-    """Check which parent ref_ids exist in ArchivesSpace."""
+    """Check which parent ref_ids exist in ArchivesSpace.
+
+    Uses the shared client's find_parent - the SAME verified, escaped,
+    resource-scoped lookup the importer runs - so this diagnostic can no
+    longer say "Found" for a fuzzy or cross-resource hit the import would
+    then reject. Per-ref values: True = verified found, False = a
+    successful search verified absent, None = the lookup failed (reported
+    as "Not checked", never as found or missing).
+    """
     results = {}
-    
-    # Use provided credentials or fall back to defaults
-    aspace_url = url or ASPACE_URL
-    aspace_user = username or ASPACE_USERNAME
-    aspace_pass = password or ASPACE_PASSWORD
-    aspace_repo = repo_id or REPO_ID
-    
-    # Check credentials
-    if not aspace_user or not aspace_pass:
+
+    if url or repo_id:
+        # The shared client is configured by creds.py alone.
+        print_status("warning", "Custom --url/--repo overrides are ignored; "
+                                "edit creds.py to target a different instance")
+
+    if not (username or ASPACE_USERNAME) or not (password or ASPACE_PASSWORD):
         print_status("error", "No credentials available")
         print(f"         Either add creds.py to repo root, or use {Colors.CYAN}-u{Colors.RESET} and {Colors.CYAN}-p{Colors.RESET} flags")
         return results
-    
-    if not aspace_url:
+
+    if not ASPACE_URL:
         print_status("error", "No ArchivesSpace URL configured in creds.py")
         return results
-    
-    # Authenticate
+
+    client = ASpaceClient(username, password)
+    print_status("info", f"Connecting to {ASPACE_URL}...")
+    if not client.login():
+        print_status("error", "Authentication failed (see log)")
+        return results
+    print_status("success", "Authenticated")
+
     try:
-        print_status("info", f"Connecting to {aspace_url}...")
-        response = requests.post(
-            f"{aspace_url}/users/{aspace_user}/login",
-            data={"password": aspace_pass},
-            timeout=30
-        )
-        
-        if response.status_code != 200:
-            print_status("error", f"Authentication failed: {response.status_code}")
-            return results
-        
-        print_status("success", "Authenticated")
-        session = response.json()['session']
-        headers = {"X-ArchivesSpace-Session": session}
-        
-        # Check each parent ref
         print_status("info", f"Checking {len(parent_refs)} parent ref_ids...")
         print()
-        
         for ref_id in parent_refs:
             if not ref_id:
                 continue
-                
-            # Search for the ref_id
-            search_url = f"{aspace_url}/repositories/{aspace_repo}/search"
-            params = {
-                "q": f"ref_id:{ref_id}",
-                "type[]": "archival_object",
-                "page": 1,
-                "page_size": 1
-            }
-            
-            response = requests.get(search_url, headers=headers, params=params, timeout=30)
-            
-            if response.status_code == 200:
-                data = response.json()
-                found = data.get('total_hits', 0) > 0
-                results[ref_id] = found
-                
-                if found:
-                    print_status("found", f"{ref_id}")
-                else:
-                    print_status("not_found", f"{ref_id} {Colors.RED}NOT FOUND{Colors.RESET}")
-            else:
+            lookup = client.find_parent(ref_id)
+            if lookup.status in ("found", "multiple"):
+                results[ref_id] = True
+                print_status("found", f"{ref_id}")
+            elif lookup.status == "none":
                 results[ref_id] = False
-                print_status("error", f"{ref_id} - API error: {response.status_code}")
-                
-    except Exception as e:
-        print_status("error", f"Error checking parent refs: {str(e)}")
-    
+                print_status("not_found", f"{ref_id} {Colors.RED}NOT FOUND{Colors.RESET}")
+            else:
+                results[ref_id] = None
+                print_status("error", f"{ref_id} - lookup failed ({lookup.problem})")
+    finally:
+        client.logout()
+
     return results
 
 def generate_parent_lookup_report(csv_file: str, output_file: str = None,
@@ -446,15 +421,22 @@ def generate_parent_lookup_report(csv_file: str, output_file: str = None,
         # Summary
         found = sum(1 for v in ref_status.values() if v)
         not_found = sum(1 for v in ref_status.values() if v is False)
-        
+        unchecked = len(parent_refs) - found - not_found
+
         print_section("Summary")
         print(f"  {Colors.GREEN}Found:{Colors.RESET}     {found}")
         print(f"  {Colors.RED}Not Found:{Colors.RESET} {not_found}")
-        
+        if unchecked:
+            print(f"  {Colors.YELLOW}Not checked:{Colors.RESET} {unchecked} (lookup failed)")
+
         if not_found > 0:
             print()
             print_status("warning", f"{Colors.YELLOW}{not_found} parent ref_ids not found in ArchivesSpace!{Colors.RESET}")
             print(f"         These must be created before import will succeed.")
+        elif unchecked:
+            print()
+            print_status("warning", "Some lookups failed - NOT ready to declare the "
+                                    "import safe; retry when the API is reachable.")
         else:
             print()
             print_status("success", "All parent ref_ids found - ready for import!")
