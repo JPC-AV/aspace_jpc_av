@@ -4,7 +4,7 @@
 
 This script automates two tasks for digitized AV assets from the JPC Archive:
 
-1. **Updates ArchivesSpace records** with duration and physical details extracted from or confirmed by the digitized `.mkv` file.
+1. **Updates ArchivesSpace records** with duration and physical details extracted from or confirmed by the digitized media file (`.mkv` by default; `--mp4` for optical-disc transfers).
 2. **Renames directories** to append the ArchivesSpace `ref_id` for tracking and DAMS ingest.
 
 ## What It Does
@@ -12,7 +12,7 @@ This script automates two tasks for digitized AV assets from the JPC Archive:
 For each `JPC_AV_*` directory, the script:
 
 1. Resolves the directory's Component Unique Identifier (e.g., `JPC_AV_00001`) to exactly one verified ArchivesSpace record — each search candidate is fetched and must match the identifier exactly within the AV resource. Zero matches, multiple matches, or a failed search all fail the directory with a message saying which it was.
-2. Extracts the runtime of the `.mkv` file using `mediainfo`. The directory must contain exactly one `.mkv` — several candidates fail the directory rather than guessing which file's runtime to record.
+2. Extracts the runtime of the media file using `mediainfo`. The directory must contain exactly one media file of the selected format, named after the directory — zero, several, or a mismatched name fail the directory rather than guessing which file's runtime to record. (In `--mp4` mode the media lives in the `access_<name>/` subdirectory — see below.)
 3. Updates the ArchivesSpace record **only if something changed** (otherwise it's counted as `Unchanged` and nothing is written):
    - Sets Duration in the Physical Characteristics and Technical Requirements note — existing Duration entries are updated in place (in every phystech note, preserving neighboring items), or a Defined List subnote is added if none exists.
    - Fills a **blank** `physical_details` with `SD video, color, sound` on single-extent records — existing values are never overwritten, so manual corrections survive reruns; multi-extent records are left for staff.
@@ -86,8 +86,11 @@ python3 aspace-rename-directories.py -d /path/to/videos --no-rename
 # Rename directories only, skip ASpace record updates
 python3 aspace-rename-directories.py -d /path/to/videos --no-update
 
-# Also rename .mkv files to include ref_id
-python3 aspace-rename-directories.py -d /path/to/videos --rename-mkv
+# Also rename the media file to include ref_id (.mkv batches only)
+python3 aspace-rename-directories.py -d /path/to/videos --rename-media
+
+# Process optical-disc .mp4 transfers instead of .mkv
+python3 aspace-rename-directories.py -d /path/to/discs --mp4
 
 # Enable debug logging
 python3 aspace-rename-directories.py -d /path/to/videos --verbose
@@ -100,10 +103,34 @@ python3 aspace-rename-directories.py -d /path/to/videos --verbose
 | `-d, --directory PATH` | Target directory containing `JPC_AV_*` subdirectories **(required unless `--single`)** |
 | `--single PATH [PATH ...]` | Process specific directories directly (not their subdirectories) |
 | `-n, --dry-run` | Preview changes without executing |
+| `--mp4` | Process optical-disc `.mp4` transfers instead of the default `.mkv` (see below) |
 | `--no-rename` | Update ArchivesSpace only; skip directory renaming |
 | `--no-update` | Rename directories only; skip ArchivesSpace record updates |
-| `--rename-mkv` | Also rename `.mkv` files to include `ref_id` |
+| `--rename-media` | Also rename the media file to include `ref_id` (`.mkv` batches only; `--rename-mkv` is an alias) |
 | `-v, --verbose` | Enable debug-level logging |
+
+One media format per run: the default is `.mkv` (vrecord digitizations); `--mp4` switches the run to optical-disc transfers. Future formats (`--wav`, `--mp3`) will follow the same pattern — audio formats will skip the `physical_details` fill, since the video default doesn't apply to them.
+
+## Optical-Disc Transfers (`--mp4`)
+
+`--mp4` processes the directory layout produced by [makeiso-video.py](https://github.com/JPC-AV/optical_disc_jpc_av):
+
+```
+JPC_AV_14180/
+├── JPC_AV_14180.iso              # preservation image (untouched)
+├── JPC_AV_14180.iso.log.txt
+├── JPC_AV_14180_manifest.json
+├── JPC_AV_14180_tree.txt
+└── access_JPC_AV_14180/
+    ├── JPC_AV_14180.mp4          # the access copy - runtime comes from here
+    ├── JPC_AV_14180.mp4.log.txt
+    └── JPC_AV_14180_access_manifest.json
+```
+
+- The runtime is extracted from `access_<name>/<name>.mp4`; the record update (Duration, `physical_details`) is identical to `.mkv` runs.
+- **Only the top-level directory is renamed.** The manifests record the inner filenames and paths, so nothing inside the structure is ever renamed — `--rename-media` is rejected in `--mp4` mode.
+- **Multi-title discs** (`<name>_title01.mp4`, `_title02.mp4`, ... instead of a single `<name>.mp4`) have no single runtime and are failed with a clear message for manual handling.
+- A directory without an `access_<name>/` subdirectory (incomplete transfer) is failed, not skipped.
 
 ## ArchivesSpace Updates
 

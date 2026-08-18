@@ -122,7 +122,7 @@ def get_colored_help():
 
 {BOLD}{WHITE}DESCRIPTION{RESET}
     Processes JPC_AV_* directories to:
-    {GREEN}1.{RESET} Extract video runtime from .mkv files → {YELLOW}phystech note{RESET} (Physical Characteristics) in ArchivesSpace
+    {GREEN}1.{RESET} Extract media runtime → {YELLOW}phystech note{RESET} (Physical Characteristics) in ArchivesSpace
     {GREEN}2.{RESET} Fill blank extent physical_details → {YELLOW}SD video, color, sound{RESET} {DIM}(existing values kept; single-extent records only){RESET}
     {GREEN}3.{RESET} Rename directories to include {YELLOW}ref_id{RESET}
 
@@ -134,19 +134,23 @@ def get_colored_help():
     {CYAN}-n, --dry-run{RESET}                    Preview changes without executing
     {CYAN}-v, --verbose{RESET}                    Enable debug-level logging
     {CYAN}--single PATH [PATH ...]{RESET}         Process specific directories directly (not subdirs)
+    {CYAN}--mp4{RESET}                            Process optical-disc .mp4 transfers instead of .mkv
     {CYAN}--no-rename{RESET}                      Update ASpace only, skip directory renames
     {CYAN}--no-update{RESET}                      Rename only, skip ASpace record updates
-    {CYAN}--rename-mkv{RESET}                     Also rename .mkv files to include ref_id
+    {CYAN}--rename-media{RESET}                   Also rename the media file to include ref_id
+                                     {DIM}(.mkv only; --rename-mkv is an alias){RESET}
 
 {BOLD}{WHITE}EXAMPLES{RESET}
     {GREEN}${RESET} python3 aspace-rename-directories.py -d /path/to/videos
     {GREEN}${RESET} python3 aspace-rename-directories.py -d /path/to/videos --dry-run
     {GREEN}${RESET} python3 aspace-rename-directories.py --single /path/to/JPC_AV_00001
     {GREEN}${RESET} python3 aspace-rename-directories.py --single /path/to/JPC_AV_00001 /path/to/JPC_AV_00002
-    {GREEN}${RESET} python3 aspace-rename-directories.py -d /path/to/videos --rename-mkv
+    {GREEN}${RESET} python3 aspace-rename-directories.py -d /path/to/videos --rename-media
+    {GREEN}${RESET} python3 aspace-rename-directories.py -d /path/to/discs --mp4
 
 {BOLD}{WHITE}INPUT/OUTPUT{RESET}
     {DIM}Input:{RESET}  {MAGENTA}JPC_AV_00001/{RESET} containing {MAGENTA}JPC_AV_00001.mkv{RESET}
+            {DIM}(--mp4:{RESET} {MAGENTA}JPC_AV_14180/access_JPC_AV_14180/JPC_AV_14180.mp4{RESET}{DIM}){RESET}
     {DIM}Output:{RESET} {GREEN}JPC_AV_00001_refid_<ref_id>/{RESET}
 
 {BOLD}{WHITE}TARGET{RESET}
@@ -233,28 +237,65 @@ JPC_AV_DIR_RE = re.compile(r"^JPC_AV_[0-9]+$")  # ASCII digits only
 
 PHYSICAL_DETAILS_DEFAULT = "SD video, color, sound"
 
-# Media types this script processes. Currently .mkv only; future format flags
-# (.mp4 / .wav / .mp3 / .iso ...) should feed their extensions through here so
-# discovery, the exactly-one check, and renaming all follow automatically.
-DEFAULT_MEDIA_EXTENSIONS = (".mkv",)
+# Media formats this script processes - ONE format per run, selected by CLI
+# flag (default .mkv). Each entry drives discovery, the exactly-one check,
+# renaming, and whether the video physical_details default applies.
+#
+#   media_subdir: where the media lives relative to the catalog directory
+#     (None = top level, as the vrecord .mkv layout; "access_{name}" = the
+#     optical-disc layout from makeiso-video.py, where the top level holds
+#     the preservation .iso plus manifests/logs)
+#   allow_media_rename: mp4 mode renames the TOP DIRECTORY ONLY - the access
+#     manifest records the mp4's filename/path, so stamping files inside the
+#     disc structure would break manifest references
+#
+# Future formats slot in here: audio (.wav/.mp3) with fill_physical_details
+# False ("SD video, color, sound" is wrong for audio - staff curate those),
+# and .iso is deferred until that workflow is decided.
+MEDIA_FORMATS = {
+    "mkv": {"extensions": (".mkv",), "fill_physical_details": True,
+            "media_subdir": None, "allow_media_rename": True},
+    "mp4": {"extensions": (".mp4",), "fill_physical_details": True,
+            "media_subdir": "access_{name}", "allow_media_rename": False},
+}
+DEFAULT_MEDIA_EXTENSIONS = MEDIA_FORMATS["mkv"]["extensions"]
 
 
-def find_media_file(dir_path, extensions=DEFAULT_MEDIA_EXTENSIONS):
+def find_media_file(dir_path, extensions=DEFAULT_MEDIA_EXTENSIONS, media_subdir=None):
     """Locate exactly ONE media file in the directory, and require its
     basename to MATCH the directory name.
 
-    Returns (filename, problem). problem is None only when precisely one
-    candidate exists AND it is named after the directory - zero, several, or
-    a mismatched name is a fail-closed condition. Count alone is not enough:
+    Returns (filename, problem). filename is RELATIVE to dir_path (plain
+    basename for the flat .mkv layout; "access_<name>/<name>.mp4" for the
+    optical layout). problem is None only when precisely one candidate
+    exists AND it is named after the directory - zero, several, or a
+    mismatched name is a fail-closed condition. Count alone is not enough:
     a misfiled JPC_AV_00001.mkv sitting alone inside JPC_AV_00002/ would
     otherwise write file 00001's runtime into record 00002 and stamp the
     file with 00002's ref_id - a silent cross-labeling that survives forever.
+
+    media_subdir ("access_{name}") points discovery at the optical-disc
+    layout, where the media lives one level down and the top level holds
+    the preservation .iso, manifests and logs.
     """
+    expected = os.path.basename(os.path.normpath(dir_path))
+    search_dir = dir_path
+    rel_prefix = ""
+    if media_subdir:
+        subdir_name = media_subdir.format(name=expected)
+        search_dir = os.path.join(dir_path, subdir_name)
+        rel_prefix = subdir_name
+        if os.path.islink(search_dir):
+            return None, f"{subdir_name} is a symlink - refusing"
+        if not os.path.isdir(search_dir):
+            return None, (f"no {subdir_name}/ directory found - not a completed "
+                          f"optical-disc transfer?")
+
     ext_tuple = tuple(ext.lower() for ext in extensions)
     # macOS AppleDouble sidecars (._foo.mkv, created by Finder on SMB/exFAT
     # transfers) are metadata, not media - without this filter every
     # directory in a freshly transferred batch would fail "2 media files".
-    entries = [f for f in os.listdir(dir_path) if not f.startswith("._")]
+    entries = [f for f in os.listdir(search_dir) if not f.startswith("._")]
     # A symlinked media file must be refused loudly: isfile() follows links,
     # so mediainfo would measure content OUTSIDE this directory and the
     # rename would stamp the link - the same cross-labeling/stranding hazard
@@ -262,7 +303,7 @@ def find_media_file(dir_path, extensions=DEFAULT_MEDIA_EXTENSIONS):
     linked = sorted(
         f for f in entries
         if f.lower().endswith(ext_tuple)
-        and os.path.islink(os.path.join(dir_path, f))
+        and os.path.islink(os.path.join(search_dir, f))
     )
     if linked:
         return None, (f"symlinked media present ({', '.join(linked)}) - refusing "
@@ -273,10 +314,19 @@ def find_media_file(dir_path, extensions=DEFAULT_MEDIA_EXTENSIONS):
         # A directory/FIFO/socket named *.mkv is not media - selecting one
         # could rename a non-file as though it were (--no-update --rename-mkv
         # never runs mediainfo, so nothing else would catch it).
-        and os.path.isfile(os.path.join(dir_path, f))
+        and os.path.isfile(os.path.join(search_dir, f))
     )
     stamped = [f for f in media_names if "_refid_" in f]
     candidates = [f for f in media_names if "_refid_" not in f]
+
+    # Multi-titleset discs: makeiso-video.py emits <name>_titleNN.mp4 per
+    # titleset instead of one <name>.mp4. There is no single runtime to
+    # write, so these are handled manually (decided 2026-08).
+    title_re = re.compile(re.escape(expected) + r"_title[0-9]+$")
+    titles = [f for f in candidates if title_re.fullmatch(os.path.splitext(f)[0])]
+    if titles:
+        return None, (f"multi-title disc ({', '.join(titles)}) - no single "
+                      f"runtime to record; handle manually")
 
     if stamped and candidates:
         # A leftover stamped file next to an unstamped one would end this run
@@ -294,14 +344,14 @@ def find_media_file(dir_path, extensions=DEFAULT_MEDIA_EXTENSIONS):
     if len(candidates) > 1:
         return None, (f"{len(candidates)} media files found ({', '.join(candidates)}) "
                       f"- expected exactly one")
-    expected = os.path.basename(os.path.normpath(dir_path))
     base = os.path.splitext(candidates[0])[0]
     if base != expected:
         hint = (" (names differ only in upper/lower case - fix the file's case)"
                 if base.lower() == expected.lower() else " - misfiled content?")
         return None, (f"media file {candidates[0]} does not match directory name "
                       f"{expected}{hint} (nothing written)")
-    return candidates[0], None
+    return (os.path.join(rel_prefix, candidates[0]) if rel_prefix
+            else candidates[0]), None
 
 
 def _iter_duration_items(data):
@@ -435,7 +485,7 @@ def set_extent_physical_details(data):
 
 def rename_and_update_directories(client, target_dir, dry_run=False, no_rename=False,
                                    no_update=False, verbose=False, rename_mkv=False,
-                                   single=False):
+                                   single=False, media_format="mkv"):
     """
     Process directories to:
     - Extract video metadata.
@@ -449,8 +499,12 @@ def rename_and_update_directories(client, target_dir, dry_run=False, no_rename=F
         no_rename (bool): If True, update ASpace only, don't rename directories.
         no_update (bool): If True, rename directories only, don't update ASpace.
         verbose (bool): If True, show additional debug information.
-        rename_mkv (bool): If True, also rename .mkv files to include ref_id.
+        rename_mkv (bool): If True, also rename the media file to include
+            ref_id (refused at the CLI for formats whose layout forbids it).
+        media_format (str): Key into MEDIA_FORMATS - selects the extension,
+            where the media lives, and whether physical_details is filled.
     """
+    fmt = MEDIA_FORMATS[media_format]
     # Handle --single mode (target_dir may be None)
     if single:
         logging.info(f"Processing {len(single)} specified director{'y' if len(single) == 1 else 'ies'}")
@@ -609,7 +663,9 @@ def rename_and_update_directories(client, target_dir, dry_run=False, no_rename=F
             need_mkv = (not no_update) or (rename_mkv and not no_rename)
             mkv_filename = None
             if need_mkv:
-                mkv_filename, media_problem = find_media_file(dir_path)
+                mkv_filename, media_problem = find_media_file(
+                    dir_path, extensions=fmt["extensions"],
+                    media_subdir=fmt["media_subdir"])
                 if media_problem:
                     logging.error(f"{directory}: {media_problem}. Skipping.")
                     counters["failed"] += 1
@@ -669,7 +725,12 @@ def rename_and_update_directories(client, target_dir, dry_run=False, no_rename=F
                 # changes. Rewriting an already-correct record churns
                 # lock_versions and hides what a run really did.
                 needs_duration = duration_needs_update(archival_object_data, video_duration)
-                updated_data, filled_details = set_extent_physical_details(archival_object_data)
+                if fmt["fill_physical_details"]:
+                    updated_data, filled_details = set_extent_physical_details(archival_object_data)
+                else:
+                    # Audio formats: the video default would mislabel the
+                    # record - staff curate physical_details for those.
+                    updated_data, filled_details = archival_object_data, 0
                 if needs_duration:
                     updated_data = modify_phystech_note(updated_data, video_duration)
 
@@ -817,7 +878,8 @@ def main():
   {Fore.CYAN}--single PATH [PATH ...]{Style.RESET_ALL}  Process specific directories directly
   {Fore.CYAN}--no-rename{Style.RESET_ALL}           Update ASpace only, skip directory renames
   {Fore.CYAN}--no-update{Style.RESET_ALL}           Rename only, skip ASpace record updates
-  {Fore.CYAN}--rename-mkv{Style.RESET_ALL}          Also rename .mkv files to include ref_id
+  {Fore.CYAN}--mp4{Style.RESET_ALL}                 Process optical-disc .mp4 transfers
+  {Fore.CYAN}--rename-media{Style.RESET_ALL}        Also rename the media file (.mkv only)
 """
             return usage + help_hint + options
         
@@ -873,7 +935,16 @@ def main():
         help=argparse.SUPPRESS
     )
     parser.add_argument(
-        '--rename-mkv',
+        '--rename-media', '--rename-mkv',  # --rename-mkv kept as an alias
+        dest='rename_mkv',
+        action='store_true',
+        help=argparse.SUPPRESS
+    )
+    # Format flags: ONE format per run (mutually exclusive group so future
+    # formats - --wav, --mp3 - can't be combined either).
+    format_group = parser.add_mutually_exclusive_group()
+    format_group.add_argument(
+        '--mp4',
         action='store_true',
         help=argparse.SUPPRESS
     )
@@ -885,17 +956,26 @@ def main():
     )
 
     args = parser.parse_args()
+    media_format = 'mp4' if args.mp4 else 'mkv'
 
     # Validate: require either -d or --single (argparse enforces not-both)
     if not args.directory and not args.single:
         parser.error("either -d/--directory or --single is required")
 
-    # --rename-mkv renames the media file DURING the rename step, which
+    # --rename-media renames the media file DURING the rename step, which
     # --no-rename disables entirely - the combination would announce renames
     # and then do nothing. Reject it instead of exiting successfully.
     if args.rename_mkv and args.no_rename:
-        parser.error("--rename-mkv cannot be combined with --no-rename "
+        parser.error("--rename-media cannot be combined with --no-rename "
                      "(--no-rename skips all renaming)")
+
+    # mp4 mode renames the TOP DIRECTORY ONLY: the access manifest records
+    # the mp4's filename/path, so stamping files inside the disc structure
+    # would break manifest references.
+    if args.rename_mkv and not MEDIA_FORMATS[media_format]["allow_media_rename"]:
+        parser.error(f"--rename-media is not available with --{media_format} "
+                     f"(renaming files inside the disc structure would break "
+                     f"manifest references; only the top directory is renamed)")
 
     # --no-update --no-rename disables everything the script can do; it would
     # still authenticate and resolve records, then exit 0 having changed
@@ -922,6 +1002,7 @@ def main():
     logging.info("ArchivesSpace Directory Processing Script Started")
     logging.info(f"Timestamp: {datetime.now()}")
     logging.info(f"Dry Run: {args.dry_run}")
+    logging.info(f"Media format: {media_format} ({'/'.join(MEDIA_FORMATS[media_format]['extensions'])})")
     logging.info("=" * 60)
 
     # Step 1: Authenticate with ArchivesSpace
@@ -948,7 +1029,8 @@ def main():
             no_update=args.no_update,
             verbose=args.verbose,
             rename_mkv=args.rename_mkv,
-            single=args.single
+            single=args.single,
+            media_format=media_format
         )
 
     except Exception as e:
