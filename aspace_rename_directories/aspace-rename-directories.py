@@ -266,8 +266,10 @@ def find_media_file(dir_path, extensions=DEFAULT_MEDIA_EXTENSIONS, media_subdir=
     basename to MATCH the directory name.
 
     Returns (filename, problem). filename is RELATIVE to dir_path (plain
-    basename for the flat .mkv layout; "access_<name>/<name>.mp4" for the
-    optical layout). problem is None only when precisely one candidate
+    basename when the media sits at the top level, as in vrecord transfers -
+    which also carry many sidecars and subdirectories, all invisible here;
+    "access_<name>/<name>.mp4" for the optical layout). problem is None
+    only when precisely one candidate
     exists AND it is named after the directory - zero, several, or a
     mismatched name is a fail-closed condition. Count alone is not enough:
     a misfiled JPC_AV_00001.mkv sitting alone inside JPC_AV_00002/ would
