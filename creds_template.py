@@ -12,3 +12,8 @@ resource_id = "number"  # resource_id for your ASpace resource.
 # aspace_csv_import.py default: ~/aspace_import_reports
 # aspace-rename-directories.py default: ~/aspace_rename_reports
 logs_dir = ""
+
+# Optional: staff-side ArchivesSpace base URL (the one you browse, not the
+# API). When set, import reports include a clickable staff_link per record,
+# e.g. https://staff-aspace.example.org/resources/7#tree::archival_object_123
+staff_url = ""

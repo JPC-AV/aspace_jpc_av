@@ -177,6 +177,13 @@ try:
 except ImportError:
     logs_dir = ""
 
+# Optional staff-side base URL - when set, reports carry a clickable
+# staff_link per record (the API uri is not browsable).
+try:
+    from creds import staff_url as STAFF_URL
+except ImportError:
+    STAFF_URL = ""
+
 # CSV File Configuration
 CSV_FILE = "JPCA-AV_SOURCE-ASpace_CSV_export.csv"  # Input CSV file
 
@@ -853,6 +860,16 @@ def create_archival_object(row: Dict, client: ArchivesSpaceClient,
 
         if result:
             logging.info(f"Successfully created archival object: {catalog_number}")
+            # The create response has no ref_id (ASpace generates it on the
+            # record), so fetch it for the report. If this read fails the
+            # record was still created - report the row as created with the
+            # ref_id blank, never as a failure.
+            created = client.get(result['uri'])
+            if isinstance(created, dict) and created.get('ref_id'):
+                result['ref_id'] = created['ref_id']
+            else:
+                logging.warning(f"Could not fetch ref_id for {result['uri']} "
+                                f"(record was created; look it up in ArchivesSpace)")
             return result, []
         else:
             logging.error(f"Failed to create archival object: {catalog_number}")
@@ -919,7 +936,8 @@ def update_archival_object(row: Dict, client: ArchivesSpaceClient,
     
     if not changes:
         logging.info(f"No changes needed for: {catalog_number}")
-        return {"uri": existing_uri, "unchanged": True}, {}, []
+        return {"uri": existing_uri, "unchanged": True,
+                "ref_id": existing_obj.get("ref_id", "")}, {}, []
     
     # Apply ONLY the detected changes. Rebuilding an unchanged field from the
     # CSV would replace richer existing objects with minimal generated ones,
@@ -1000,12 +1018,14 @@ def update_archival_object(row: Dict, client: ArchivesSpaceClient,
     
     if dry_run:
         logging.info(f"[DRY RUN] Would update archival object: {catalog_number} at {existing_uri}")
-        return {"uri": existing_uri, "dry_run": True, "updated": True}, changes, []
+        return {"uri": existing_uri, "dry_run": True, "updated": True,
+                "ref_id": existing_obj.get("ref_id", "")}, changes, []
     else:
         result = client.update_record(existing_uri, existing_obj)
-        
+
         if result:
             logging.info(f"Successfully updated archival object: {catalog_number}")
+            result["ref_id"] = existing_obj.get("ref_id", "")
             return result, changes, []
         else:
             logging.error(f"Failed to update archival object: {catalog_number}")
@@ -1026,17 +1046,24 @@ def normalize_row(row: Dict) -> Dict:
 
 
 def make_row_result(row_num: int, row: Dict, status: str = "pending",
-                    message: str = "", uri: str = None, changes: Dict = None) -> Dict:
-    """One row's outcome record - shared by every processing path."""
-    return {
+                    message: str = "", uri: str = None, changes: Dict = None,
+                    ref_id: str = None) -> Dict:
+    """One row's outcome record - shared by every processing path.
+
+    Carries the record's ref_id when known (fetched after a create, read from
+    the existing record on update) and every mapped CSV column verbatim, so
+    the reports are a self-contained audit trail of what was submitted."""
+    result = {
         "row_number": row_num,
-        "catalog_number": row.get(col.CATALOG, ''),
-        "title": row.get(col.TITLE, ''),
         "status": status,
         "message": message,
         "uri": uri,
+        "ref_id": ref_id or '',
         "changes": changes or {}
     }
+    for column in col.REQUIRED_COLUMNS:
+        result[column] = (row.get(column) or '').strip()
+    return result
 
 
 def record_row_outcome(result: Dict, summary: Dict):
@@ -1050,7 +1077,10 @@ def record_row_outcome(result: Dict, summary: Dict):
     summary_key = "failed" if status == "error" else status
     if summary_key in summary:
         summary[summary_key] += 1
-    print_status(status, f"{result['catalog_number']} - {result['message']}")
+    line = f"{result[col.CATALOG]} - {result['message']}"
+    if result.get("ref_id"):
+        line += f" - Ref ID {result['ref_id']}"
+    print_status(status, line)
     if status == "updated":
         for field, (old, new) in result.get("changes", {}).items():
             print_status("info", f"{field}: {old} --> {new}", indent=1)
@@ -1140,6 +1170,7 @@ def process_csv_row(row: Dict, row_num: int, client: ArchivesSpaceClient,
                         else:
                             logging.info(f"Updated: {catalog_number} - {', '.join(changes.keys())}")
                     result["uri"] = ao_result.get('uri', existing_uri)
+                    result["ref_id"] = ao_result.get('ref_id', '')
                 else:
                     result["status"] = "error"
                     result["message"] = "Failed to update"
@@ -1182,6 +1213,7 @@ def process_csv_row(row: Dict, row_num: int, client: ArchivesSpaceClient,
         elif ao_result:
             result["status"] = "created"
             result["uri"] = ao_result.get('uri', '')
+            result["ref_id"] = ao_result.get('ref_id', '')
             result["message"] = "Created successfully"
             if ao_result.get('dry_run'):
                 result["message"] = "Would be created"
@@ -1336,11 +1368,13 @@ def process_csv_file_update_only(filename: str, client: ArchivesSpaceClient,
                 result = make_row_result(row_num, row, "error", "; ".join(errors))
             elif ao_result and ao_result.get('unchanged'):
                 result = make_row_result(row_num, row, "unchanged", "No changes needed",
-                                         uri=resolved[row_num])
+                                         uri=resolved[row_num],
+                                         ref_id=ao_result.get('ref_id'))
             elif ao_result:
                 message = f"Updated: {', '.join(changes.keys())}" if changes else "Updated"
                 result = make_row_result(row_num, row, "updated", message,
-                                         uri=resolved[row_num], changes=changes)
+                                         uri=resolved[row_num], changes=changes,
+                                         ref_id=ao_result.get('ref_id'))
             else:
                 result = make_row_result(row_num, row, "error", "Failed to update")
         except KeyboardInterrupt:
@@ -1465,6 +1499,24 @@ def process_csv_file(filename: str, client: ArchivesSpaceClient,
 # REPORTING
 # ==============================
 
+def staff_link_for(uri: Optional[str]) -> str:
+    """Browsable staff-UI link for an archival object's API uri.
+
+    The API uri (/repositories/N/archival_objects/123) is what the script
+    reads and writes but goes nowhere in a browser; the staff UI address is
+    built from the resource tree. Returns '' when staff_url is not set in
+    creds.py or the uri is not a real archival object uri (e.g. dry runs).
+    """
+    if not STAFF_URL or not uri:
+        return ""
+    match = re.fullmatch(rf"/repositories/{re.escape(str(REPO_ID))}"
+                         rf"/archival_objects/([0-9]+)", uri)
+    if not match:
+        return ""
+    return (f"{STAFF_URL.rstrip('/')}/resources/{RESOURCE_ID}"
+            f"#tree::archival_object_{match.group(1)}")
+
+
 def generate_reports(results: List[Dict], summary: Dict) -> bool:
     """Generate CSV and JSON reports of the import process.
 
@@ -1473,17 +1525,25 @@ def generate_reports(results: List[Dict], summary: Dict) -> bool:
     could not be saved, exiting zero would misreport the run.
     """
     ok = True
+    # Enriched copies for the reports: add the browsable staff_link derived
+    # from each row's API uri. The originals stay untouched.
+    report_rows = [
+        {**r, 'staff_link': staff_link_for(r.get('uri'))}
+        for r in results
+    ]
     try:
         # Write-then-rename: the final report path only ever holds a COMPLETE
         # file. An interrupt mid-write leaves a .tmp (never mistakable for the
         # audit trail), not a well-formed-looking truncated report.
         tmp_path = CSV_REPORT + '.tmp'
         with open(tmp_path, 'w', newline='', encoding='utf-8') as csvfile:
-            fieldnames = ['row_number', 'catalog_number', 'title', 'status',
-                         'message', 'uri']
+            # Outcome columns first, then every mapped CSV column verbatim -
+            # the report is a self-contained audit trail of the run.
+            fieldnames = ['row_number', 'status', 'message', 'uri', 'ref_id',
+                          'staff_link'] + list(col.REQUIRED_COLUMNS)
             writer = csv.DictWriter(csvfile, fieldnames=fieldnames, extrasaction='ignore')
             writer.writeheader()
-            writer.writerows(results)
+            writer.writerows(report_rows)
         os.replace(tmp_path, CSV_REPORT)
         logging.info(f"CSV report saved: {CSV_REPORT}")
     except Exception as e:
@@ -1493,7 +1553,7 @@ def generate_reports(results: List[Dict], summary: Dict) -> bool:
     try:
         report_data = {
             "summary": summary,
-            "results": results
+            "results": report_rows
         }
         tmp_path = JSON_REPORT + '.tmp'
         with open(tmp_path, 'w', encoding='utf-8') as jsonfile:
