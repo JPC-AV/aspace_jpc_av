@@ -17,10 +17,14 @@ from pathlib import Path  # Library for working with file paths
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 # All ArchivesSpace API safety (HTTP, retries, verified lookups, scope-locked
-# writes) lives in the shared client (aspace_client.py at the repo root).
-from aspace_client import ASpaceClient, ASPACE_URL, REPO_ID, RESOURCE_ID
+# writes) and environment selection live in the shared client
+# (aspace_client.py at the repo root). Constants are read THROUGH the module
+# (aspace_client.X): the environment is selected in main() after argument
+# parsing, so an import-time snapshot would capture the pre-selection None.
+import aspace_client
+from aspace_client import ASpaceClient
 
-if ASPACE_URL is None:
+if not aspace_client.ENVIRONMENTS:
     print(f"{Fore.RED}Error: creds.py not found or missing required fields{Style.RESET_ALL}")
     print("Required fields: baseURL, user, password, repo_id, resource_id")
     print("See creds_template.py in repo root for format.")
@@ -139,6 +143,8 @@ def get_colored_help():
     {CYAN}--no-update{RESET}                      Rename only, skip ASpace record updates
     {CYAN}--rename-media{RESET}                   Also rename the media file to include ref_id
                                      {DIM}(.mkv only; --rename-mkv is an alias){RESET}
+    {CYAN}--env NAME{RESET}                       Target environment from creds.py
+                                     {DIM}(required when several are configured){RESET}
 
 {BOLD}{WHITE}EXAMPLES{RESET}
     {GREEN}${RESET} python3 aspace-rename-directories.py -d /path/to/videos
@@ -154,7 +160,7 @@ def get_colored_help():
     {DIM}Output:{RESET} {GREEN}JPC_AV_00001_refid_<ref_id>/{RESET}
 
 {BOLD}{WHITE}TARGET{RESET}
-    Repository: {CYAN}/repositories/2{RESET}  Resource: {CYAN}/resources/7{RESET}
+    Selected from the environments in {CYAN}creds.py{RESET}; every run logs a Target line.
 """
     return help_text
 
@@ -834,7 +840,7 @@ def fetch_archival_object(client, object_id):
     Returns:
         dict: The JSON data of the archival object, or None if the fetch fails.
     """
-    return client.get(f"/repositories/{REPO_ID}/archival_objects/{object_id}")
+    return client.get(f"/repositories/{aspace_client.REPO_ID}/archival_objects/{object_id}")
 
 def update_archival_object(client, object_id, updated_data):
     """
@@ -852,7 +858,7 @@ def update_archival_object(client, object_id, updated_data):
         dict: The API response JSON on success, or None if the update fails
         (including a scope-lock refusal - nothing is sent in that case).
     """
-    uri = f"/repositories/{REPO_ID}/archival_objects/{object_id}"
+    uri = f"/repositories/{aspace_client.REPO_ID}/archival_objects/{object_id}"
     result = client.update_record(uri, updated_data)
     if result is not None:
         logging.info("Archival object updated successfully!")
@@ -882,6 +888,7 @@ def main():
   {Fore.CYAN}--no-update{Style.RESET_ALL}           Rename only, skip ASpace record updates
   {Fore.CYAN}--mp4{Style.RESET_ALL}                 Process optical-disc .mp4 transfers
   {Fore.CYAN}--rename-media{Style.RESET_ALL}        Also rename the media file (.mkv only)
+  {Fore.CYAN}--env NAME{Style.RESET_ALL}            Target environment from creds.py
 """
             return usage + help_hint + options
         
@@ -956,9 +963,30 @@ def main():
         metavar='PATH',
         help=argparse.SUPPRESS
     )
+    parser.add_argument(
+        '--env',
+        metavar='NAME',
+        help=argparse.SUPPRESS
+    )
 
     args = parser.parse_args()
     media_format = 'mp4' if args.mp4 else 'mkv'
+
+    # Environment selection. Auto-selected at import when creds.py declares
+    # exactly one environment; with several configured there is NO default -
+    # an explicit --env is required every run, so the target is always a
+    # deliberate choice (a forgotten flag can never mean "production").
+    if args.env:
+        try:
+            aspace_client.select_environment(args.env)
+        except ValueError as e:
+            parser.error(str(e))
+    elif aspace_client.ACTIVE_ENV is None:
+        if len(aspace_client.ENVIRONMENTS) > 1:
+            parser.error(f"multiple environments configured "
+                         f"({', '.join(sorted(aspace_client.ENVIRONMENTS))}) - "
+                         f"pass --env NAME to choose the target")
+        parser.error("no environments configured in creds.py (see creds_template.py)")
 
     # Validate: require either -d or --single (argparse enforces not-both)
     if not args.directory and not args.single:
@@ -1002,6 +1030,12 @@ def main():
     # Log script start
     logging.info("=" * 60)
     logging.info("ArchivesSpace Directory Processing Script Started")
+    # The Target line is the audit trail of which catalog this run touched;
+    # production gets the loud color on the console (stripped in the file log).
+    target = (f"{aspace_client.ACTIVE_ENV.upper()} ({aspace_client.ASPACE_URL}, "
+              f"repo {aspace_client.REPO_ID}, resource {aspace_client.RESOURCE_ID})")
+    target_color = Fore.RED if aspace_client.ACTIVE_ENV == 'production' else Fore.GREEN
+    logging.info(f"Target: {target_color}{Style.BRIGHT}{target}{Style.RESET_ALL}")
     logging.info(f"Timestamp: {datetime.now()}")
     logging.info(f"Dry Run: {args.dry_run}")
     logging.info(f"Media format: {media_format} ({'/'.join(MEDIA_FORMATS[media_format]['extensions'])})")

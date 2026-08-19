@@ -84,15 +84,33 @@ After cloning or pulling this repository to your local machine:
 
 **Do NOT edit `creds_template.py` directly.** If you accidentally commit your credentials to GitHub, they will be exposed publicly. The `creds.py` file is listed in `.gitignore` so it will not be tracked or uploaded.
 
-Your `creds.py` should look like this (with your actual values):
+Your `creds.py` declares one entry per ArchivesSpace instance you can access:
 
 ```python
-baseURL = "https://your-aspace-api-url.org"
-user = "your_username"
-password = "your_password"
-repo_id = "your_repository_id"
-resource_id = "your_resource_id"
+environments = {
+    "sandbox": {
+        "baseURL": "https://your-sandbox-api-url.org",
+        "user": "your_username",
+        "password": "your_password",
+        "repo_id": "your_repository_id",      # differs between instances!
+        "resource_id": "your_resource_id",    # differs between instances!
+        "staff_url": "https://your-sandbox-staff-url.org",  # optional: clickable report links
+    },
+    # add a "production" entry only if you have production access
+}
 ```
+
+How the scripts pick the target:
+
+- **One entry configured** — used automatically, nothing to type. If you only
+  have sandbox access, production is unreachable from your machine.
+- **Several entries configured** — every run must say which target with
+  `--env sandbox` or `--env production`. There is no default, so a forgotten
+  flag is a hard error, never a silent write to the wrong instance. Every run
+  prints and logs a `Target:` line naming the instance it touched.
+
+(Legacy flat `creds.py` files — top-level `baseURL`/`user`/etc. — still work
+and are treated as a single `production` environment.)
 
 Ask your ArchivesSpace administrator if you don't know these values.
 

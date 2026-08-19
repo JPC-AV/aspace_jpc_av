@@ -89,8 +89,10 @@ def print_section(text: str):
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 # API access goes through the shared client (aspace_client.py at the repo
-# root) - same verified, escaped, fail-closed lookups as the importer.
-from aspace_client import ASpaceClient, ASPACE_URL, ASPACE_USERNAME, ASPACE_PASSWORD
+# root) - same verified, escaped, fail-closed lookups and environment
+# selection as the importer. Constants are read THROUGH the module.
+import aspace_client
+from aspace_client import ASpaceClient
 
 # Try to import parse_date from main script
 try:
@@ -144,6 +146,8 @@ def get_colored_help():
     {C.CYAN}-u, --username USER{C.RESET}       ASpace username (or use creds.py)
     {C.CYAN}-p, --password PASS{C.RESET}       ASpace password (or use creds.py)
     {C.CYAN}-o, --output FILE{C.RESET}         Output file path (for --parents report)
+    {C.CYAN}--env NAME{C.RESET}                Target environment from creds.py
+                              (required for --parents when several are configured)
     {C.CYAN}--no-color{C.RESET}                Disable colored output
     {C.CYAN}--update-only{C.RESET}             Validate as a narrow update-only CSV
                               (CATALOG_NUMBER + columns to change; no parent needed)
@@ -336,17 +340,22 @@ def check_parent_refs(parent_refs: List[str], url: str = None, username: str = N
         print_status("warning", "Custom --url/--repo overrides are ignored; "
                                 "edit creds.py to target a different instance")
 
-    if not (username or ASPACE_USERNAME) or not (password or ASPACE_PASSWORD):
+    if not (username or aspace_client.ASPACE_USERNAME) or not (password or aspace_client.ASPACE_PASSWORD):
         print_status("error", "No credentials available")
         print(f"         Either add creds.py to repo root, or use {Colors.CYAN}-u{Colors.RESET} and {Colors.CYAN}-p{Colors.RESET} flags")
         return results
 
-    if not ASPACE_URL:
-        print_status("error", "No ArchivesSpace URL configured in creds.py")
+    if not aspace_client.ASPACE_URL:
+        if len(aspace_client.ENVIRONMENTS) > 1:
+            print_status("error", "Multiple environments configured "
+                                  f"({', '.join(sorted(aspace_client.ENVIRONMENTS))}) "
+                                  "- pass --env NAME")
+        else:
+            print_status("error", "No ArchivesSpace URL configured in creds.py")
         return results
 
     client = ASpaceClient(username, password)
-    print_status("info", f"Connecting to {ASPACE_URL}...")
+    print_status("info", f"Connecting to {aspace_client.ASPACE_URL}...")
     if not client.login():
         print_status("error", "Authentication failed (see log)")
         return results
@@ -577,7 +586,23 @@ def main():
         help=argparse.SUPPRESS
     )
 
+    parser.add_argument(
+        '--env',
+        metavar='NAME',
+        help=argparse.SUPPRESS
+    )
+
     args = parser.parse_args()
+    # Environment selection (see aspace_client): auto when one is configured,
+    # explicit --env when several are. API-touching commands fail later with
+    # a clear message if nothing is selected.
+    if args.env:
+        try:
+            aspace_client.select_environment(args.env)
+        except ValueError as e:
+            print_status("error", str(e))
+            sys.exit(1)
+
     
     # Handle color disable
     if args.no_color:

@@ -85,7 +85,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 # API access goes through the importer's client, which carries the shared
 # fail-safe HTTP core (aspace_client.py) plus the extent-vocabulary logic -
 # this diagnostic resolves the enumeration exactly the way the import does.
-from aspace_client import ASPACE_URL, ASPACE_USERNAME, ASPACE_PASSWORD
+import aspace_client
 from aspace_csv_import import ArchivesSpaceClient
 
 # ==============================
@@ -115,6 +115,8 @@ def get_colored_help():
 {C.BOLD}OPTIONS{C.RESET}
     {C.CYAN}-u, --username USER{C.RESET}       ASpace username (or use creds.py)
     {C.CYAN}-p, --password PASS{C.RESET}       ASpace password (or use creds.py)
+    {C.CYAN}--env NAME{C.RESET}                Target environment from creds.py
+                              (required when several are configured)
     {C.CYAN}--no-color{C.RESET}                Disable colored output
 
 {C.BOLD}EXAMPLES{C.RESET}
@@ -137,17 +139,22 @@ def get_extent_types(username=None, password=None):
     Same login, retries, and enumeration resolution (by name, with the
     guarded ID-14 fallback) as the importer itself - so what this reports
     is exactly what an import run would accept."""
-    if not (username or ASPACE_USERNAME) or not (password or ASPACE_PASSWORD):
+    if not (username or aspace_client.ASPACE_USERNAME) or not (password or aspace_client.ASPACE_PASSWORD):
         print_status("error", "No credentials available")
         print(f"         Either add creds.py to repo root, or use {Colors.CYAN}-u{Colors.RESET} and {Colors.CYAN}-p{Colors.RESET} flags")
         return None
 
-    if not ASPACE_URL:
-        print_status("error", "No ArchivesSpace URL configured in creds.py")
+    if not aspace_client.ASPACE_URL:
+        if len(aspace_client.ENVIRONMENTS) > 1:
+            print_status("error", "Multiple environments configured "
+                                  f"({', '.join(sorted(aspace_client.ENVIRONMENTS))}) "
+                                  "- pass --env NAME")
+        else:
+            print_status("error", "No ArchivesSpace URL configured in creds.py")
         return None
 
     client = ArchivesSpaceClient(username, password)
-    print_status("info", f"Connecting to {ASPACE_URL}...")
+    print_status("info", f"Connecting to {aspace_client.ASPACE_URL}...")
     if not client.login():
         print_status("error", "Authentication failed (see log)")
         return None
@@ -236,7 +243,23 @@ def main():
         help=argparse.SUPPRESS
     )
     
+    parser.add_argument(
+        '--env',
+        metavar='NAME',
+        help=argparse.SUPPRESS
+    )
+
     args = parser.parse_args()
+    # Environment selection (see aspace_client): auto when one is configured,
+    # explicit --env when several are. API-touching commands fail later with
+    # a clear message if nothing is selected.
+    if args.env:
+        try:
+            aspace_client.select_environment(args.env)
+        except ValueError as e:
+            print_status("error", str(e))
+            sys.exit(1)
+
     
     # Handle color disable
     if args.no_color:

@@ -53,20 +53,79 @@ except ImportError:  # stubbed test environments
         pass
 
 # ---------------------------------------------------------------------------
-# Credentials (tolerant load - scripts decide how to react to missing creds)
+# Credentials and environments (tolerant load - scripts decide how to react
+# to missing creds).
+#
+# creds.py may declare either:
+#   - an `environments` dict mapping names ("sandbox", "production") to
+#     {baseURL, user, password, repo_id, resource_id, staff_url?}, or
+#   - the legacy flat fields (baseURL, user, ...), treated as a single
+#     "production" environment.
+#
+# Selection rules (the confusion-proofing is the point):
+#   - exactly ONE environment configured: auto-selected. A teammate whose
+#     creds.py only has the sandbox block runs the scripts with nothing to
+#     type - and production is unreachable from their machine.
+#   - SEVERAL environments configured: nothing is selected by default; the
+#     scripts require an explicit --env every run. Forgetting it is a hard
+#     error, never a silent target choice.
 # ---------------------------------------------------------------------------
 try:
-    from creds import baseURL as ASPACE_URL, user as ASPACE_USERNAME, password as ASPACE_PASSWORD
-    from creds import repo_id as REPO_ID, resource_id as RESOURCE_ID
+    import creds as _creds
 except ImportError:
-    ASPACE_URL = None
-    ASPACE_USERNAME = None
-    ASPACE_PASSWORD = None
-    REPO_ID = None
-    RESOURCE_ID = None
+    _creds = None
 
-RESOURCE_URI = (f"/repositories/{REPO_ID}/resources/{RESOURCE_ID}"
-                if REPO_ID and RESOURCE_ID else None)
+ENVIRONMENTS = {}
+if _creds is not None:
+    declared = getattr(_creds, "environments", None)
+    if isinstance(declared, dict) and declared:
+        ENVIRONMENTS = declared
+    elif getattr(_creds, "baseURL", None):
+        # Legacy flat creds.py = a single production environment.
+        ENVIRONMENTS = {"production": {
+            "baseURL": getattr(_creds, "baseURL", None),
+            "user": getattr(_creds, "user", None),
+            "password": getattr(_creds, "password", None),
+            "repo_id": getattr(_creds, "repo_id", None),
+            "resource_id": getattr(_creds, "resource_id", None),
+            "staff_url": getattr(_creds, "staff_url", ""),
+        }}
+
+# Filled by select_environment(); None until an environment is active. Always
+# read these THROUGH the module (aspace_client.REPO_ID) - a from-import
+# snapshots the pre-selection None.
+ACTIVE_ENV = None
+ASPACE_URL = None
+ASPACE_USERNAME = None
+ASPACE_PASSWORD = None
+REPO_ID = None
+RESOURCE_ID = None
+RESOURCE_URI = None
+STAFF_URL = ""
+
+
+def select_environment(name: str) -> None:
+    """Activate one configured environment. Raises ValueError for an unknown
+    name - callers surface that as a CLI error, nothing defaults."""
+    global ACTIVE_ENV, ASPACE_URL, ASPACE_USERNAME, ASPACE_PASSWORD
+    global REPO_ID, RESOURCE_ID, RESOURCE_URI, STAFF_URL
+    if name not in ENVIRONMENTS:
+        known = ", ".join(sorted(ENVIRONMENTS)) or "none configured"
+        raise ValueError(f"Unknown environment {name!r} (configured: {known})")
+    env = ENVIRONMENTS[name]
+    ACTIVE_ENV = name
+    ASPACE_URL = env.get("baseURL")
+    ASPACE_USERNAME = env.get("user")
+    ASPACE_PASSWORD = env.get("password")
+    REPO_ID = env.get("repo_id")
+    RESOURCE_ID = env.get("resource_id")
+    RESOURCE_URI = (f"/repositories/{REPO_ID}/resources/{RESOURCE_ID}"
+                    if REPO_ID and RESOURCE_ID else None)
+    STAFF_URL = env.get("staff_url", "") or ""
+
+
+if len(ENVIRONMENTS) == 1:
+    select_environment(next(iter(ENVIRONMENTS)))
 
 TIMEOUT = 30
 RETRY_ATTEMPTS = 3

@@ -96,6 +96,7 @@ CLI_OPTIONS = [
     ("-n, --dry-run", "", "Preview changes without creating records"),
     ("-u, --username USER", "", "ASpace username (or use creds.py)"),
     ("-p, --password PASS", "", "ASpace password (or use creds.py)"),
+    ("--env NAME", "", "Target environment from creds.py (required when several are configured)"),
     ("--no-color", "", "Disable colored output"),
 ]
 DUPLICATE_OPTIONS = [
@@ -163,12 +164,15 @@ def get_colored_help():
 # Add parent directory to path for shared creds.py import
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-# ArchivesSpace API Configuration - creds loading and all HTTP/lookup/write
-# safety now live in the shared client (aspace_client.py at the repo root).
-from aspace_client import (ASpaceClient, ASPACE_URL, ASPACE_USERNAME,
-                           ASPACE_PASSWORD, REPO_ID, RESOURCE_ID, RESOURCE_URI)
+# ArchivesSpace API Configuration - creds loading, environment selection,
+# and all HTTP/lookup/write safety live in the shared client (aspace_client.py
+# at the repo root). Constants are read THROUGH the module (aspace_client.X):
+# the environment is selected in main() after argument parsing, so an
+# import-time snapshot would capture the pre-selection None.
+import aspace_client
+from aspace_client import ASpaceClient
 
-if ASPACE_URL is None:
+if not aspace_client.ENVIRONMENTS:
     print("Warning: creds.py not found. See creds_template.py in repo root for format.")
 
 # Import optional logs_dir (may not exist in older creds.py files)
@@ -176,13 +180,6 @@ try:
     from creds import logs_dir
 except ImportError:
     logs_dir = ""
-
-# Optional staff-side base URL - when set, reports carry a clickable
-# staff_link per record (the API uri is not browsable).
-try:
-    from creds import staff_url as STAFF_URL
-except ImportError:
-    STAFF_URL = ""
 
 # CSV File Configuration
 CSV_FILE = "JPCA-AV_SOURCE-ASpace_CSV_export.csv"  # Input CSV file
@@ -471,10 +468,10 @@ class ArchivesSpaceClient(ASpaceClient):
         container_data = {
             "indicator": indicator,
             "type": "AV Case",
-            "repository": {"ref": f"/repositories/{REPO_ID}"}
+            "repository": {"ref": f"/repositories/{aspace_client.REPO_ID}"}
         }
 
-        result = self.create_record(f"/repositories/{REPO_ID}/top_containers",
+        result = self.create_record(f"/repositories/{aspace_client.REPO_ID}/top_containers",
                                     container_data)
         if result:
             return result['uri']
@@ -800,7 +797,7 @@ def create_archival_object(row: Dict, client: ArchivesSpaceClient,
     
     ao_data = {
         "jsonmodel_type": "archival_object",
-        "resource": {"ref": RESOURCE_URI},
+        "resource": {"ref": aspace_client.RESOURCE_URI},
         "parent": {"ref": parent_uri},
         "level": "item",
         "publish": True
@@ -855,7 +852,7 @@ def create_archival_object(row: Dict, client: ArchivesSpaceClient,
         logging.info(f"[DRY RUN] Would create archival object: {catalog_number}")
         return {"uri": f"/dry_run/{catalog_number}", "dry_run": True}, []
     else:
-        endpoint = f"/repositories/{REPO_ID}/archival_objects"
+        endpoint = f"/repositories/{aspace_client.REPO_ID}/archival_objects"
         result = client.create_record(endpoint, ao_data)
 
         if result:
@@ -1309,6 +1306,7 @@ def process_csv_file_update_only(filename: str, client: ArchivesSpaceClient,
         "failed": 0, "skipped": 0,
         "start_time": datetime.now().isoformat(), "end_time": None,
         "dry_run": dry_run, "duplicate_mode": "update-only",
+        "environment": aspace_client.ACTIVE_ENV,
     }
     if state is not None:
         # Live objects: an escaping KeyboardInterrupt still leaves main()
@@ -1430,7 +1428,8 @@ def process_csv_file(filename: str, client: ArchivesSpaceClient,
         "start_time": datetime.now().isoformat(),
         "end_time": None,
         "dry_run": dry_run,
-        "duplicate_mode": duplicate_mode
+        "duplicate_mode": duplicate_mode,
+        "environment": aspace_client.ACTIVE_ENV,
     }
     if state is not None:
         state["results"] = results
@@ -1507,13 +1506,13 @@ def staff_link_for(uri: Optional[str]) -> str:
     built from the resource tree. Returns '' when staff_url is not set in
     creds.py or the uri is not a real archival object uri (e.g. dry runs).
     """
-    if not STAFF_URL or not uri:
+    if not aspace_client.STAFF_URL or not uri:
         return ""
-    match = re.fullmatch(rf"/repositories/{re.escape(str(REPO_ID))}"
+    match = re.fullmatch(rf"/repositories/{re.escape(str(aspace_client.REPO_ID))}"
                          rf"/archival_objects/([0-9]+)", uri)
     if not match:
         return ""
-    return (f"{STAFF_URL.rstrip('/')}/resources/{RESOURCE_ID}"
+    return (f"{aspace_client.STAFF_URL.rstrip('/')}/resources/{aspace_client.RESOURCE_ID}"
             f"#tree::archival_object_{match.group(1)}")
 
 
@@ -1682,7 +1681,13 @@ def main():
         action='store_true',
         help=argparse.SUPPRESS
     )
-    
+
+    parser.add_argument(
+        '--env',
+        metavar='NAME',
+        help=argparse.SUPPRESS
+    )
+
     duplicate_group = parser.add_mutually_exclusive_group()
     duplicate_group.add_argument(
         '--update-existing',
@@ -1713,8 +1718,30 @@ def main():
         Colors.disable()
     
     csv_file = args.file
-    username = args.username if args.username else ASPACE_USERNAME
-    password = args.password if args.password else ASPACE_PASSWORD
+
+    # Environment selection. Auto-selected at import when creds.py declares
+    # exactly one environment; with several configured there is NO default -
+    # an explicit --env is required every run, so the target is always a
+    # deliberate choice (a forgotten flag can never mean "production").
+    if args.env:
+        try:
+            aspace_client.select_environment(args.env)
+        except ValueError as e:
+            print_status("error", str(e))
+            sys.exit(1)
+    elif aspace_client.ACTIVE_ENV is None:
+        if len(aspace_client.ENVIRONMENTS) > 1:
+            print_status("error",
+                         f"Multiple environments configured "
+                         f"({', '.join(sorted(aspace_client.ENVIRONMENTS))}) - "
+                         f"pass --env NAME to choose the target")
+        else:
+            print_status("error", "No environments configured in creds.py "
+                                  "(see creds_template.py)")
+        sys.exit(1)
+
+    username = args.username if args.username else aspace_client.ASPACE_USERNAME
+    password = args.password if args.password else aspace_client.ASPACE_PASSWORD
     
     # Check credentials
     if not username or not password:
@@ -1724,12 +1751,12 @@ def main():
         sys.exit(1)
     
     # Check URL
-    if not ASPACE_URL:
+    if not aspace_client.ASPACE_URL:
         print_status("error", "Missing baseURL in creds.py")
         sys.exit(1)
-    
+
     # Check repo and resource config
-    if not REPO_ID or not RESOURCE_ID:
+    if not aspace_client.REPO_ID or not aspace_client.RESOURCE_ID:
         print_status("error", "Missing repo_id or resource_id in creds.py")
         sys.exit(1)
     
@@ -1745,8 +1772,14 @@ def main():
     # Setup
     setup_environment(args.dry_run, csv_file)
     
-    # Print header
+    # Print header - the TARGET line is the audit trail of which catalog
+    # this run touched; production gets the loud color.
     print_header("ArchivesSpace CSV Import")
+    target = (f"{aspace_client.ACTIVE_ENV.upper()} ({aspace_client.ASPACE_URL}, "
+              f"repo {aspace_client.REPO_ID}, resource {aspace_client.RESOURCE_ID})")
+    target_color = Colors.RED if aspace_client.ACTIVE_ENV == 'production' else Colors.GREEN
+    print(f"  Target: {target_color}{Colors.BOLD}{target}{Colors.RESET}")
+    logging.info(f"Target environment: {target}")
     print(f"  File: {csv_file}")
     print(f"  Mode: {duplicate_mode}")
     if args.dry_run:
@@ -1809,7 +1842,7 @@ def main():
     client = ArchivesSpaceClient(username=username, password=password)
     
     # Authenticate
-    print_status("info", f"Connecting to {ASPACE_URL}...")
+    print_status("info", f"Connecting to {aspace_client.ASPACE_URL}...")
     if not client.login():
         print_status("error", "Authentication failed")
         sys.exit(1)
