@@ -18,22 +18,26 @@
 #   resource_id - resource id of the AV resource (differs between instances!)
 #   staff_url   - optional: the staff UI you browse; enables clickable
 #                 staff_link columns in import reports
+#
+# The JPCA sandbox values below are already filled in - most people only
+# need to enter their own sandbox username and password.
 environments = {
     "sandbox": {
-        "baseURL": "URL",
+        "baseURL": "https://api-jpcsb.as.atlas-sys.com",
         "user": "your_username",
         "password": "your_password",
-        "repo_id": "number",
-        "resource_id": "number",       
-        "staff_url": "https://staff-jpcsb.as.atlas-sys.com",",
+        "repo_id": "2",
+        "resource_id": "73",
+        "staff_url": "https://staff-jpcsb.as.atlas-sys.com",
     },
+    # Production access only - uncomment and fill in:
     # "production": {
-    #     "baseURL": "URL",
+    #     "baseURL": "https://api-aspace.jpcarchive.org",
     #     "user": "your_username",
     #     "password": "your_password",
-    #     "repo_id": "number",
-    #     "resource_id": "number",
-    #     "staff_url": "",
+    #     "repo_id": "2",
+    #     "resource_id": "7",
+    #     "staff_url": "https://staff-aspace.jpcarchive.org",
     # },
 }
 
