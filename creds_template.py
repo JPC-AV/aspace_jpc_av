@@ -24,8 +24,8 @@ environments = {
         "user": "your_username",
         "password": "your_password",
         "repo_id": "number",
-        "resource_id": "number",
-        "staff_url": "",
+        "resource_id": "number",       
+        "staff_url": "https://staff-jpcsb.as.atlas-sys.com",",
     },
     # "production": {
     #     "baseURL": "URL",
