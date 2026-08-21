@@ -41,6 +41,7 @@ env/
 venv/
 ENV/
 .venv
+jpca_aspace/
 
 # IDE
 .vscode/
