@@ -27,7 +27,7 @@ environments = {
         "user": "your_username",
         "password": "your_password",
         "repo_id": "2",
-        "resource_id": "73",
+        "resource_id": "7",
         "staff_url": "https://staff-jpcsb.as.atlas-sys.com",
     },
     # Production access only - uncomment and fill in:
