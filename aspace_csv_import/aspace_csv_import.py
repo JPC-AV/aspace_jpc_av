@@ -3,7 +3,6 @@
 
 import csv
 import json
-import requests
 import os
 import sys
 import logging
@@ -171,6 +170,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 # import-time snapshot would capture the pre-selection None.
 import aspace_client
 from aspace_client import ASpaceClient
+import requests  # after aspace_client: its friendly missing-package guard runs first
 
 if not aspace_client.ENVIRONMENTS:
     print("Warning: creds.py not found. See creds_template.py in repo root for format.")

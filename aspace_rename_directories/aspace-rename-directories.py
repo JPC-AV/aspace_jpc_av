@@ -10,7 +10,17 @@ import re  # Library for working with regular expressions (text pattern matching
 import argparse  # Library for parsing command-line arguments
 import time  # Library for timing operations
 from datetime import datetime  # Library for date/time formatting
-from colorama import Fore, Style, init  # Library for adding colored output to terminal messages
+try:
+    from colorama import Fore, Style, init  # colored terminal output
+except ModuleNotFoundError:
+    sys.exit(
+        "\nERROR: the required package 'colorama' is not installed in this Python.\n"
+        "Your Python environment probably isn't active - the Terminal prompt\n"
+        "should start with a name in parentheses, e.g. (JPC_AV).\n\n"
+        "  Fix:  conda activate <your-env-name>\n"
+        "  (or)  source jpca_aspace/bin/activate\n"
+        "  If it still fails after that:  pip install -r requirements.txt\n"
+    )
 from pathlib import Path  # Library for working with file paths
 
 # Add parent directory to path for the shared client and creds.py import

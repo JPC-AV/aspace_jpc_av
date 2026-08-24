@@ -39,10 +39,23 @@ Lookups return a Lookup with status one of:
 import json
 import logging
 import re
+import sys
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
-import requests
+# The #1 support issue is running outside the Python environment - a bare
+# ModuleNotFoundError traceback tells a novice nothing. Exit with the fix.
+try:
+    import requests
+except ModuleNotFoundError:
+    sys.exit(
+        "\nERROR: the required package 'requests' is not installed in this Python.\n"
+        "Your Python environment probably isn't active - the Terminal prompt\n"
+        "should start with a name in parentheses, e.g. (JPC_AV).\n\n"
+        "  Fix:  conda activate <your-env-name>\n"
+        "  (or)  source jpca_aspace/bin/activate\n"
+        "  If it still fails after that:  pip install -r requirements.txt\n"
+    )
 
 try:
     # A payload that cannot be serialized raises BEFORE anything is sent -
