@@ -190,6 +190,13 @@ OUTPUT_DIR = logs_dir if logs_dir else DEFAULT_OUTPUT_DIR
 # Timestamp + PID: two runs started in the same second must not share
 # report paths (the second would overwrite the first's audit trail).
 _RUN_STAMP = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{os.getpid()}"
+
+# The command line as invoked, reconstructed for the audit trail (logged in
+# the run header and recorded in the JSON report summary) - reports proved
+# ambiguous without it when a run's flags were in question.
+import shlex as _shlex
+RUN_COMMAND = " ".join([os.path.basename(sys.executable)]
+                       + [_shlex.quote(a) for a in sys.argv])
 LOG_FILE = f"{OUTPUT_DIR}/csv_import_{_RUN_STAMP}.log"
 CSV_REPORT = f"{OUTPUT_DIR}/import_report_{_RUN_STAMP}.csv"
 JSON_REPORT = f"{OUTPUT_DIR}/import_report_{_RUN_STAMP}.json"
@@ -1307,6 +1314,7 @@ def process_csv_file_update_only(filename: str, client: ArchivesSpaceClient,
         "start_time": datetime.now().isoformat(), "end_time": None,
         "dry_run": dry_run, "duplicate_mode": "update-only",
         "environment": aspace_client.ACTIVE_ENV,
+        "command": RUN_COMMAND,
     }
     if state is not None:
         # Live objects: an escaping KeyboardInterrupt still leaves main()
@@ -1430,6 +1438,7 @@ def process_csv_file(filename: str, client: ArchivesSpaceClient,
         "dry_run": dry_run,
         "duplicate_mode": duplicate_mode,
         "environment": aspace_client.ACTIVE_ENV,
+        "command": RUN_COMMAND,
     }
     if state is not None:
         state["results"] = results
@@ -1780,6 +1789,7 @@ def main():
     target_color = Colors.RED if aspace_client.ACTIVE_ENV == 'production' else Colors.GREEN
     print(f"  Target: {target_color}{Colors.BOLD}{target}{Colors.RESET}")
     logging.info(f"Target environment: {target}")
+    logging.info(f"Command: {RUN_COMMAND}")
     print(f"  File: {csv_file}")
     print(f"  Mode: {duplicate_mode}")
     if args.dry_run:

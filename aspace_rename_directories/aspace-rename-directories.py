@@ -1028,8 +1028,12 @@ def main():
     start_time = time.time()
     
     # Log script start
+    import shlex as _shlex
+    run_command = " ".join([os.path.basename(sys.executable)]
+                           + [_shlex.quote(a) for a in sys.argv])
     logging.info("=" * 60)
     logging.info("ArchivesSpace Directory Processing Script Started")
+    logging.info(f"Command: {run_command}")
     # The Target line is the audit trail of which catalog this run touched;
     # production gets the loud color on the console (stripped in the file log).
     target = (f"{aspace_client.ACTIVE_ENV.upper()} ({aspace_client.ASPACE_URL}, "
