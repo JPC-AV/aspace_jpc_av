@@ -10,17 +10,6 @@ import re  # Library for working with regular expressions (text pattern matching
 import argparse  # Library for parsing command-line arguments
 import time  # Library for timing operations
 from datetime import datetime  # Library for date/time formatting
-try:
-    from colorama import Fore, Style, init  # colored terminal output
-except ModuleNotFoundError:
-    sys.exit(
-        "\nERROR: the required package 'colorama' is not installed in this Python.\n"
-        "Your Python environment probably isn't active - the Terminal prompt\n"
-        "should start with a name in parentheses, e.g. (JPC_AV).\n\n"
-        "  Fix:  conda activate <your-env-name>\n"
-        "  (or)  source jpca_aspace/bin/activate\n"
-        "  If it still fails after that:  pip install -r requirements.txt\n"
-    )
 from pathlib import Path  # Library for working with file paths
 
 # Add parent directory to path for the shared client and creds.py import
@@ -31,8 +20,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 # (aspace_client.py at the repo root). Constants are read THROUGH the module
 # (aspace_client.X): the environment is selected in main() after argument
 # parsing, so an import-time snapshot would capture the pre-selection None.
+# Imported BEFORE colorama: the client carries the friendly missing-package
+# exit (and its own guard for requests).
 import aspace_client
 from aspace_client import ASpaceClient
+
+try:
+    from colorama import Fore, Style, init  # colored terminal output
+except ModuleNotFoundError:
+    aspace_client.missing_package_exit("colorama")
 
 if not aspace_client.ENVIRONMENTS:
     print(f"{Fore.RED}Error: creds.py not found or missing required fields{Style.RESET_ALL}")

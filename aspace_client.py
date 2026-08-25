@@ -45,17 +45,29 @@ from typing import Dict, List, Optional
 
 # The #1 support issue is running outside the Python environment - a bare
 # ModuleNotFoundError traceback tells a novice nothing. Exit with the fix.
+def missing_package_exit(package: str) -> None:
+    """Exit with a colored, novice-friendly explanation for a missing
+    third-party package (= the environment isn't active). Raw ANSI codes on
+    purpose: colorama itself may be the missing package. Colors only when
+    stderr is a real terminal, so piped/captured output stays clean."""
+    if sys.stderr.isatty():
+        red, cyan, bold, reset = "\033[91m", "\033[96m", "\033[1m", "\033[0m"
+    else:
+        red = cyan = bold = reset = ""
+    sys.exit(
+        f"\n{red}{bold}ERROR: the required package '{package}' is not installed in this Python.{reset}\n"
+        f"Your Python environment probably isn't active - the Terminal prompt\n"
+        f"should start with a name in parentheses, e.g. {bold}(JPC_AV){reset}.\n\n"
+        f"  Fix:  {cyan}conda activate <your-env-name>{reset}\n"
+        f"  (or)  {cyan}source jpca_aspace/bin/activate{reset}\n"
+        f"  If it still fails after that:  {cyan}pip install -r requirements.txt{reset}\n"
+    )
+
+
 try:
     import requests
 except ModuleNotFoundError:
-    sys.exit(
-        "\nERROR: the required package 'requests' is not installed in this Python.\n"
-        "Your Python environment probably isn't active - the Terminal prompt\n"
-        "should start with a name in parentheses, e.g. (JPC_AV).\n\n"
-        "  Fix:  conda activate <your-env-name>\n"
-        "  (or)  source jpca_aspace/bin/activate\n"
-        "  If it still fails after that:  pip install -r requirements.txt\n"
-    )
+    missing_package_exit("requests")
 
 try:
     # A payload that cannot be serialized raises BEFORE anything is sent -
