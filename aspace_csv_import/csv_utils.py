@@ -226,10 +226,18 @@ def validate_csv_structure(filename: str, update_only: bool = False) -> Dict:
                     results["warnings"].append(
                         f"Not in CSV, will be left untouched: {', '.join(unmanaged)}")
             else:
-                for column in required_columns:
-                    if column not in headers:
-                        results["valid"] = False
+                missing = [c for c in required_columns if c not in headers]
+                if missing:
+                    results["valid"] = False
+                    for column in missing:
                         results["errors"].append(f"Missing required column: {column}")
+                    # Same hint as the importer: a catalog + mutable-column
+                    # sheet is probably a narrow update sheet missing its flag.
+                    if (col.CATALOG in headers
+                            and any(c in headers for c in col.MUTABLE_COLUMNS)):
+                        results["errors"].append(
+                            "Is this a narrow update sheet? Validate it with "
+                            "--update-only added to this command.")
 
             # Check for unexpected columns
             for column in headers:

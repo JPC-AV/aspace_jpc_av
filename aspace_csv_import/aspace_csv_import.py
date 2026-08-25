@@ -308,7 +308,17 @@ def validate_csv_before_import(filename: str, update_only: bool = False) -> Tupl
                         missing_columns.append(column)
 
                 if missing_columns:
-                    errors.append(f"Missing required columns: {', '.join(missing_columns)}")
+                    message = f"Missing required columns: {', '.join(missing_columns)}"
+                    # A sheet with the catalog column plus at least one
+                    # updatable column looks like a narrow update sheet run
+                    # without its flag - the second-most-common mistake in
+                    # team testing. Teach the fix in the error itself.
+                    if (col.CATALOG in headers
+                            and any(c in headers for c in col.MUTABLE_COLUMNS)):
+                        message += ("  (Is this a narrow update sheet? Updating "
+                                    "existing records only needs --update-only "
+                                    "on this command.)")
+                    errors.append(message)
                     return False, errors, warnings
 
             # Validate each row
