@@ -73,7 +73,7 @@ python aspace_csv_import.py -f your_file.csv
 | Flag | Behavior |
 |------|----------|
 | (default) | Skip records with existing component_id |
-| `--update-existing` | Update existing records if data changed |
+| `--update-only` | Update existing records if data changed; never creates |
 | `--fail-on-duplicate` | Stop entire import on first duplicate |
 
 ## Step 6: Verify in ArchivesSpace
@@ -141,7 +141,7 @@ python aspace_csv_import.py -f file.csv --dry-run
 python aspace_csv_import.py -f file.csv
 
 # Import with update mode
-python aspace_csv_import.py -f file.csv --update-existing
+python aspace_csv_import.py --update-only -f file.csv
 
 # Post-digitization: update ASpace and rename directories
 python aspace-rename-directories.py -d /path/to/videos

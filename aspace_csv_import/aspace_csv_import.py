@@ -100,9 +100,8 @@ CLI_OPTIONS = [
 ]
 DUPLICATE_OPTIONS = [
     ("--skip-duplicates", "", "Skip existing records (default)"),
-    ("--update-existing", "", "Update existing records with CSV data"),
     ("--fail-on-duplicate", "", "Stop import on first duplicate"),
-    ("--update-only", "", "Strict updates from a narrow CSV; never creates"),
+    ("--update-only", "", "Update existing records (narrow or full CSV); never creates"),
 ]
 
 
@@ -143,7 +142,6 @@ def get_colored_help():
 {C.BOLD}EXAMPLES{C.RESET}
     {C.GREEN}${C.RESET} python3 aspace_csv_import.py -f data.csv
     {C.GREEN}${C.RESET} python3 aspace_csv_import.py -f data.csv --dry-run
-    {C.GREEN}${C.RESET} python3 aspace_csv_import.py -f data.csv --update-existing
     {C.GREEN}${C.RESET} python3 aspace_csv_import.py -f data.csv -u admin -p secret
 
 {C.BOLD}CSV COLUMNS{C.RESET} {C.DIM}(all required for create/upsert runs; --update-only accepts a subset){C.RESET}
@@ -1147,51 +1145,20 @@ def process_csv_row(row: Dict, row_num: int, client: ArchivesSpaceClient,
                                     f"({dup_count} existing records)")
             return result
 
-        existing = dup_count == 1
-
-        if existing:
+        # An existing record is never touched by a create-mode run: it is
+        # skipped (default) or halts the run (--fail-on-duplicate). Updating
+        # existing records is --update-only's job - it refuses to create, so
+        # a typo'd catalog number can never silently become a new record.
+        if dup_count == 1:
             if duplicate_mode == 'fail':
                 result["status"] = "error"
                 result["message"] = f"Duplicate found: {catalog_number}"
                 raise DuplicateStop(f"Duplicate component ID: {catalog_number}")
-                
-            elif duplicate_mode == 'skip':
-                result["status"] = "skipped"
-                result["message"] = "Duplicate - skipped"
-                logging.info(f"Skipped duplicate: {catalog_number} (exists at {existing_uri})")
-                return result
-                
-            elif duplicate_mode == 'update':
-                ao_result, changes, errors = update_archival_object(row, client, existing_uri, dry_run)
-                
-                if errors:
-                    result["status"] = "error"
-                    result["message"] = "; ".join(errors)
-                    logging.error(f"Error updating {catalog_number}: {'; '.join(errors)}")
-                    return result
-                
-                if ao_result:
-                    if ao_result.get('unchanged'):
-                        result["status"] = "unchanged"
-                        result["message"] = "No changes needed"
-                        logging.info(f"Unchanged: {catalog_number} (no updates needed)")
-                    else:
-                        result["status"] = "updated"
-                        result["changes"] = changes
-                        result["message"] = f"Updated: {', '.join(changes.keys())}" if changes else "Updated"
-                        if dry_run:
-                            logging.info(f"[DRY RUN] Would update: {catalog_number} - {', '.join(changes.keys())}")
-                        else:
-                            logging.info(f"Updated: {catalog_number} - {', '.join(changes.keys())}")
-                    result["uri"] = ao_result.get('uri', existing_uri)
-                    result["ref_id"] = ao_result.get('ref_id', '')
-                else:
-                    result["status"] = "error"
-                    result["message"] = "Failed to update"
-                    logging.error(f"Failed to update: {catalog_number}")
-                
-                return result
-        
+            result["status"] = "skipped"
+            result["message"] = "Duplicate - skipped (use --update-only to change existing records)"
+            logging.info(f"Skipped duplicate: {catalog_number} (exists at {existing_uri})")
+            return result
+
         # Parent RefID is REQUIRED
         parent_ref_id = row.get(col.PARENT_REFID, '').strip()
         if not parent_ref_id:
@@ -1709,11 +1676,6 @@ def main():
 
     duplicate_group = parser.add_mutually_exclusive_group()
     duplicate_group.add_argument(
-        '--update-existing',
-        action='store_true',
-        help=argparse.SUPPRESS
-    )
-    duplicate_group.add_argument(
         '--skip-duplicates',
         action='store_true',
         default=True,
@@ -1781,8 +1743,6 @@ def main():
     
     if args.update_only:
         duplicate_mode = 'update-only'
-    elif args.update_existing:
-        duplicate_mode = 'update'
     elif args.fail_on_duplicate:
         duplicate_mode = 'fail'
     else:

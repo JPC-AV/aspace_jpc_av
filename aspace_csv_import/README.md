@@ -139,7 +139,7 @@ cp creds_template.py creds.py
 # Run commands (with creds.py configured):
 python aspace_csv_import.py -n -f your_file.csv              # Dry run
 python aspace_csv_import.py -f your_file.csv                 # Create records
-python aspace_csv_import.py --update-existing -f your_file.csv  # Update existing
+python aspace_csv_import.py --update-only -f your_file.csv   # Update existing
 
 # Or use command-line credentials:
 python aspace_csv_import.py -f your_file.csv -u username -p 'password'
@@ -158,9 +158,8 @@ Options:
 
 Duplicate Handling (choose one):
   --skip-duplicates     Skip existing records (DEFAULT)
-  --update-existing     Update existing records if data changed
   --fail-on-duplicate   Stop import on first duplicate
-  --update-only         Strict updates from a narrow CSV; never creates
+  --update-only         Update existing records (narrow or full CSV); never creates
 ```
 
 ## Duplicate Handling Modes
@@ -173,14 +172,21 @@ python aspace_csv_import.py -f file.csv
 - Creates only new records
 - Safe for re-running imports
 
-### Update
+### Update (--update-only)
 ```bash
-python aspace_csv_import.py --update-existing -f file.csv
+python aspace_csv_import.py --update-only -f file.csv
 ```
-- Detects what fields have changed
-- Only updates if data differs
-- Shows "unchanged" for records with no differences
-- Displays what changed (title, dates, extents, description)
+- NEVER creates records: every catalog number must already exist, or the
+  whole run aborts before writing anything (a typo'd number can't silently
+  become a new record)
+- Works with a full sheet or a narrow one (CATALOG_NUMBER + just the
+  columns to change); absent columns are left untouched
+- Detects what fields have changed; only updates if data differs
+- Shows "unchanged" for records with no differences and displays what
+  changed (title, dates, extents, description)
+- Mixed sheet with genuinely new records? Run the default create mode
+  first (new rows created, existing skipped), wait a minute for the
+  search index, then --update-only for the changes
 
 ### Fail
 ```bash
@@ -287,7 +293,7 @@ Duration is **not** imported by `aspace_csv_import.py`. Instead, `aspace-rename-
 This provides more accurate duration data than CSV estimates.
 
 ### What Update Mode Changes
-When using `--update-existing`:
+When using `--update-only`:
 - ✅ Title
 - ✅ Dates (merged by label — a supplied date replaces only the same-label date; others are preserved)
 - ✅ Extents (format type — only on records with a single extent; multi-extent records are never collapsed, and changing one errors the row)
