@@ -11,6 +11,9 @@ aspace_csv_import/tests/
 aspace_rename_directories/tests/
 __tests__/
 
+# Local source data (Airtable exports staged for import)
+__airtable_exports__/
+
 # Generated reports and logs
 import_reports/
 export_reports/
