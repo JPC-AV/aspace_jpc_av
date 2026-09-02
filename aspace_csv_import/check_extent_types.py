@@ -123,9 +123,6 @@ def get_colored_help():
     {C.GREEN}${C.RESET} python3 check_extent_types.py
     {C.GREEN}${C.RESET} python3 check_extent_types.py data.csv
     {C.GREEN}${C.RESET} python3 check_extent_types.py data.csv -u admin -p secret
-
-{C.BOLD}OUTPUT{C.RESET}
-    Valid extent types saved to: {C.CYAN}valid_extent_types.txt{C.RESET}
 """
     return help_text
 
@@ -274,15 +271,6 @@ def main():
         print_section(f"Valid Extent Types ({len(valid_types)})")
         for i, extent_type in enumerate(valid_types, 1):
             print(f"  {Colors.DIM}{i:3}.{Colors.RESET} {extent_type}")
-        
-        # Save to file
-        output_file = "valid_extent_types.txt"
-        with open(output_file, 'w') as f:
-            f.write("# Valid Extent Types in ArchivesSpace\n")
-            f.write("# Copy these exactly as shown into your CSV\n\n")
-            for extent_type in valid_types:
-                f.write(f"{extent_type}\n")
-        print(f"\n  Saved to: {Colors.CYAN}{output_file}{Colors.RESET}")
         
         # Check CSV if provided
         if args.csv_file:

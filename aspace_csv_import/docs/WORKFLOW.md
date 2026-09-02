@@ -50,7 +50,6 @@ Check that "Original Format" values match ArchivesSpace dropdown:
 python check_extent_types.py your_file.csv
 ```
 
-**Output:** `valid_extent_types.txt`
 
 ## Step 4: Dry Run
 
