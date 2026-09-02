@@ -9,6 +9,7 @@ credentials.json
 # Local-only test suites (not pushed to GitHub)
 aspace_csv_import/tests/
 aspace_rename_directories/tests/
+__tests__/
 
 # Generated reports and logs
 import_reports/
