@@ -494,25 +494,28 @@ class ASpaceClient:
         return self._request("DELETE", uri) is not None
 
     # -- verified lookups ---------------------------------------------------
-    def _verified_search(self, params: Dict, matches, uri_prefix: str) -> Optional[List]:
-        """Paginated search returning (uri, record) pairs for verified hits.
+    def _search_hit_uris(self, params: Dict, uri_prefix: str,
+                         page_size: int = 10,
+                         max_hits: int = 10000) -> Optional[List]:
+        """Paginated search returning every hit's canonical uri, in order.
 
-        Every candidate is fetched and must pass matches(record). Each hit uri
-        must be a string inside uri_prefix (the expected collection in OUR
-        repository - a cross-repository uri must never be verified, then
-        embedded in a record we write), and the fetched record must identify
-        itself as that uri. Returns None when the search or any candidate
-        fetch fails - callers fail closed. This is the single hardening point
-        for every record lookup.
+        The walk-integrity half of a verified lookup: every hit uri must be a
+        string inside uri_prefix (the expected collection in OUR repository),
+        page counts must reconcile with total_hits, repeats and shape
+        anomalies fail the walk. No candidate records are fetched here -
+        callers either verify each candidate (_verified_search) or fetch what
+        they use and check it themselves. Returns None on any anomaly -
+        callers fail closed; a partial walk is never returned as success.
         """
         from urllib.parse import urlencode
-        verified = []
+        uris = []
         hits_seen = 0
         seen_uris = set()
         total_hits = None
         page = 1
         while True:
-            query = urlencode({**params, "page": page, "page_size": 10}, doseq=True)
+            query = urlencode({**params, "page": page, "page_size": page_size},
+                              doseq=True)
             result = self.get(f"/repositories/{REPO_ID}/search?{query}")
             # Shape-check everything before touching it: a syntactically valid
             # JSON response of the wrong shape (results: null, a hit that isn't
@@ -528,12 +531,14 @@ class ASpaceClient:
                 return None
             if total_hits is None:
                 total_hits = result["total_hits"]
-                # Our queries target a single identifier; thousands of hits
-                # means a mangled response or a broken query, and walking a
-                # bottomless result set would hang the run. Fail closed.
-                if total_hits > 10000:
-                    logging.error(f"Search claims {total_hits} hits for a "
-                                  f"single-identifier query - failing lookup")
+                # A cap on the walk: lookups target a single identifier (a
+                # few hits at most), enumerations pass a bound sized to the
+                # resource. Beyond it means a mangled response or a broken
+                # query, and walking a bottomless result set would hang the
+                # run. Fail closed.
+                if total_hits > max_hits:
+                    logging.error(f"Search claims {total_hits} hits "
+                                  f"(cap {max_hits}) - failing lookup")
                     return None
             elif result["total_hits"] != total_hits:
                 return None  # total changed between pages - can't trust the walk
@@ -562,26 +567,7 @@ class ASpaceClient:
                     logging.error(f"Search returned duplicate hit {uri} - failing lookup")
                     return None
                 seen_uris.add(uri)
-                record = self.get(uri)
-                if record is None:
-                    return None  # can't verify the candidate - don't guess
-                if not isinstance(record, dict):
-                    return None
-                if record.get("uri") != uri:
-                    # The fetched record must identify as the uri we asked
-                    # for; anything else means the response can't be trusted.
-                    logging.error(f"Record fetched from {uri} identifies as "
-                                  f"{record.get('uri')!r} - failing lookup")
-                    return None
-                # The matcher indexes nested fields; malformed nesting (e.g.
-                # resource: []) must fail the lookup, not raise out of it.
-                try:
-                    matched = matches(record)
-                except (AttributeError, TypeError, KeyError):
-                    logging.error(f"Malformed candidate record at {uri} - failing lookup")
-                    return None
-                if matched:
-                    verified.append((uri, record))
+                uris.append(uri)
             last_page = result.get("last_page")
             if type(last_page) is not int:
                 # Missing/invalid pagination metadata means we can't know
@@ -597,7 +583,7 @@ class ASpaceClient:
             # Solr response). Without this bound, a response advertising an
             # ever-growing last_page walks forever - and the hits_seen check
             # sits AFTER the loop, so it would never fire.
-            pages_for_total = max(1, -(-total_hits // 10))  # ceil(total/10)
+            pages_for_total = max(1, -(-total_hits // page_size))  # ceil
             if last_page > pages_for_total:
                 logging.error(f"Search claims last_page={last_page} but only "
                               f"{total_hits} hits - failing lookup")
@@ -613,6 +599,56 @@ class ASpaceClient:
             logging.error(f"Search returned {hits_seen} hits but claimed "
                           f"total_hits={total_hits} - failing lookup")
             return None
+        return uris
+
+    def search_record_uris(self, params: Dict, uri_prefix: str,
+                           max_hits: int = 500000) -> Optional[List]:
+        """Enumerate every search hit's canonical uri (no candidate fetches).
+
+        For bulk enumeration (e.g. the export tool listing a whole resource):
+        the full walk-integrity checking of a lookup, but callers fetch the
+        records themselves and MUST verify what they fetch (at minimum, that
+        each record identifies as its uri and belongs to the expected
+        resource) - a search hit is an index claim, not a record. The index
+        also lags writes by up to about a minute, so records created moments
+        ago may be missing. Returns None on any anomaly.
+        """
+        return self._search_hit_uris(params, uri_prefix, page_size=250,
+                                     max_hits=max_hits)
+
+    def _verified_search(self, params: Dict, matches, uri_prefix: str) -> Optional[List]:
+        """Paginated search returning (uri, record) pairs for verified hits.
+
+        Every candidate from the walk is fetched, must identify itself as the
+        uri it was fetched from, and must pass matches(record). Returns None
+        when the walk or any candidate fetch fails - callers fail closed.
+        This is the single hardening point for every record lookup.
+        """
+        uris = self._search_hit_uris(params, uri_prefix)
+        if uris is None:
+            return None
+        verified = []
+        for uri in uris:
+            record = self.get(uri)
+            if record is None:
+                return None  # can't verify the candidate - don't guess
+            if not isinstance(record, dict):
+                return None
+            if record.get("uri") != uri:
+                # The fetched record must identify as the uri we asked
+                # for; anything else means the response can't be trusted.
+                logging.error(f"Record fetched from {uri} identifies as "
+                              f"{record.get('uri')!r} - failing lookup")
+                return None
+            # The matcher indexes nested fields; malformed nesting (e.g.
+            # resource: []) must fail the lookup, not raise out of it.
+            try:
+                matched = matches(record)
+            except (AttributeError, TypeError, KeyError):
+                logging.error(f"Malformed candidate record at {uri} - failing lookup")
+                return None
+            if matched:
+                verified.append((uri, record))
         return verified
 
     @staticmethod

@@ -76,7 +76,9 @@ def build_row(record, parent_refid):
     """Map one archival object record to an import-shaped CSV row.
 
     Returns (row_dict, warnings) where warnings lists the structures the
-    importer would refuse to edit on this record.
+    importer would refuse to edit on this record, plus metadata gaps worth
+    fixing: no component ID (the record is unreachable by anything keyed on
+    catalog number), no title, no dates.
     """
     warnings = []
     row = {
@@ -84,8 +86,19 @@ def build_row(record, parent_refid):
         col.PARENT_REFID: parent_refid or "",
         col.TITLE: record.get("title") or "",
     }
+    # Gap flags by cataloging rule: only item-level records carry component
+    # IDs; every archival object needs a title and a date EXCEPT file-level
+    # nodes, which are generic organizing buckets (Edited/Raw/Promo), not
+    # intellectual archival levels - they need neither dates nor IDs.
+    level = record.get("level")
+    if level == "item" and not row[col.CATALOG]:
+        warnings.append("no component ID in ASpace")
+    if not row[col.TITLE]:
+        warnings.append("no Title in ASpace")
 
     dates = record.get("dates") or []
+    if level != "file" and not dates:
+        warnings.append("no Date in ASpace")
     for column, label in col.DATE_COLUMNS:
         matching = [d for d in dates if d.get("label") == label]
         row[column] = (matching[0].get("begin") or "") if matching else ""
@@ -116,33 +129,29 @@ def build_row(record, parent_refid):
     return row, warnings
 
 
-def list_resource_records(client, level):
-    """Enumerate the AV resource's archival objects in tree order.
+def list_resource_records(client):
+    """Enumerate EVERY archival object in the AV resource via the search index.
 
-    One cheap call returns every record uri in the resource with its level -
-    so the level filter happens BEFORE any record is fetched. Returns a list
-    of numeric ids, or None on failure (callers abort; a partial enumeration
-    must never masquerade as the whole resource).
+    The tree's /ordered_records endpoint was abandoned here: it silently
+    omits unpublished nodes AND their entire subtrees, so records verifiably
+    in the resource were missing from its listing - an incomplete export
+    masquerading as complete. The search index sees records regardless of
+    publish status. (It lags writes by up to about a minute, so a record
+    created moments ago may be missing - same caveat as the importer's
+    duplicate checks.)
+
+    Level filtering happens after the fetch - the index enumerates uris only.
+    Returns a list of numeric ids, or None on failure (callers abort; a
+    partial enumeration must never masquerade as the whole resource).
     """
-    listing = client.get(f"/repositories/{aspace_client.REPO_ID}/resources/"
-                         f"{aspace_client.RESOURCE_ID}/ordered_records")
-    if not isinstance(listing, dict) or not isinstance(listing.get("uris"), list):
-        return None
     prefix = f"/repositories/{aspace_client.REPO_ID}/archival_objects/"
-    ids = []
-    for entry in listing["uris"]:
-        if not isinstance(entry, dict):
-            return None
-        ref = entry.get("ref") or ""
-        if not ref.startswith(prefix):
-            continue  # the resource record itself, or non-AO rows
-        if level != "all" and entry.get("level") != level:
-            continue
-        tail = ref.rsplit("/", 1)[-1]
-        if not tail.isdigit():
-            return None  # untrustworthy listing - don't guess
-        ids.append(int(tail))
-    return ids
+    uris = client.search_record_uris(
+        {"q": f'resource:"{aspace_client.RESOURCE_URI}"',
+         "type[]": "archival_object"},
+        uri_prefix=prefix)
+    if uris is None:
+        return None
+    return [int(uri.rsplit("/", 1)[-1]) for uri in uris]
 
 
 def fetch_records(client, ids):
@@ -236,14 +245,15 @@ def export_records(client, level, parent_filter_refid=None):
     """Pull, filter, and map every matching record.
 
     Returns (rows, anomalies) or (None, reason) on failure. anomalies counts
-    records skipped for not belonging to the configured resource - should
-    always be 0, kept as a tripwire.
+    fetched records that don't belong to the configured resource - the guard
+    against stale search-index hits (the index, not the tree, is the
+    enumeration source; an index claim is verified against the record).
     """
-    ids = list_resource_records(client, level)
+    ids = list_resource_records(client)
     if ids is None:
         return None, "could not enumerate the resource's records"
-    print_status("info", f"{len(ids)} record(s) match level "
-                         f"'{level}' - fetching in batches of {BATCH}...")
+    print_status("info", f"{len(ids)} record(s) in the resource - "
+                         f"fetching in batches of {BATCH}...")
 
     records = fetch_records(client, ids)
     if records is None:
@@ -264,7 +274,9 @@ def export_records(client, level, parent_filter_refid=None):
     for record in records:
         resource_ref = (record.get("resource") or {}).get("ref")
         if resource_ref != aspace_client.RESOURCE_URI:
-            anomalies += 1  # should be impossible via ordered_records
+            anomalies += 1  # stale index hit: record no longer in the resource
+            continue
+        if level != "all" and record.get("level") != level:
             continue
         parent_uri = (record.get("parent") or {}).get("ref") or ""
         if parent_filter_uri and parent_uri != parent_filter_uri:
@@ -334,7 +346,9 @@ def main():
     print_header("ArchivesSpace CSV Export")
     target = (f"{aspace_client.ACTIVE_ENV.upper()} ({aspace_client.ASPACE_URL}, "
               f"repo {aspace_client.REPO_ID}, resource {aspace_client.RESOURCE_ID})")
-    print(f"  Target: {Colors.BOLD}{target}{Colors.RESET}")
+    # Production gets the loud color, same convention as the importer.
+    target_color = Colors.RED if aspace_client.ACTIVE_ENV == 'production' else Colors.GREEN
+    print(f"  Target: {target_color}{Colors.BOLD}{target}{Colors.RESET}")
     print(f"  Command: {RUN_COMMAND}")
     if args.list_file:
         print(f"  List: {args.list_file}")
@@ -371,11 +385,19 @@ def main():
     flagged = sum(1 for r in rows if r.get("Warnings"))
     print_status("success", f"Exported {len(rows)} record(s) to: {out_path}")
     if flagged:
-        print_status("warning", f"{flagged} record(s) have Warnings - those rows "
-                                f"hold structures --update-only will refuse to edit")
+        print_status("warning", f"{flagged} record(s) have Warnings - metadata gaps "
+                                f"(no component ID/title/date) or structures "
+                                f"--update-only will refuse to edit:")
+        for r in rows:
+            if r.get("Warnings"):
+                label = r.get(col.CATALOG) or f"(no catalog number) {r.get(col.TITLE) or '(no title)'}"
+                print_status("warning", f"{label}: {r['Warnings']}", indent=1)
+                if r.get("ASpace Staff Link"):
+                    print(f"       {Colors.DIM}{r['ASpace Staff Link']}{Colors.RESET}")
     if anomalies:
-        print_status("warning", f"{anomalies} record(s) skipped: outside the "
-                                f"configured resource (should never happen - report this)")
+        print_status("warning", f"{anomalies} record(s) skipped: the search index "
+                                f"listed them but the fetched record is not in the "
+                                f"configured resource (stale index entry)")
     if problems:
         print_status("error", f"{len(problems)} listed number(s) could NOT be exported:")
         for problem in problems:
