@@ -332,7 +332,11 @@ The script validates:
 
 ## Reports
 
-Generated in `~/aspace_import_reports/` directory:
+Generated in `~/aspace_import_reports/` by default. Setting `logs_dir` in
+creds.py moves them to `<logs_dir>/import_reports/` (each tool gets its own
+subfolder there: `import_reports/`, `export_reports/`, `rename_reports/`).
+
+Files:
 
 - `csv_import_YYYYMMDD_HHMMSS.log` - Detailed log file
 - `import_report_YYYYMMDD_HHMMSS.csv` - Row-by-row results

@@ -45,9 +45,10 @@ except ImportError:
 # Initialize Colorama for cross-platform compatibility of colored terminal output
 init(autoreset=True)
 
-# Output Configuration - use custom logs_dir if provided, otherwise default
+# Output Configuration - a custom logs_dir gets a per-script subfolder so the
+# import/export/rename tools sharing one creds setting don't interleave files.
 DEFAULT_OUTPUT_DIR = os.path.expanduser("~/aspace_rename_reports")
-OUTPUT_DIR = logs_dir if logs_dir else DEFAULT_OUTPUT_DIR
+OUTPUT_DIR = os.path.join(logs_dir, "rename_reports") if logs_dir else DEFAULT_OUTPUT_DIR
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 LOG_FILE = f"{OUTPUT_DIR}/rename_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
 

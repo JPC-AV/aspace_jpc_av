@@ -190,9 +190,10 @@ except ImportError:
 # CSV File Configuration
 CSV_FILE = "JPCA-AV_SOURCE-ASpace_CSV_export.csv"  # Input CSV file
 
-# Output Configuration - use custom logs_dir if provided, otherwise default
+# Output Configuration - a custom logs_dir gets a per-script subfolder so the
+# import/export/rename tools sharing one creds setting don't interleave files.
 DEFAULT_OUTPUT_DIR = os.path.expanduser("~/aspace_import_reports")
-OUTPUT_DIR = logs_dir if logs_dir else DEFAULT_OUTPUT_DIR
+OUTPUT_DIR = os.path.join(logs_dir, "import_reports") if logs_dir else DEFAULT_OUTPUT_DIR
 # Timestamp + PID: two runs started in the same second must not share
 # report paths (the second would overwrite the first's audit trail).
 _RUN_STAMP = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{os.getpid()}"

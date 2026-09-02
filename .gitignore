@@ -13,6 +13,8 @@ __tests__/
 
 # Generated reports and logs
 import_reports/
+export_reports/
+rename_reports/
 validation_report_*.json
 parent_lookup_*.csv
 *_cleaned.csv

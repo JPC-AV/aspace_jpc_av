@@ -66,8 +66,10 @@ try:
     from creds import logs_dir
 except ImportError:
     logs_dir = ""
+# A custom logs_dir gets a per-script subfolder (matching the importer/rename
+# convention) so the tools sharing one creds setting don't interleave files.
 DEFAULT_OUTPUT_DIR = os.path.expanduser("~/aspace_import_reports")
-OUTPUT_DIR = logs_dir if logs_dir else DEFAULT_OUTPUT_DIR
+OUTPUT_DIR = os.path.join(logs_dir, "export_reports") if logs_dir else DEFAULT_OUTPUT_DIR
 
 
 def build_row(record, parent_refid):
