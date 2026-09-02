@@ -57,7 +57,7 @@ python check_extent_types.py your_file.csv
 Test the import without creating any records:
 
 ```bash
-python aspace_csv_import.py -f your_file.csv --dry-run
+python aspace_csv_import.py --create-records -f your_file.csv --dry-run
 ```
 
 Review the output. All rows should show `+` (would create) with no errors.
@@ -65,16 +65,16 @@ Review the output. All rows should show `+` (would create) with no errors.
 ## Step 5: Run Actual Import
 
 ```bash
-python aspace_csv_import.py -f your_file.csv
+python aspace_csv_import.py --create-records -f your_file.csv
 ```
 
-**Duplicate Handling Options:**
+**Modes (one required):**
 
 | Flag | Behavior |
 |------|----------|
-| (default) | Skip records with existing component_id |
+| `--create-records` | Create records; aborts before writing if ANY row already exists |
+| `--create-records --skip-duplicates` | Create new rows, skip existing ones (mixed sheets) |
 | `--update-only` | Update existing records if data changed; never creates |
-| `--fail-on-duplicate` | Stop entire import on first duplicate |
 
 ## Step 6: Verify in ArchivesSpace
 
@@ -135,10 +135,10 @@ python csv_utils.py --validate file.csv
 python csv_utils.py --parents file.csv
 
 # Dry run import
-python aspace_csv_import.py -f file.csv --dry-run
+python aspace_csv_import.py --create-records -f file.csv --dry-run
 
 # Actual import
-python aspace_csv_import.py -f file.csv
+python aspace_csv_import.py --create-records -f file.csv
 
 # Import with update mode
 python aspace_csv_import.py --update-only -f file.csv

@@ -98,10 +98,18 @@ CLI_OPTIONS = [
     ("--env NAME", "", "Target environment from creds.py (required when several are configured)"),
     ("--no-color", "", "Disable colored output"),
 ]
-DUPLICATE_OPTIONS = [
-    ("--skip-duplicates", "", "Skip existing records (default)"),
-    ("--fail-on-duplicate", "", "Stop import on first duplicate"),
-    ("--update-only", "", "Update existing records (narrow or full CSV); never creates"),
+# Human-readable labels for the internal duplicate_mode tokens (which are
+# what the JSON report summaries record).
+MODE_LABELS = {
+    'create': 'create-records (abort if any record already exists)',
+    'skip': 'create-records --skip-duplicates (create new, skip existing)',
+    'update-only': 'update-only (never creates)',
+}
+
+MODE_OPTIONS = [
+    ("--create-records", "(pick one)", "Create records; aborts before writing if ANY row already exists"),
+    ("--update-only", "(pick one)", "Update existing records (narrow or full CSV); never creates"),
+    ("--skip-duplicates", "", "With --create-records: create new rows, skip existing ones"),
 ]
 
 
@@ -131,20 +139,20 @@ def get_colored_help():
     {C.GREEN}3.{C.RESET} Creates top containers (AV Case) for each item
 
 {C.BOLD}USAGE{C.RESET}
-    {C.GREEN}${C.RESET} python3 aspace_csv_import.py -f FILE [options]
+    {C.GREEN}${C.RESET} python3 aspace_csv_import.py (--create-records | --update-only) -f FILE [options]
 
 {C.BOLD}OPTIONS{C.RESET}
 {render_options(CLI_OPTIONS)}
 
-{C.BOLD}DUPLICATE HANDLING{C.RESET} {C.DIM}(mutually exclusive){C.RESET}
-{render_options(DUPLICATE_OPTIONS)}
+{C.BOLD}MODE{C.RESET} {C.DIM}(required - every run states its intent){C.RESET}
+{render_options(MODE_OPTIONS)}
 
 {C.BOLD}EXAMPLES{C.RESET}
-    {C.GREEN}${C.RESET} python3 aspace_csv_import.py -f data.csv
-    {C.GREEN}${C.RESET} python3 aspace_csv_import.py -f data.csv --dry-run
-    {C.GREEN}${C.RESET} python3 aspace_csv_import.py -f data.csv -u admin -p secret
+    {C.GREEN}${C.RESET} python3 aspace_csv_import.py --create-records -f data.csv --dry-run
+    {C.GREEN}${C.RESET} python3 aspace_csv_import.py --create-records -f data.csv
+    {C.GREEN}${C.RESET} python3 aspace_csv_import.py --update-only -f data.csv
 
-{C.BOLD}CSV COLUMNS{C.RESET} {C.DIM}(all required for create/upsert runs; --update-only accepts a subset){C.RESET}
+{C.BOLD}CSV COLUMNS{C.RESET} {C.DIM}(all required for --create-records; --update-only accepts a subset){C.RESET}
     {", ".join(col.REQUIRED_COLUMNS[:5])},
     {", ".join(col.REQUIRED_COLUMNS[5:])}
 
@@ -332,7 +340,7 @@ def validate_csv_before_import(filename: str, update_only: bool = False) -> Tupl
                 else:
                     catalog_numbers.add(catalog_num)
                 
-                # Check parent ref_id (create/upsert runs only - updates never use it)
+                # Check parent ref_id (create runs only - updates never use it)
                 if not update_only:
                     parent_ref = row.get(col.PARENT_REFID, '').strip()
                     if not parent_ref:
@@ -361,7 +369,10 @@ def validate_csv_before_import(filename: str, update_only: bool = False) -> Tupl
 # ==============================
 
 class DuplicateStop(Exception):
-    """Raised in --fail-on-duplicate mode to halt the import on the first duplicate.
+    """Raised in strict --create-records mode when a record turns out to exist
+    at write time - i.e. it appeared AFTER the preflight said everything was new
+    (another import racing, or the search index catching up mid-run). The run
+    halts immediately rather than continue a batch that is no longer all-new.
 
     A dedicated type so it is not swallowed by the broad per-row exception handler
     and can be distinguished from ordinary row errors by process_csv_file.
@@ -1138,22 +1149,25 @@ def process_csv_row(row: Dict, row_num: int, client: ArchivesSpaceClient,
             result["message"] = (f"{dup_count} records with component ID {catalog_number} "
                                  f"already exist in the resource - clean up duplicates before importing this row")
             logging.error(result["message"])
-            if duplicate_mode == 'fail':
-                # --fail-on-duplicate means STOP on any existing record - several
-                # existing records must halt the run just like one does.
+            if duplicate_mode == 'create':
+                # Strict create promised an all-new batch; several existing
+                # records must halt the run just like one does.
                 raise DuplicateStop(f"Duplicate component ID: {catalog_number} "
                                     f"({dup_count} existing records)")
             return result
 
-        # An existing record is never touched by a create-mode run: it is
-        # skipped (default) or halts the run (--fail-on-duplicate). Updating
-        # existing records is --update-only's job - it refuses to create, so
-        # a typo'd catalog number can never silently become a new record.
+        # An existing record is never touched by a create-mode run: skipped
+        # (--skip-duplicates) or halts the run (strict --create-records, where
+        # the preflight already said everything was new - reaching this means
+        # the record appeared since). Updating existing records is
+        # --update-only's job - it refuses to create, so a typo'd catalog
+        # number can never silently become a new record.
         if dup_count == 1:
-            if duplicate_mode == 'fail':
+            if duplicate_mode == 'create':
                 result["status"] = "error"
                 result["message"] = f"Duplicate found: {catalog_number}"
-                raise DuplicateStop(f"Duplicate component ID: {catalog_number}")
+                raise DuplicateStop(f"Duplicate component ID: {catalog_number} "
+                                    f"(appeared after preflight)")
             result["status"] = "skipped"
             result["message"] = "Duplicate - skipped (use --update-only to change existing records)"
             logging.info(f"Skipped duplicate: {catalog_number} (exists at {existing_uri})")
@@ -1287,7 +1301,7 @@ def process_csv_file_update_only(filename: str, client: ArchivesSpaceClient,
     results = []
     summary = {
         "total_rows": 0, "created": 0, "updated": 0, "unchanged": 0,
-        "failed": 0, "skipped": 0,
+        "failed": 0, "skipped": 0, "aborted": 0,
         "start_time": datetime.now().isoformat(), "end_time": None,
         "dry_run": dry_run, "duplicate_mode": "update-only",
         "environment": aspace_client.ACTIVE_ENV,
@@ -1330,11 +1344,21 @@ def process_csv_file_update_only(filename: str, client: ArchivesSpaceClient,
         print_status("error", f"{len(problems)} row(s) failed to resolve - ABORTING, nothing was written:")
         for row_num, row, msg in problems:
             print_status("error", f"Row {row_num}: {msg}", indent=1)
+        if resolved:
+            print_status("info", f"{len(resolved)} row(s) resolved fine but were NOT updated "
+                                 f"because of the rows above:")
+            for row_num, row in enumerate(rows, 1):
+                if row_num in resolved:
+                    print_status("skipped", f"Row {row_num}: {row.get(col.CATALOG, '').strip()} "
+                                            f"({resolved[row_num]})", indent=1)
         for row_num, row in enumerate(rows, 1):
             if row_num in resolved:
-                results.append(make_row_result(row_num, row, "skipped",
-                                               "Aborted: other rows failed to resolve"))
-                summary["skipped"] += 1
+                # "aborted", not "skipped": this row resolved and passed
+                # preflight - it went unwritten only because the run stopped.
+                results.append(make_row_result(row_num, row, "aborted",
+                                               "Not written - this row resolved and passed preflight, "
+                                               "but the failed rows stopped the run before any writes"))
+                summary["aborted"] += 1
             else:
                 msg = next(m for n, r, m in problems if n == row_num)
                 results.append(make_row_result(row_num, row, "error", msg))
@@ -1392,10 +1416,40 @@ def process_csv_file_update_only(filename: str, client: ArchivesSpaceClient,
     return results, summary
 
 
+def _preflight_create_row(row_num: int, row: Dict, client: ArchivesSpaceClient,
+                          problems: List):
+    """Phase-1 check for ONE strict-create row: its catalog number must be
+    verifiably NEW. Appends to `problems` on any issue. No writes happen here.
+
+    Mirror image of _preflight_update_only_row: update-only aborts when a
+    number is missing, strict create aborts when a number exists. Both treat
+    "multiple matches" and "lookup failed" as abort - an unverifiable answer
+    is never permission to write."""
+    catalog_number = row.get(col.CATALOG, '').strip()
+    if not catalog_number:
+        problems.append((row_num, row, "Missing catalog number"))
+        return
+    count, existing_uri = client.check_component_unique_id(catalog_number)
+    if count is None:
+        problems.append((row_num, row, f"Lookup failed for {catalog_number}"))
+    elif count == 1:
+        problems.append((row_num, row,
+                         f"{catalog_number} already exists ({existing_uri})"))
+    elif count > 1:
+        problems.append((row_num, row,
+                         f"{count} records found for {catalog_number} - clean up duplicates first"))
+
+
 def process_csv_file(filename: str, client: ArchivesSpaceClient,
-                    dry_run: bool = False, duplicate_mode: str = 'skip',
+                    dry_run: bool = False, duplicate_mode: str = 'create',
                     state: Dict = None) -> Tuple[List[Dict], Dict]:
-    """Process entire CSV file and return results.
+    """Process entire CSV file in create mode and return results.
+
+    duplicate_mode 'create' (strict, the default): phase 1 verifies EVERY
+    catalog number is new before anything is written; if any row already
+    exists, matches multiple records, or can't be verified, the entire run
+    aborts with no writes. duplicate_mode 'skip' (--skip-duplicates): no
+    preflight - new rows are created, existing ones skipped, single pass.
 
     `state`, when provided, is populated with the LIVE results/summary
     objects up front, so a KeyboardInterrupt that escapes this function
@@ -1410,6 +1464,7 @@ def process_csv_file(filename: str, client: ArchivesSpaceClient,
         "unchanged": 0,
         "failed": 0,
         "skipped": 0,
+        "aborted": 0,
         "start_time": datetime.now().isoformat(),
         "end_time": None,
         "dry_run": dry_run,
@@ -1423,59 +1478,108 @@ def process_csv_file(filename: str, client: ArchivesSpaceClient,
 
     try:
         with open(filename, 'r', encoding='utf-8-sig') as csvfile:
-            reader = csv.DictReader(csvfile)
-
-            for row_num, row in enumerate(reader, 1):
-                row = normalize_row(row)
-                summary["total_rows"] += 1
-
-                try:
-                    result = process_csv_row(row, row_num, client, dry_run, duplicate_mode)
-                except DuplicateStop as stop:
-                    # --fail-on-duplicate: record this row and stop processing, but
-                    # break (do not re-raise) so the caller still writes the reports.
-                    logging.error(f"Stopping import due to duplicate at row {row_num}")
-                    result = make_row_result(row_num, row, "error", str(stop))
-                    results.append(result)
-                    record_row_outcome(result, summary)
-                    break
-                except KeyboardInterrupt:
-                    # Ctrl-C DURING row processing: the interrupt may have
-                    # landed mid-API-write, so the outcome is UNKNOWN - the
-                    # server may have committed it. Flag first, then record -
-                    # if a second Ctrl-C lands mid-bookkeeping, main() still
-                    # sees the flag and the row was appended at most once.
-                    summary["interrupted"] = True
-                    logging.error(f"Interrupted by operator at row {row_num} - "
-                                  f"stopping; a partial report will be written")
-                    results.append(make_row_result(row_num, row, "error",
-                                   "Interrupted by operator (Ctrl-C) mid-row - write outcome UNKNOWN (it may have committed); verify this record in ArchivesSpace before rerunning"))
-                    break
-                except Exception as row_error:
-                    logging.error(f"Unexpected error at row {row_num}: {str(row_error)}")
-                    result = make_row_result(row_num, row, "error",
-                                             f"Unexpected error: {str(row_error)}")
-
-                # Bookkeeping OUTSIDE the handlers: a Ctrl-C during the status
-                # print lands AFTER the row completed, so it must never relabel
-                # or double-record it - it escapes with the row appended once,
-                # and main() recovers the partials via `state`.
-                results.append(result)
-                record_row_outcome(result, summary)
-
-                # Batch pause: same reasoning - the row is done, just stop.
-                if row_num % BATCH_SIZE == 0 and not dry_run:
-                    try:
-                        time.sleep(1)
-                    except KeyboardInterrupt:
-                        logging.error("Interrupted by operator - stopping; "
-                                      "a partial report will be written")
-                        summary["interrupted"] = True
-                        break
-
+            rows = [normalize_row(r) for r in csv.DictReader(csvfile)]
     except Exception as e:
         logging.error(f"Error reading CSV file: {str(e)}")
         raise
+
+    summary["total_rows"] = len(rows)
+
+    # --- Phase 1 (strict create only): verify every catalog number is new.
+    # No writes happen here, so an abort means NOTHING was written - fix the
+    # sheet and rerun safely. Mirror of --update-only's resolve phase.
+    if duplicate_mode == 'create':
+        print_status("info", f"Verifying {len(rows)} catalog number(s) are new "
+                             f"before writing anything...")
+        problems = []
+        for row_num, row in enumerate(rows, 1):
+            try:
+                _preflight_create_row(row_num, row, client, problems)
+            except Exception as e:
+                logging.error(f"Preflight failed for row {row_num}: {e}")
+                problems.append((row_num, row, f"Preflight error (malformed row or record): {e}"))
+
+        if problems:
+            print_status("error", f"{len(problems)} row(s) failed the all-new check - "
+                                  f"ABORTING, nothing was written:")
+            for row_num, row, msg in problems:
+                print_status("error", f"Row {row_num}: {msg}", indent=1)
+            problem_rows = {n for n, r, m in problems}
+            if len(problem_rows) < len(rows):
+                print_status("info", f"{len(rows) - len(problem_rows)} row(s) verified new "
+                                     f"but were NOT created because of the rows above:")
+                for row_num, row in enumerate(rows, 1):
+                    if row_num not in problem_rows:
+                        print_status("skipped", f"Row {row_num}: {row.get(col.CATALOG, '').strip()}",
+                                     indent=1)
+            if any('already exists' in m for n, r, m in problems):
+                print(f"\n  Use --update-only instead of --create-records to change already\n"
+                      f"  existing records with new csv metadata, or add --skip-duplicates to\n"
+                      f"  --create-records to create only the new rows on the csv - or, better\n"
+                      f"  yet, go back and clean up your data before trying to import. 🙂")
+            for row_num, row in enumerate(rows, 1):
+                if row_num in problem_rows:
+                    msg = next(m for n, r, m in problems if n == row_num)
+                    results.append(make_row_result(row_num, row, "error", msg))
+                    summary["failed"] += 1
+                else:
+                    # "aborted", not "skipped": this row's catalog number was
+                    # verifiably new - it went unwritten only because the run
+                    # stopped. (Only the duplicate check ran; parent/extent
+                    # checks happen at write time.)
+                    results.append(make_row_result(row_num, row, "aborted",
+                                                   "Not written - catalog number verified new, but the "
+                                                   "failed rows stopped the run before any writes"))
+                    summary["aborted"] += 1
+            summary["end_time"] = datetime.now().isoformat()
+            return results, summary
+
+    # --- Phase 2: create the records. ---
+    for row_num, row in enumerate(rows, 1):
+        try:
+            result = process_csv_row(row, row_num, client, dry_run, duplicate_mode)
+        except DuplicateStop as stop:
+            # Strict create: a record appeared AFTER the preflight
+            # (race or index catch-up). Record this row and stop, but
+            # break (do not re-raise) so the caller still writes the reports.
+            logging.error(f"Stopping import due to duplicate at row {row_num}")
+            result = make_row_result(row_num, row, "error", str(stop))
+            results.append(result)
+            record_row_outcome(result, summary)
+            break
+        except KeyboardInterrupt:
+            # Ctrl-C DURING row processing: the interrupt may have
+            # landed mid-API-write, so the outcome is UNKNOWN - the
+            # server may have committed it. Flag first, then record -
+            # if a second Ctrl-C lands mid-bookkeeping, main() still
+            # sees the flag and the row was appended at most once.
+            summary["interrupted"] = True
+            logging.error(f"Interrupted by operator at row {row_num} - "
+                          f"stopping; a partial report will be written")
+            results.append(make_row_result(row_num, row, "error",
+                           "Interrupted by operator (Ctrl-C) mid-row - write outcome UNKNOWN (it may have committed); verify this record in ArchivesSpace before rerunning"))
+            break
+        except Exception as row_error:
+            logging.error(f"Unexpected error at row {row_num}: {str(row_error)}")
+            result = make_row_result(row_num, row, "error",
+                                     f"Unexpected error: {str(row_error)}")
+
+        # Bookkeeping OUTSIDE the handlers: a Ctrl-C during the status
+        # print lands AFTER the row completed, so it must never relabel
+        # or double-record it - it escapes with the row appended once,
+        # and main() recovers the partials via `state`.
+        results.append(result)
+        record_row_outcome(result, summary)
+
+        # Batch pause: same reasoning - the row is done, just stop.
+        if row_num % BATCH_SIZE == 0 and not dry_run:
+            try:
+                time.sleep(1)
+            except KeyboardInterrupt:
+                logging.error("Interrupted by operator - stopping; "
+                              "a partial report will be written")
+                summary["interrupted"] = True
+                break
 
     summary["end_time"] = datetime.now().isoformat()
     return results, summary
@@ -1558,7 +1662,7 @@ def reconcile_summary(results: List[Dict], summary: Dict):
     and its counter being incremented, so the recorded rows are the truth and
     the tallies are recomputed from them before the report is written.
     """
-    for key in ("created", "updated", "unchanged", "failed", "skipped"):
+    for key in ("created", "updated", "unchanged", "failed", "skipped", "aborted"):
         summary[key] = 0
     for result in results:
         status = result.get("status")
@@ -1589,8 +1693,12 @@ def print_summary(summary: Dict, elapsed_time: str = None):
         print(f"  {Colors.YELLOW}Skipped:{Colors.RESET}       {skipped}")
     if failed > 0:
         print(f"  {Colors.RED}Failed:{Colors.RESET}        {failed}")
+    aborted = summary.get('aborted', 0)
+    if aborted > 0:
+        print(f"  {Colors.YELLOW}Aborted:{Colors.RESET}       {aborted}  "
+              f"{Colors.DIM}(these rows may be fine - unwritten because the failed rows stopped the run){Colors.RESET}")
     
-    print(f"\n  Mode: {summary.get('duplicate_mode', 'skip')}")
+    print(f"\n  Mode: {MODE_LABELS.get(summary.get('duplicate_mode'), summary.get('duplicate_mode'))}")
     
     if summary.get('dry_run', False):
         print(f"\n  {Colors.YELLOW}{Colors.BOLD}DRY RUN - No records were modified{Colors.RESET}")
@@ -1612,10 +1720,10 @@ def main():
     class CustomArgumentParser(argparse.ArgumentParser):
         def format_usage(self):
             C = Colors
-            usage = f"\nusage: {self.prog} -f FILE [options]\n"
+            usage = f"\nusage: {self.prog} (--create-records | --update-only) -f FILE [options]\n"
             help_hint = f"       {C.DIM}Use -h or --help for detailed information{C.RESET}\n"
             options = ("\n" + render_options(CLI_OPTIONS, indent="  ") + "\n"
-                       + render_options(DUPLICATE_OPTIONS, indent="  ") + "\n")
+                       + render_options(MODE_OPTIONS, indent="  ") + "\n")
             return usage + help_hint + options
         
         def format_help(self):
@@ -1674,25 +1782,37 @@ def main():
         help=argparse.SUPPRESS
     )
 
-    duplicate_group = parser.add_mutually_exclusive_group()
-    duplicate_group.add_argument(
-        '--skip-duplicates',
-        action='store_true',
-        default=True,
-        help=argparse.SUPPRESS
-    )
-    duplicate_group.add_argument(
-        '--fail-on-duplicate',
+    # The mode is REQUIRED: every run must state its intent. A bare invocation
+    # creating records by default is how a forgotten flag turns an intended
+    # update into duplicate records.
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument(
+        '--create-records',
         action='store_true',
         help=argparse.SUPPRESS
     )
-    duplicate_group.add_argument(
+    mode_group.add_argument(
         '--update-only',
+        action='store_true',
+        help=argparse.SUPPRESS
+    )
+    parser.add_argument(
+        '--skip-duplicates',
         action='store_true',
         help=argparse.SUPPRESS
     )
 
     args = parser.parse_args()
+
+    if not (args.create_records or args.update_only):
+        # help=SUPPRESS leaves argparse's own required-group message blank,
+        # so state the choice explicitly - this message IS the interface the
+        # first time someone runs the script bare.
+        parser.error("a mode is required: --create-records (make new records) "
+                     "or --update-only (change existing records)")
+    if args.skip_duplicates and not args.create_records:
+        parser.error("--skip-duplicates only applies to --create-records "
+                     "(--update-only never creates, so there is nothing to skip)")
     
     # Handle color disable
     if args.no_color:
@@ -1743,10 +1863,10 @@ def main():
     
     if args.update_only:
         duplicate_mode = 'update-only'
-    elif args.fail_on_duplicate:
-        duplicate_mode = 'fail'
-    else:
+    elif args.skip_duplicates:
         duplicate_mode = 'skip'
+    else:
+        duplicate_mode = 'create'
     
     # Setup
     setup_environment(args.dry_run, csv_file)
@@ -1761,7 +1881,7 @@ def main():
     logging.info(f"Target environment: {target}")
     logging.info(f"Command: {RUN_COMMAND}")
     print(f"  File: {csv_file}")
-    print(f"  Mode: {duplicate_mode}")
+    print(f"  Mode: {MODE_LABELS[duplicate_mode]}")
     if args.dry_run:
         print(f"  {Colors.YELLOW}{Colors.BOLD}DRY RUN{Colors.RESET}")
     

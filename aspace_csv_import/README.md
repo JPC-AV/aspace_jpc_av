@@ -14,10 +14,10 @@ This script imports item-level archival objects from CSV files into ArchivesSpac
 - [CSV File Format](#csv-file-format)
 - [Quick Start](#quick-start)
 - [Command-Line Options](#command-line-options)
-- [Duplicate Handling Modes](#duplicate-handling-modes)
-  - [Skip (Default)](#skip-default)
-  - [Update](#update)
-  - [Fail](#fail)
+- [Modes](#modes)
+  - [Create (--create-records)](#create---create-records)
+  - [Create, skipping existing (--skip-duplicates)](#create-skipping-existing---skip-duplicates)
+  - [Update (--update-only)](#update---update-only)
   - [Update-only (narrow CSV)](#update-only-narrow-csv)
 - [Output](#output)
 - [Field Mapping](#field-mapping)
@@ -25,7 +25,7 @@ This script imports item-level archival objects from CSV files into ArchivesSpac
 - [Reports](#reports)
 - [Utility Scripts](#utility-scripts)
 - [Recommended Workflow](#recommended-workflow)
-  - [Full import (create/update)](#full-import-createupdate)
+  - [Full import (create)](#full-import-create)
   - [Update-only workflow (narrow CSV)](#update-only-workflow-narrow-csv)
 - [Troubleshooting](#troubleshooting)
 - [Version History](#version-history)
@@ -37,7 +37,7 @@ This script imports item-level archival objects from CSV files into ArchivesSpac
 - **Parent Hierarchy**: Attach items to existing parent objects using ref_ids
 - **Comprehensive Metadata**: Import titles, dates, extents, and notes
 - **Smart Update Mode**: Detects actual changes before updating (shows what changed)
-- **Flexible Duplicate Handling**: Four modes - skip, update, fail, or update-only
+- **Explicit Modes**: Every run states its intent - `--create-records` or `--update-only`; both verify every row before writing anything
 - **Colorized Output**: Clean, color-coded terminal output with status indicators
 - **Change Detection**: Only updates records when data actually differs
 - **Error Handling**: Robust error handling with retry logic
@@ -93,14 +93,14 @@ password = "your_password_here"
 
 Then run without credential flags:
 ```bash
-python aspace_csv_import.py -f your_file.csv
+python aspace_csv_import.py --create-records -f your_file.csv
 ```
 
 ### Method 2: Command-Line Arguments
 
 Pass credentials directly (useful for testing or one-off runs):
 ```bash
-python aspace_csv_import.py -f your_file.csv -u username -p 'password'
+python aspace_csv_import.py --create-records -f your_file.csv -u username -p 'password'
 ```
 
 **Note:** If your password contains special characters (`&`, `!`, `#`, etc.), wrap it in single quotes.
@@ -137,40 +137,59 @@ cp creds_template.py creds.py
 # Edit creds.py with your username and password
 
 # Run commands (with creds.py configured):
-python aspace_csv_import.py -n -f your_file.csv              # Dry run
-python aspace_csv_import.py -f your_file.csv                 # Create records
-python aspace_csv_import.py --update-only -f your_file.csv   # Update existing
+python aspace_csv_import.py --create-records -n -f your_file.csv   # Dry run
+python aspace_csv_import.py --create-records -f your_file.csv      # Create records
+python aspace_csv_import.py --update-only -f your_file.csv         # Update existing
 
 # Or use command-line credentials:
-python aspace_csv_import.py -f your_file.csv -u username -p 'password'
+python aspace_csv_import.py --create-records -f your_file.csv -u username -p 'password'
 ```
 
 ## Command-Line Options
 
 ```
+Mode (required - choose one):
+  --create-records      Create records; aborts before writing if ANY row already exists
+  --update-only         Update existing records (narrow or full CSV); never creates
+
 Options:
   -h, --help            Show help message
   -n, --dry-run         Test mode - no records created
   -f FILE, --file FILE  CSV file to import
   -u USERNAME           ArchivesSpace username
   -p PASSWORD           ArchivesSpace password
+  --skip-duplicates     With --create-records: create new rows, skip existing ones
   --no-color            Disable colored output
-
-Duplicate Handling (choose one):
-  --skip-duplicates     Skip existing records (DEFAULT)
-  --fail-on-duplicate   Stop import on first duplicate
-  --update-only         Update existing records (narrow or full CSV); never creates
 ```
 
-## Duplicate Handling Modes
+## Modes
 
-### Skip (Default)
+A mode is required: every run states whether it makes new records or changes
+existing ones, and both modes verify every row before writing anything. The
+two aborts are mirror images - `--create-records` aborts if a catalog number
+EXISTS, `--update-only` aborts if one DOESN'T - and an abort always means
+nothing was written, so fixing the sheet and rerunning is safe. In both modes
+a lookup that fails or matches multiple records also aborts: an unverifiable
+answer is never permission to write.
+
+### Create (--create-records)
 ```bash
-python aspace_csv_import.py -f file.csv
+python aspace_csv_import.py --create-records -f file.csv
 ```
-- Skips records that already exist
-- Creates only new records
-- Safe for re-running imports
+- For sheets where every row is genuinely new
+- Preflights every catalog number first; if ANY already exists, the whole
+  run aborts before anything is written (the report lists which rows exist,
+  with links)
+- A clean, careful run: no silent skips hiding a surprise
+
+### Create, skipping existing (--skip-duplicates)
+```bash
+python aspace_csv_import.py --create-records --skip-duplicates -f file.csv
+```
+- For mixed sheets: creates the new rows, skips ones that already exist
+- Existing records are never touched (changing them is --update-only's job)
+- First half of the mixed-sheet workflow: create with --skip-duplicates,
+  wait a minute for the search index, then --update-only for the changes
 
 ### Update (--update-only)
 ```bash
@@ -184,16 +203,10 @@ python aspace_csv_import.py --update-only -f file.csv
 - Detects what fields have changed; only updates if data differs
 - Shows "unchanged" for records with no differences and displays what
   changed (title, dates, extents, description)
-- Mixed sheet with genuinely new records? Run the default create mode
-  first (new rows created, existing skipped), wait a minute for the
-  search index, then --update-only for the changes
-
-### Fail
-```bash
-python aspace_csv_import.py --fail-on-duplicate -f file.csv
-```
-- Stops entire import on first duplicate
-- Use when duplicates indicate data problems
+- Mixed sheet with genuinely new records? Run
+  `--create-records --skip-duplicates` first (new rows created, existing
+  skipped), wait a minute for the search index, then --update-only for
+  the changes
 
 ### Update-only (narrow CSV)
 ```bash
@@ -344,7 +357,7 @@ python check_extent_types.py your_file.csv  # Validate CSV values
 
 ## Recommended Workflow
 
-### Full import (create/update)
+### Full import (create)
 
 1. **Validate CSV**
    ```bash
@@ -363,12 +376,12 @@ python check_extent_types.py your_file.csv  # Validate CSV values
 
 4. **Dry run**
    ```bash
-   python aspace_csv_import.py -n -f your_file.csv
+   python aspace_csv_import.py --create-records -n -f your_file.csv
    ```
 
 5. **Run import**
    ```bash
-   python aspace_csv_import.py -f your_file.csv
+   python aspace_csv_import.py --create-records -f your_file.csv
    ```
 
 6. **Verify in ArchivesSpace**
