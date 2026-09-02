@@ -21,6 +21,10 @@ Round-trip rules this export honors:
 Scope: ONLY the configured AV resource (resource_id in creds.py). The rest
 of the repository is never enumerated.
 
+Selection: everything at a level (--level, default item), one series'
+children (--parent), or an explicit list of catalog numbers (--list FILE,
+plain text one-per-line or any CSV with a CATALOG_NUMBER column).
+
 Read-only: this script makes no writes of any kind.
 """
 
@@ -169,6 +173,63 @@ def parent_refid_for(client, parent_uri, cache):
     return cache[parent_uri]
 
 
+def read_catalog_list(path):
+    """Catalog numbers from a list file, order kept, duplicates dropped.
+
+    Two shapes are accepted: plain text (one JPC_AV_xxxxx per line, blanks
+    ignored) or a CSV with a CATALOG_NUMBER column - so an old import sheet
+    or report can be fed straight back in. Returns (numbers, problem).
+    """
+    try:
+        with open(path, 'r', encoding='utf-8-sig') as f:
+            first = f.readline()
+            f.seek(0)
+            if col.CATALOG in first:
+                numbers = [(r.get(col.CATALOG) or '').strip()
+                           for r in csv.DictReader(f)]
+            else:
+                numbers = [line.strip().strip(',') for line in f]
+    except OSError as e:
+        return None, f"could not read {path}: {e}"
+    seen = set()
+    ordered = []
+    for n in numbers:
+        if n and n not in seen:
+            seen.add(n)
+            ordered.append(n)
+    if not ordered:
+        return None, f"no catalog numbers found in {path}"
+    return ordered, None
+
+
+def export_by_list(client, catalog_numbers):
+    """Export exactly the listed catalog numbers, in list order.
+
+    Each number goes through the importer's verified lookup, so a number
+    that is missing, ambiguous, or unsearchable is reported by name instead
+    of silently absent from the output. Returns (rows, problems).
+    """
+    rows = []
+    problems = []
+    parent_cache = {}
+    for i, number in enumerate(catalog_numbers, 1):
+        lookup = client.find_archival_object(number)
+        if lookup.status == "found":
+            record = lookup.record
+            parent_uri = (record.get("parent") or {}).get("ref") or ""
+            row, _ = build_row(record, parent_refid_for(client, parent_uri, parent_cache))
+            rows.append(row)
+        elif lookup.status == "none":
+            problems.append(f"{number}: not found in the resource")
+        elif lookup.status == "multiple":
+            problems.append(f"{number}: {lookup.count} records share this number")
+        else:
+            problems.append(f"{number}: lookup failed - retry later")
+        if i % 25 == 0:
+            print_status("info", f"Looked up {i}/{len(catalog_numbers)}...")
+    return rows, problems
+
+
 def export_records(client, level, parent_filter_refid=None):
     """Pull, filter, and map every matching record.
 
@@ -232,6 +293,11 @@ def main():
                              "'all' for every level)")
     parser.add_argument("--parent", metavar="REFID",
                         help="Only direct children of this parent ref_id")
+    parser.add_argument("--list", metavar="FILE", dest="list_file",
+                        help="Export exactly these catalog numbers: plain "
+                             "text one per line, or any CSV with a "
+                             "CATALOG_NUMBER column (--level/--parent do "
+                             "not apply)")
     parser.add_argument("-o", "--output", metavar="PATH",
                         help="Output CSV path (default: timestamped file "
                              f"in {OUTPUT_DIR})")
@@ -239,6 +305,10 @@ def main():
                         help="Target environment from creds.py (required "
                              "when several are configured)")
     args = parser.parse_args()
+
+    if args.list_file and args.parent:
+        parser.error("--list names the exact records to export - it cannot "
+                     "be combined with --parent")
 
     # Environment selection: same contract as every other tool - auto with
     # one configured, explicit --env with several, no default.
@@ -264,7 +334,10 @@ def main():
               f"repo {aspace_client.REPO_ID}, resource {aspace_client.RESOURCE_ID})")
     print(f"  Target: {Colors.BOLD}{target}{Colors.RESET}")
     print(f"  Command: {RUN_COMMAND}")
-    print(f"  Level: {args.level}" + (f"  Parent: {args.parent}" if args.parent else ""))
+    if args.list_file:
+        print(f"  List: {args.list_file}")
+    else:
+        print(f"  Level: {args.level}" + (f"  Parent: {args.parent}" if args.parent else ""))
 
     client = ASpaceClient()
     print_status("info", f"Connecting to {aspace_client.ASPACE_URL}...")
@@ -273,8 +346,18 @@ def main():
         sys.exit(1)
     print_status("success", "Authenticated")
 
+    problems = []
+    anomalies = 0
     try:
-        rows, anomalies = export_records(client, args.level, args.parent)
+        if args.list_file:
+            numbers, problem = read_catalog_list(args.list_file)
+            if numbers is None:
+                print_status("error", problem)
+                sys.exit(1)
+            print_status("info", f"Looking up {len(numbers)} listed catalog number(s)...")
+            rows, problems = export_by_list(client, numbers)
+        else:
+            rows, anomalies = export_records(client, args.level, args.parent)
     finally:
         client.logout()
 
@@ -291,6 +374,11 @@ def main():
     if anomalies:
         print_status("warning", f"{anomalies} record(s) skipped: outside the "
                                 f"configured resource (should never happen - report this)")
+    if problems:
+        print_status("error", f"{len(problems)} listed number(s) could NOT be exported:")
+        for problem in problems:
+            print_status("error", problem, indent=1)
+        sys.exit(2)  # the file is complete for what was found; the gaps are named
 
 
 if __name__ == "__main__":
