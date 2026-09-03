@@ -174,7 +174,7 @@ def check_csv_values(csv_file):
     
     used_types = set()
     try:
-        with open(csv_file, 'r', encoding='utf-8-sig') as f:
+        with col.open_csv(csv_file) as f:
             reader = csv.DictReader(f)
             for row in reader:
                 format_type = row.get(col.ORIGINAL_FORMAT, '').strip()

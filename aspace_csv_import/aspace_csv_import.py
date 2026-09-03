@@ -273,7 +273,7 @@ def validate_csv_before_import(filename: str, update_only: bool = False) -> Tupl
     warnings = []
 
     try:
-        with open(filename, 'r', encoding='utf-8-sig') as csvfile:
+        with col.open_csv(filename) as csvfile:
             reader = csv.DictReader(csvfile)
             headers = reader.fieldnames or []
 
@@ -1315,7 +1315,7 @@ def process_csv_file_update_only(filename: str, client: ArchivesSpaceClient,
         state["summary"] = summary
 
     try:
-        with open(filename, 'r', encoding='utf-8-sig') as csvfile:
+        with col.open_csv(filename) as csvfile:
             rows = [normalize_row(r) for r in csv.DictReader(csvfile)]
     except Exception as e:
         logging.error(f"Error reading CSV file: {str(e)}")
@@ -1478,7 +1478,7 @@ def process_csv_file(filename: str, client: ArchivesSpaceClient,
         state["summary"] = summary
 
     try:
-        with open(filename, 'r', encoding='utf-8-sig') as csvfile:
+        with col.open_csv(filename) as csvfile:
             rows = [normalize_row(r) for r in csv.DictReader(csvfile)]
     except Exception as e:
         logging.error(f"Error reading CSV file: {str(e)}")
@@ -1905,7 +1905,7 @@ def main():
     needs_extent_vocab = True
     if args.update_only:
         try:
-            with open(csv_file, 'r', encoding='utf-8-sig') as _f:
+            with col.open_csv(csv_file) as _f:
                 headers = csv.DictReader(_f).fieldnames or []
         except Exception:
             headers = []

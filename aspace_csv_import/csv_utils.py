@@ -190,7 +190,7 @@ def validate_csv_structure(filename: str, update_only: bool = False) -> Dict:
     expected_columns = required_columns + optional_columns
 
     try:
-        with open(filename, 'r', encoding='utf-8-sig') as csvfile:
+        with col.open_csv(filename) as csvfile:
             reader = csv.DictReader(csvfile)
             headers = reader.fieldnames or []
 
@@ -406,7 +406,7 @@ def generate_parent_lookup_report(csv_file: str, output_file: str = None,
     
     # Get unique parent refs from CSV
     parent_refs = set()
-    with open(csv_file, 'r', encoding='utf-8-sig') as csvfile:
+    with col.open_csv(csv_file) as csvfile:
         reader = csv.DictReader(csvfile)
         for row in reader:
             ref = row.get(col.PARENT_REFID, '').strip()

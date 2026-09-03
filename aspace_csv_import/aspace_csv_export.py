@@ -53,13 +53,23 @@ from aspace_csv_import import (Colors, print_status, print_header,
 # over the VPN. Kept well under ArchivesSpace's page-size ceiling (250).
 BATCH = 50
 
-# Audit columns appended AFTER the import-shaped columns. On re-import these
-# are "unexpected column" warnings and are ignored - harmless by design.
-AUDIT_HEADERS = [
-    "ASpace Ref ID", "ASpace URI", "ASpace Staff Link",
+# Column order of the export file: identity and status first, then the
+# import-shaped metadata, then links and audit trail. "MADS live" appears
+# only when --mads-live was given. Order is cosmetic for round-trips - every
+# reader in the toolset matches columns by header name.
+EXPORT_COLUMNS = [
+    col.CATALOG, "ASpace Ref ID", "Warnings", "MADS live",
+    col.PARENT_REFID, col.TITLE, col.CREATION_DATE, col.EDIT_DATE,
+    col.BROADCAST_DATE, col.ORIGINAL_FORMAT, col.DESCRIPTION, col.PHYSTECH,
+    "ASpace URI", "ASpace Staff Link", "MADS URL",
     "Created By", "Create Time", "Last Modified By", "Last Modified Time",
-    "Warnings",
 ]
+OPTIONAL_EXPORT_COLUMNS = {"MADS live"}
+
+# Public MADS URL for a catalog number (DAMS ingest auto-publishes to MADS,
+# so this is where the item WILL be public - the URL is derived, not checked;
+# --mads-live actually checks). check_mads owns the URL scheme and the check.
+from check_mads import MADS_URL_PREFIX, check_many, summarize  # noqa: E402
 
 # Import optional logs_dir (same convention as the importer)
 try:
@@ -121,6 +131,7 @@ def build_row(record, parent_refid):
     row["ASpace Ref ID"] = record.get("ref_id") or ""
     row["ASpace URI"] = record.get("uri") or ""
     row["ASpace Staff Link"] = staff_link_for(record.get("uri"))
+    row["MADS URL"] = (MADS_URL_PREFIX + row[col.CATALOG]) if row[col.CATALOG] else ""
     row["Created By"] = record.get("created_by") or ""
     row["Create Time"] = record.get("create_time") or ""
     row["Last Modified By"] = record.get("last_modified_by") or ""
@@ -192,14 +203,16 @@ def read_catalog_list(path):
     or report can be fed straight back in. Returns (numbers, problem).
     """
     try:
-        with open(path, 'r', encoding='utf-8-sig') as f:
+        with col.open_csv(path) as f:
+            pos = f.tell()
             first = f.readline()
-            f.seek(0)
+            f.seek(pos)
             if col.CATALOG in first:
                 numbers = [(r.get(col.CATALOG) or '').strip()
                            for r in csv.DictReader(f)]
             else:
-                numbers = [line.strip().strip(',') for line in f]
+                numbers = [line.strip().strip(',') for line in f
+                           if not line.startswith('#')]
     except OSError as e:
         return None, f"could not read {path}: {e}"
     seen = set()
@@ -286,12 +299,19 @@ def export_records(client, level, parent_filter_refid=None):
     return rows, anomalies
 
 
-def write_export_csv(rows, path):
+def write_export_csv(rows, path, extra_headers=(), provenance=None):
     """Write the export atomically - the final path only ever holds a
-    complete file (a .tmp is never mistakable for a finished export)."""
-    fieldnames = list(col.REQUIRED_COLUMNS) + AUDIT_HEADERS
+    complete file (a .tmp is never mistakable for a finished export).
+
+    `provenance` (the command that made the file, plus target/time) is
+    written as a raw '# ...' first line so the sheet explains its own
+    origin; every tool's CSV reader skips '#' lines (col.open_csv)."""
+    fieldnames = [c for c in EXPORT_COLUMNS
+                  if c not in OPTIONAL_EXPORT_COLUMNS or c in extra_headers]
     tmp_path = path + ".tmp"
     with open(tmp_path, "w", newline="", encoding="utf-8") as f:
+        if provenance:
+            f.write(f"# {provenance}\n")
         writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(rows)
@@ -312,6 +332,9 @@ def main():
                              "text one per line, or any CSV with a "
                              "CATALOG_NUMBER column (--level/--parent do "
                              "not apply)")
+    parser.add_argument("--mads-live", action="store_true",
+                        help="Check each record's public MADS URL and add a "
+                             "'MADS live' column (Yes/No/check failed)")
     parser.add_argument("-o", "--output", metavar="PATH",
                         help="Output CSV path (default: timestamped file "
                              f"in {OUTPUT_DIR})")
@@ -381,7 +404,23 @@ def main():
         print_status("error", f"Export failed: {anomalies}")
         sys.exit(1)
 
-    write_export_csv(rows, out_path)
+    extra_headers = []
+    if args.mads_live and rows:
+        cats = [r.get(col.CATALOG, "") for r in rows]
+        print_status("info", f"Checking MADS liveness for "
+                             f"{len(set(c for c in cats if c))} catalog number(s)...")
+        mads = check_many(cats)
+        for r in rows:
+            r["MADS live"] = mads.get(r.get(col.CATALOG, ""), "")
+        extra_headers = ["MADS live"]
+        live, not_live, check_failed = summarize(mads)
+        print_status("info", f"MADS: {live} live, {not_live} not in MADS"
+                             + (f", {check_failed} check failed (network/odd "
+                                f"response - not proof of absence)" if check_failed else ""))
+
+    provenance = (f"{RUN_COMMAND} | target: {aspace_client.ACTIVE_ENV} | "
+                  f"{datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    write_export_csv(rows, out_path, extra_headers, provenance)
     flagged = sum(1 for r in rows if r.get("Warnings"))
     print_status("success", f"Exported {len(rows)} record(s) to: {out_path}")
     if flagged:

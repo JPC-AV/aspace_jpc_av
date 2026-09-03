@@ -18,6 +18,7 @@ __airtable_exports__/
 import_reports/
 export_reports/
 rename_reports/
+mads_reports/
 validation_report_*.json
 parent_lookup_*.csv
 *_cleaned.csv

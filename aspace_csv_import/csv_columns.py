@@ -57,3 +57,19 @@ MUTABLE_COLUMNS = [
 OPTIONAL_COLUMNS = [
     "EJS Season", "EJS Episode", "Content TRT", "ORIGINAL_MEDIA_TYPE",
 ]
+
+
+def open_csv(path):
+    """Open a CSV for reading, skipping leading '#' provenance lines.
+
+    Export files carry the command that produced them as a '# ...' first
+    line (so a sheet explains its own origin); every tool that reads CSVs
+    opens them through here, making that line invisible to header parsing.
+    """
+    f = open(path, 'r', encoding='utf-8-sig', newline='')
+    while True:
+        pos = f.tell()
+        line = f.readline()
+        if not line.startswith('#'):
+            f.seek(pos)
+            return f
