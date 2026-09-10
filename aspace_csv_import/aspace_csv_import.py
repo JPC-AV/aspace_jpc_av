@@ -207,6 +207,10 @@ RUN_COMMAND = " ".join([os.path.basename(sys.executable)]
 LOG_FILE = f"{OUTPUT_DIR}/csv_import_{_RUN_STAMP}.log"
 CSV_REPORT = f"{OUTPUT_DIR}/import_report_{_RUN_STAMP}.csv"
 JSON_REPORT = f"{OUTPUT_DIR}/import_report_{_RUN_STAMP}.json"
+# The records as ArchivesSpace holds them AFTER the run (read back after each
+# write): every created/updated/unchanged archival object plus its linked
+# top container. The reports are the receipt; this file is the goods.
+RECORDS_REPORT = f"{OUTPUT_DIR}/import_records_{_RUN_STAMP}.json"
 
 # Processing Configuration
 BATCH_SIZE = 10  # Process in batches to avoid overwhelming the API
@@ -813,6 +817,23 @@ def multi_date_conflicts(existing_obj: Dict, changes: Dict) -> List[Tuple[str, i
 # ARCHIVAL OBJECT CREATION
 # ==============================
 
+def fetch_linked_container(client: ArchivesSpaceClient, record: Dict) -> Optional[Dict]:
+    """Read back the top container an archival object's first instance links
+    to, for the records file. None when there is no instance or the read
+    fails (logged; the record itself is unaffected)."""
+    try:
+        ref = record["instances"][0]["sub_container"]["top_container"]["ref"]
+    except (KeyError, IndexError, TypeError):
+        return None
+    if not isinstance(ref, str) or not ref:
+        return None
+    container = client.get(ref)
+    if not isinstance(container, dict):
+        logging.warning(f"Could not read back top container {ref} for the records file")
+        return None
+    return container
+
+
 def create_archival_object(row: Dict, client: ArchivesSpaceClient, 
                           parent_uri: str, dry_run: bool = False) -> Tuple[Optional[Dict], List[str]]:
     """Create an archival object from a CSV row.
@@ -891,6 +912,8 @@ def create_archival_object(row: Dict, client: ArchivesSpaceClient,
             created = client.get(result['uri'])
             if isinstance(created, dict) and created.get('ref_id'):
                 result['ref_id'] = created['ref_id']
+                result['record'] = created  # the read-back, for the records file
+                result['top_container'] = fetch_linked_container(client, created)
             else:
                 logging.warning(f"Could not fetch ref_id for {result['uri']} "
                                 f"(record was created; look it up in ArchivesSpace)")
@@ -961,7 +984,9 @@ def update_archival_object(row: Dict, client: ArchivesSpaceClient,
     if not changes:
         logging.info(f"No changes needed for: {catalog_number}")
         return {"uri": existing_uri, "unchanged": True,
-                "ref_id": existing_obj.get("ref_id", "")}, {}, []
+                "ref_id": existing_obj.get("ref_id", ""),
+                "record": existing_obj,
+                "top_container": fetch_linked_container(client, existing_obj)}, {}, []
     
     # Apply ONLY the detected changes. Rebuilding an unchanged field from the
     # CSV would replace richer existing objects with minimal generated ones,
@@ -1050,6 +1075,15 @@ def update_archival_object(row: Dict, client: ArchivesSpaceClient,
         if result:
             logging.info(f"Successfully updated archival object: {catalog_number}")
             result["ref_id"] = existing_obj.get("ref_id", "")
+            # Read the record back as stored (lock_version, system fields,
+            # server-side normalization) rather than trusting what was sent.
+            fresh = client.get(existing_uri)
+            if isinstance(fresh, dict):
+                result["record"] = fresh
+                result["top_container"] = fetch_linked_container(client, fresh)
+            else:
+                logging.warning(f"Could not read back {existing_uri} after update "
+                                f"(the update succeeded; records file will omit it)")
             return result, changes, []
         else:
             logging.error(f"Failed to update archival object: {catalog_number}")
@@ -1210,6 +1244,9 @@ def process_csv_row(row: Dict, row_num: int, client: ArchivesSpaceClient,
             result["status"] = "created"
             result["uri"] = ao_result.get('uri', '')
             result["ref_id"] = ao_result.get('ref_id', '')
+            if ao_result.get('record'):
+                result["record"] = ao_result['record']
+                result["top_container"] = ao_result.get('top_container')
             result["message"] = "Created successfully"
             if ao_result.get('dry_run'):
                 result["message"] = "Would be created"
@@ -1383,6 +1420,9 @@ def process_csv_file_update_only(filename: str, client: ArchivesSpaceClient,
                 result = make_row_result(row_num, row, "updated", message,
                                          uri=resolved[row_num], changes=changes,
                                          ref_id=ao_result.get('ref_id'))
+            if ao_result and ao_result.get('record'):
+                result["record"] = ao_result['record']
+                result["top_container"] = ao_result.get('top_container')
             else:
                 result = make_row_result(row_num, row, "error", "Failed to update")
         except KeyboardInterrupt:
@@ -1616,11 +1656,38 @@ def generate_reports(results: List[Dict], summary: Dict) -> bool:
     """
     ok = True
     # Enriched copies for the reports: add the browsable staff_link derived
-    # from each row's API uri. The originals stay untouched.
+    # from each row's API uri. The originals stay untouched. The read-back
+    # records ride on the row results but belong in their own file - the
+    # reports stay a compact receipt.
     report_rows = [
-        {**r, 'staff_link': staff_link_for(r.get('uri'))}
+        {**{k: v for k, v in r.items() if k not in ('record', 'top_container')},
+         'staff_link': staff_link_for(r.get('uri'))}
         for r in results
     ]
+    records = {}
+    for r in results:
+        if r.get('record'):
+            key = r.get(col.CATALOG) or r.get('uri') or f"row {r.get('row_number')}"
+            records[key] = {
+                "status": r.get('status'),
+                "uri": r.get('uri'),
+                "archival_object": r['record'],
+                "top_container": r.get('top_container'),
+            }
+    if records:
+        try:
+            tmp_path = RECORDS_REPORT + '.tmp'
+            with open(tmp_path, 'w', encoding='utf-8') as f:
+                json.dump({"summary": {k: summary.get(k) for k in
+                                       ('command', 'environment', 'duplicate_mode',
+                                        'dry_run', 'start_time')},
+                           "records": records}, f, indent=2)
+            os.replace(tmp_path, RECORDS_REPORT)
+            summary["records_file"] = RECORDS_REPORT
+            logging.info(f"Records file saved: {RECORDS_REPORT} ({len(records)} record(s))")
+        except Exception as e:
+            ok = False
+            logging.error(f"Failed to write records file: {str(e)}")
     try:
         # Write-then-rename: the final report path only ever holds a COMPLETE
         # file. An interrupt mid-write leaves a .tmp (never mistakable for the
@@ -1708,6 +1775,8 @@ def print_summary(summary: Dict, elapsed_time: str = None):
         print(f"\n  Processing Time: {elapsed_time}")
     
     print(f"\n  Reports: {OUTPUT_DIR}/")
+    if summary.get('records_file'):
+        print(f"  Records (as stored in ASpace): {os.path.basename(summary['records_file'])}")
     print(f"{Colors.DIM}{'-' * 60}{Colors.RESET}\n")
 
 # ==============================
