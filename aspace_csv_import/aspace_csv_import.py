@@ -202,8 +202,38 @@ _RUN_STAMP = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{os.getpid()}"
 # the run header and recorded in the JSON report summary) - reports proved
 # ambiguous without it when a run's flags were in question.
 import shlex as _shlex
+
+
+def redact_command(argv: List[str]) -> List[str]:
+    """Best-effort blanking of password values in raw argv.
+
+    This guards the module-level RUN_COMMAND (the value other tools import,
+    and the importer's own value before its parser has run). It is NOT the
+    authoritative redaction: argparse also accepts abbreviated long options
+    and clustered short options that no textual scan can catch, so the
+    importer replaces RUN_COMMAND with recorded_command(args) - rebuilt from
+    the parsed arguments - as its first act after parsing.
+    """
+    redacted = []
+    hide_next = False
+    for arg in argv:
+        if hide_next:
+            redacted.append('***')
+            hide_next = False
+        elif arg in ('-p', '--password'):
+            redacted.append(arg)
+            hide_next = True
+        elif arg.startswith('--password='):
+            redacted.append('--password=***')
+        elif arg.startswith('-p') and len(arg) > 2 and not arg.startswith('--'):
+            redacted.append('-p***')
+        else:
+            redacted.append(arg)
+    return redacted
+
+
 RUN_COMMAND = " ".join([os.path.basename(sys.executable)]
-                       + [_shlex.quote(a) for a in sys.argv])
+                       + [_shlex.quote(a) for a in redact_command(sys.argv)])
 LOG_FILE = f"{OUTPUT_DIR}/csv_import_{_RUN_STAMP}.log"
 CSV_REPORT = f"{OUTPUT_DIR}/import_report_{_RUN_STAMP}.csv"
 JSON_REPORT = f"{OUTPUT_DIR}/import_report_{_RUN_STAMP}.json"
@@ -663,7 +693,12 @@ def create_instances(row: Dict, client: ArchivesSpaceClient) -> Tuple[List[Dict]
     else:
         container_uri = client.create_top_container(catalog_number)
         if not container_uri:
-            return [], None, [f"Failed to create top container for {catalog_number}"]
+            if client.last_failure_definitive:
+                return [], None, [f"Failed to create top container for {catalog_number}"]
+            return [], None, [
+                f"Top container create outcome UNKNOWN for {catalog_number} "
+                f"(timeout/lost response) - it may exist; verify in ArchivesSpace "
+                f"before rerunning"]
         created_uri = container_uri
 
     instance = {
@@ -794,6 +829,32 @@ def detect_changes(existing_obj: Dict, row: Dict) -> Dict[str, Tuple[Any, Any]]:
     return changes
 
 
+def non_single_date_conflicts(existing_obj: Dict, changes: Dict) -> List[Tuple[str, str]]:
+    """Changed date labels whose existing date is not a plain single date.
+
+    A date with an end (inclusive/bulk - or a 'single' that carries an end
+    anyway, which the schema allows) is a begin AND an end; a one-value CSV
+    cell cannot modify it without corrupting its meaning (begin after end).
+    A missing date_type fails closed. Refused in both the update-only
+    preflight and the apply path, like multi-date conflicts.
+    Returns [(label, description), ...].
+    """
+    if 'dates' not in changes:
+        return []
+    conflicts = []
+    for label in sorted(changes['dates'][1].keys()):
+        for d in existing_obj.get('dates', []):
+            if d.get('label') != label:
+                continue
+            dtype = d.get('date_type')
+            if d.get('end'):
+                conflicts.append((label, f"{dtype or 'untyped'} with an end date"))
+            elif dtype != 'single':
+                conflicts.append((label, dtype or 'missing its date_type'))
+            break
+    return conflicts
+
+
 def multi_date_conflicts(existing_obj: Dict, changes: Dict) -> List[Tuple[str, int]]:
     """Changed date labels that have MULTIPLE existing same-label dates.
 
@@ -817,19 +878,48 @@ def multi_date_conflicts(existing_obj: Dict, changes: Dict) -> List[Tuple[str, i
 # ARCHIVAL OBJECT CREATION
 # ==============================
 
-def fetch_linked_container(client: ArchivesSpaceClient, record: Dict) -> Optional[Dict]:
-    """Read back the top container an archival object's first instance links
-    to, for the records file. None when there is no instance or the read
-    fails (logged; the record itself is unaffected)."""
-    try:
-        ref = record["instances"][0]["sub_container"]["top_container"]["ref"]
-    except (KeyError, IndexError, TypeError):
-        return None
-    if not isinstance(ref, str) or not ref:
+def record_identity_ok(record: Dict, uri: str, catalog_number: str) -> bool:
+    """Full identity check for an archival object we are about to write to or
+    have just read back: right uri, our resource, the row's component_id,
+    and item level. One validator so write-time and read-back agree."""
+    if not isinstance(record, dict):
+        return False
+    resource = record.get('resource')
+    return (record.get('uri') == uri
+            and isinstance(resource, dict)
+            and resource.get('ref') == aspace_client.RESOURCE_URI
+            and record.get('component_id') == catalog_number
+            and record.get('level') == 'item')
+
+
+def linked_container_ref(record: Dict) -> Optional[str]:
+    """The top-container uri an archival object's instances link to (first
+    instance carrying one), or None when there is no such instance."""
+    for instance in (record.get("instances") if isinstance(record, dict) else None) or []:
+        try:
+            candidate = instance["sub_container"]["top_container"]["ref"]
+        except (KeyError, TypeError):
+            continue
+        if isinstance(candidate, str) and candidate:
+            return candidate
+    return None
+
+
+def fetch_linked_container(client: ArchivesSpaceClient, record: Dict,
+                           indicator: str = None) -> Optional[Dict]:
+    """Read back the top container an archival object links to (the first
+    instance that carries one - a digital-object instance may come first),
+    for the records file. None when no instance links a container or the
+    read fails (logged; the record itself is unaffected)."""
+    ref = linked_container_ref(record)
+    if ref is None:
         return None
     container = client.get(ref)
-    if not isinstance(container, dict):
-        logging.warning(f"Could not read back top container {ref} for the records file")
+    if (not isinstance(container, dict) or container.get('uri') != ref
+            or (indicator is not None and (container.get('indicator') != indicator
+                                           or container.get('type') != 'AV Case'))):
+        logging.warning(f"Could not read back top container {ref} for the records file "
+                        f"(fetch failed or did not identify as AV Case {indicator!r} at that uri)")
         return None
     return container
 
@@ -910,13 +1000,15 @@ def create_archival_object(row: Dict, client: ArchivesSpaceClient,
             # record was still created - report the row as created with the
             # ref_id blank, never as a failure.
             created = client.get(result['uri'])
-            if isinstance(created, dict) and created.get('ref_id'):
+            if (record_identity_ok(created, result['uri'], catalog_number)
+                    and created.get('ref_id')):
                 result['ref_id'] = created['ref_id']
                 result['record'] = created  # the read-back, for the records file
-                result['top_container'] = fetch_linked_container(client, created)
+                result['top_container'] = fetch_linked_container(client, created, catalog_number)
             else:
-                logging.warning(f"Could not fetch ref_id for {result['uri']} "
-                                f"(record was created; look it up in ArchivesSpace)")
+                logging.warning(f"Read-back of {result['uri']} failed or did not identify "
+                                f"as that uri - ref_id left blank (record was created; "
+                                f"look it up in ArchivesSpace)")
             return result, []
         else:
             logging.error(f"Failed to create archival object: {catalog_number}")
@@ -945,6 +1037,18 @@ def create_archival_object(row: Dict, client: ArchivesSpaceClient,
                                f"{created_container_uri} was kept and may need manual cleanup")
                     logging.warning(msg)
                     errors.append(msg)
+            elif not client.last_failure_definitive:
+                # No container to compensate, but the outcome is still
+                # unknown: the object may exist. Say so, never "failed".
+                found_count, existing_uri = client.check_component_unique_id(catalog_number)
+                if found_count:
+                    msg = (f"Create response was lost but {catalog_number} EXISTS at "
+                           f"{existing_uri} - verify it in ArchivesSpace")
+                else:
+                    msg = (f"Create outcome unknown (timeout/lost response) - verify "
+                           f"{catalog_number} in ArchivesSpace before rerunning")
+                logging.warning(msg)
+                errors = [msg]
             return None, errors
 
 def update_archival_object(row: Dict, client: ArchivesSpaceClient,
@@ -972,6 +1076,15 @@ def update_archival_object(row: Dict, client: ArchivesSpaceClient,
     if not existing_obj:
         logging.error(f"Failed to retrieve existing object for update: {existing_uri}")
         return None, {}, ["Failed to retrieve existing object"]
+    # The record was resolved during preflight; re-verify it is still the
+    # same logical record right before writing (uri, resource, component_id).
+    if not record_identity_ok(existing_obj, existing_uri, catalog_number):
+        seen = existing_obj if isinstance(existing_obj, dict) else {}
+        return None, {}, [
+            f"Record at {existing_uri} no longer matches item {catalog_number} "
+            f"(now uri={seen.get('uri')!r}, component_id="
+            f"{seen.get('component_id')!r}, level={seen.get('level')!r}"
+            f"{'' if seen else ', response was not a record'}) - refusing to update"]
     
     # Check for date errors before proceeding
     dates, date_errors = create_date_objects(row)
@@ -986,7 +1099,7 @@ def update_archival_object(row: Dict, client: ArchivesSpaceClient,
         return {"uri": existing_uri, "unchanged": True,
                 "ref_id": existing_obj.get("ref_id", ""),
                 "record": existing_obj,
-                "top_container": fetch_linked_container(client, existing_obj)}, {}, []
+                "top_container": fetch_linked_container(client, existing_obj, catalog_number)}, {}, []
     
     # Apply ONLY the detected changes. Rebuilding an unchanged field from the
     # CSV would replace richer existing objects with minimal generated ones,
@@ -1008,11 +1121,31 @@ def update_archival_object(row: Dict, client: ArchivesSpaceClient,
             return None, changes, [
                 f"Record has {count} '{label}' dates; refusing to replace "
                 f"them with one CSV date - update dates manually"]
+        ranged = non_single_date_conflicts(existing_obj, changes)
+        if ranged:
+            label, dtype = ranged[0]
+            return None, changes, [
+                f"Record's '{label}' date is {dtype}; a one-value CSV cell "
+                f"cannot change it - update dates manually"]
         changed_labels = set(changes['dates'][1].keys())
-        replacement_dates = [d for d in dates if d.get('label') in changed_labels]
-        preserved_dates = [d for d in existing_obj.get('dates', [])
-                           if d.get('label') not in changed_labels]
-        existing_obj["dates"] = preserved_dates + replacement_dates
+        # A changed date keeps its existing object (certainty, era, calendar)
+        # IN PLACE and takes only the CSV-managed pair: begin, and the
+        # expression this importer derives from it. Labels new to the record
+        # are appended.
+        new_by_label = {d.get('label'): d for d in dates if d.get('label') in changed_labels}
+        merged_dates = []
+        for d in existing_obj.get('dates', []):
+            label = d.get('label')
+            if label in new_by_label:
+                merged = dict(d)
+                merged['begin'] = new_by_label[label]['begin']
+                merged['expression'] = new_by_label[label]['expression']
+                merged_dates.append(merged)
+                new_by_label.pop(label)
+            else:
+                merged_dates.append(d)
+        merged_dates.extend(new_by_label.values())
+        existing_obj["dates"] = merged_dates
 
     # Extents: this importer manages the record's single extent. Replace it
     # when the record has at most one; on a multi-extent record (extras added
@@ -1023,7 +1156,16 @@ def update_archival_object(row: Dict, client: ArchivesSpaceClient,
         extents = create_extent_objects(row)
         existing_extents = existing_obj.get('extents', [])
         if extents and len(existing_extents) <= 1:
-            existing_obj["extents"] = extents
+            if existing_extents:
+                # Keep everything the record already carries on its extent
+                # (physical_details from aspace-rename-directories.py,
+                # dimensions, container_summary, custom portion/number) -
+                # the CSV manages extent_type and nothing else.
+                merged = dict(existing_extents[0])
+                merged['extent_type'] = extents[0]['extent_type']
+                existing_obj["extents"] = [merged]
+            else:
+                existing_obj["extents"] = extents
         elif extents:
             return None, changes, [
                 f"Record has {len(existing_extents)} extents; refusing to replace "
@@ -1053,9 +1195,32 @@ def update_archival_object(row: Dict, client: ArchivesSpaceClient,
             note_type = note.get('type')
             if note_type in replacements and i == target_index.get(note_type):
                 new_note = replacements.pop(note_type)
-                carried = [sn for sn in note.get('subnotes', [])
-                           if sn.get('jsonmodel_type') != 'note_text']
-                new_note["subnotes"] = new_note.get("subnotes", []) + carried
+                # Replace ONLY the first text subnote (the one detection
+                # compared), in place. Every other subnote survives in its
+                # original order: additional text paragraphs someone added
+                # in the UI, and the Duration defined list.
+                new_text = [sn for sn in new_note.get("subnotes", [])
+                            if sn.get('jsonmodel_type') == 'note_text']
+                merged_subnotes = []
+                replaced = False
+                for sn in note.get('subnotes', []):
+                    # the first text subnote WITH content - exactly the one
+                    # get_note_content read, so the report's old value is the
+                    # text that actually gets replaced
+                    if (not replaced and sn.get('jsonmodel_type') == 'note_text'
+                            and sn.get('content') and new_text):
+                        # Keep the subnote object (its own publish flag and
+                        # anything else on it); change ONLY the content.
+                        updated = dict(sn)
+                        updated['content'] = new_text[0]['content']
+                        merged_subnotes.append(updated)
+                        merged_subnotes.extend(new_text[1:])
+                        replaced = True
+                    else:
+                        merged_subnotes.append(sn)
+                if not replaced:
+                    merged_subnotes = new_text + merged_subnotes
+                new_note["subnotes"] = merged_subnotes
                 for key in ('label', 'publish', 'persistent_id'):
                     if key in note:
                         new_note[key] = note[key]
@@ -1072,22 +1237,28 @@ def update_archival_object(row: Dict, client: ArchivesSpaceClient,
     else:
         result = client.update_record(existing_uri, existing_obj)
 
-        if result:
+        if result is not None:  # a 2xx with an empty body is still a success
             logging.info(f"Successfully updated archival object: {catalog_number}")
             result["ref_id"] = existing_obj.get("ref_id", "")
             # Read the record back as stored (lock_version, system fields,
             # server-side normalization) rather than trusting what was sent.
             fresh = client.get(existing_uri)
-            if isinstance(fresh, dict):
+            if record_identity_ok(fresh, existing_uri, catalog_number):
                 result["record"] = fresh
-                result["top_container"] = fetch_linked_container(client, fresh)
+                result["top_container"] = fetch_linked_container(client, fresh, catalog_number)
             else:
                 logging.warning(f"Could not read back {existing_uri} after update "
                                 f"(the update succeeded; records file will omit it)")
             return result, changes, []
         else:
-            logging.error(f"Failed to update archival object: {catalog_number}")
-            return None, changes, ["Failed to update archival object via API"]
+            if client.last_failure_definitive:
+                logging.error(f"Failed to update archival object: {catalog_number}")
+                return None, changes, ["Failed to update archival object via API"]
+            msg = (f"Update outcome UNKNOWN for {catalog_number} (timeout/lost "
+                   f"response) - verify the record in ArchivesSpace; rerunning "
+                   f"--update-only is safe (an applied change reads back as unchanged)")
+            logging.warning(msg)
+            return None, changes, [msg]
 
 # ==============================
 # CSV PROCESSING
@@ -1301,11 +1472,18 @@ def _preflight_update_only_row(row_num: int, row: Dict, client: ArchivesSpaceCli
         # and the multi-same-label-date guard. Fetch the record once when
         # the row supplies anything those guards need.
         supplies_dates = any(row.get(c, '').strip() for c, _ in col.DATE_COLUMNS)
+        record = client.get(uri)
+        if not isinstance(record, dict):
+            problems.append((row_num, row, f"Could not fetch {catalog_number} to preflight the row"))
+            return
+        # Matching searches every level (a same-id record at ANY level is a
+        # conflict for creates), but update-only edits ITEMS only.
+        if record.get('level') != 'item':
+            problems.append((row_num, row,
+                             f"{catalog_number} is a {record.get('level') or 'non-item'}-level "
+                             f"record, not an item - update-only only edits items"))
+            return
         if original_format or supplies_dates:
-            record = client.get(uri)
-            if record is None:
-                problems.append((row_num, row, f"Could not fetch {catalog_number} to preflight the row"))
-                return
             if original_format:
                 existing_extents = record.get('extents', [])
                 existing_types = [e.get('extent_type') for e in existing_extents]
@@ -1315,12 +1493,20 @@ def _preflight_update_only_row(row_num: int, row: Dict, client: ArchivesSpaceCli
                                      f"'{original_format}' is not among them - update extents manually"))
                     return
             if supplies_dates:
-                conflicts = multi_date_conflicts(record, detect_changes(record, row))
+                detected = detect_changes(record, row)
+                conflicts = multi_date_conflicts(record, detected)
                 if conflicts:
                     detail = ", ".join(f"{count}x '{label}'" for label, count in conflicts)
                     problems.append((row_num, row,
                                      f"{catalog_number} has multiple same-label dates ({detail}) "
                                      f"- update dates manually"))
+                    return
+                ranged = non_single_date_conflicts(record, detected)
+                if ranged:
+                    detail = ", ".join(f"'{label}' is {dtype}" for label, dtype in ranged)
+                    problems.append((row_num, row,
+                                     f"{catalog_number} has a date range the CSV cannot "
+                                     f"express ({detail}) - update dates manually"))
                     return
         resolved[row_num] = uri
 
@@ -1420,11 +1606,13 @@ def process_csv_file_update_only(filename: str, client: ArchivesSpaceClient,
                 result = make_row_result(row_num, row, "updated", message,
                                          uri=resolved[row_num], changes=changes,
                                          ref_id=ao_result.get('ref_id'))
+            else:
+                result = make_row_result(row_num, row, "error", "Failed to update")
+            # The read-back snapshot is optional (absent on dry runs, or when
+            # the post-write read failed) and must never change the outcome.
             if ao_result and ao_result.get('record'):
                 result["record"] = ao_result['record']
                 result["top_container"] = ao_result.get('top_container')
-            else:
-                result = make_row_result(row_num, row, "error", "Failed to update")
         except KeyboardInterrupt:
             # Ctrl-C DURING the row's write: the outcome is UNKNOWN - the
             # server may have committed it. Flag first, then record, so even
@@ -1458,27 +1646,57 @@ def process_csv_file_update_only(filename: str, client: ArchivesSpaceClient,
 
 
 def _preflight_create_row(row_num: int, row: Dict, client: ArchivesSpaceClient,
-                          problems: List):
-    """Phase-1 check for ONE strict-create row: its catalog number must be
-    verifiably NEW. Appends to `problems` on any issue. No writes happen here.
+                          problems: List, parent_cache: Dict = None):
+    """Phase-1 check for ONE strict-create row. Every PREDICTABLE failure is
+    caught here so an abort means nothing was written: the catalog number
+    must be verifiably new, the parent must exist, the extent type must be
+    in the live vocabulary, and the top-container indicator must not be
+    ambiguous. Appends to `problems` on any issue. No writes happen here.
 
     Mirror image of _preflight_update_only_row: update-only aborts when a
     number is missing, strict create aborts when a number exists. Both treat
     "multiple matches" and "lookup failed" as abort - an unverifiable answer
     is never permission to write."""
+    issues = []
     catalog_number = row.get(col.CATALOG, '').strip()
     if not catalog_number:
         problems.append((row_num, row, "Missing catalog number"))
         return
     count, existing_uri = client.check_component_unique_id(catalog_number)
     if count is None:
-        problems.append((row_num, row, f"Lookup failed for {catalog_number}"))
+        issues.append(f"Lookup failed for {catalog_number}")
     elif count == 1:
-        problems.append((row_num, row,
-                         f"{catalog_number} already exists ({existing_uri})"))
+        issues.append(f"{catalog_number} already exists ({existing_uri})")
     elif count > 1:
-        problems.append((row_num, row,
-                         f"{count} records found for {catalog_number} - clean up duplicates first"))
+        issues.append(f"{count} records found for {catalog_number} - clean up duplicates first")
+
+    original_format = row.get(col.ORIGINAL_FORMAT, '').strip()
+    if original_format and not client.validate_extent_type(original_format):
+        issues.append(f"Invalid extent type: '{original_format}'")
+
+    parent_ref_id = row.get(col.PARENT_REFID, '').strip()
+    if not parent_ref_id:
+        issues.append("Missing Parent RefID")
+    else:
+        cache = parent_cache if parent_cache is not None else {}
+        lookup = cache.get(parent_ref_id)
+        if lookup is None:
+            lookup = client.find_parent(parent_ref_id)
+            cache[parent_ref_id] = lookup
+        if lookup.status == "none":
+            issues.append(f"Parent not found: {parent_ref_id}")
+        elif lookup.status != "found":
+            issues.append(f"Parent lookup failed for {parent_ref_id} ({lookup.problem})")
+
+    container = client.find_top_container(catalog_number)
+    if container == "ERROR":
+        issues.append(f"Top container lookup failed for {catalog_number}")
+    elif container == "MULTIPLE":
+        issues.append(f"Multiple 'AV Case' top containers share indicator {catalog_number} "
+                      f"- clean up duplicates first")
+
+    if issues:
+        problems.append((row_num, row, "; ".join(issues)))
 
 
 def process_csv_file(filename: str, client: ArchivesSpaceClient,
@@ -1486,10 +1704,12 @@ def process_csv_file(filename: str, client: ArchivesSpaceClient,
                     state: Dict = None) -> Tuple[List[Dict], Dict]:
     """Process entire CSV file in create mode and return results.
 
-    duplicate_mode 'create' (strict, the default): phase 1 verifies EVERY
-    catalog number is new before anything is written; if any row already
-    exists, matches multiple records, or can't be verified, the entire run
-    aborts with no writes. duplicate_mode 'skip' (--skip-duplicates): no
+    duplicate_mode 'create' (strict, the default): phase 1 preflights EVERY
+    row before anything is written - catalog number verifiably new, parent
+    exists, extent type valid, container indicator unambiguous; if any row
+    fails, the entire run aborts with no writes. (Runtime API failures
+    during phase 2 can still leave a partial create - those are surfaced
+    in the report and the non-zero exit.) duplicate_mode 'skip' (--skip-duplicates): no
     preflight - new rows are created, existing ones skipped, single pass.
 
     `state`, when provided, is populated with the LIVE results/summary
@@ -1530,24 +1750,26 @@ def process_csv_file(filename: str, client: ArchivesSpaceClient,
     # No writes happen here, so an abort means NOTHING was written - fix the
     # sheet and rerun safely. Mirror of --update-only's resolve phase.
     if duplicate_mode == 'create':
-        print_status("info", f"Verifying {len(rows)} catalog number(s) are new "
-                             f"before writing anything...")
+        print_status("info", f"Preflighting {len(rows)} row(s) before writing anything "
+                             f"(catalog number new, parent exists, format valid, "
+                             f"container unambiguous)...")
         problems = []
+        parent_cache = {}
         for row_num, row in enumerate(rows, 1):
             try:
-                _preflight_create_row(row_num, row, client, problems)
+                _preflight_create_row(row_num, row, client, problems, parent_cache)
             except Exception as e:
                 logging.error(f"Preflight failed for row {row_num}: {e}")
                 problems.append((row_num, row, f"Preflight error (malformed row or record): {e}"))
 
         if problems:
-            print_status("error", f"{len(problems)} row(s) failed the all-new check - "
+            print_status("error", f"{len(problems)} row(s) failed preflight - "
                                   f"ABORTING, nothing was written:")
             for row_num, row, msg in problems:
                 print_status("error", f"Row {row_num}: {msg}", indent=1)
             problem_rows = {n for n, r, m in problems}
             if len(problem_rows) < len(rows):
-                print_status("info", f"{len(rows) - len(problem_rows)} row(s) verified new "
+                print_status("info", f"{len(rows) - len(problem_rows)} row(s) passed preflight "
                                      f"but were NOT created because of the rows above:")
                 for row_num, row in enumerate(rows, 1):
                     if row_num not in problem_rows:
@@ -1569,7 +1791,7 @@ def process_csv_file(filename: str, client: ArchivesSpaceClient,
                     # stopped. (Only the duplicate check ran; parent/extent
                     # checks happen at write time.)
                     results.append(make_row_result(row_num, row, "aborted",
-                                                   "Not written - catalog number verified new, but the "
+                                                   "Not written - this row passed preflight, but the "
                                                    "failed rows stopped the run before any writes"))
                     summary["aborted"] += 1
             summary["end_time"] = datetime.now().isoformat()
@@ -1664,6 +1886,8 @@ def generate_reports(results: List[Dict], summary: Dict) -> bool:
          'staff_link': staff_link_for(r.get('uri'))}
         for r in results
     ]
+    # Completeness accounting happens BEFORE any receipt is written, so the
+    # JSON summary carries the same counts the console and records file show.
     records = {}
     for r in results:
         if r.get('record'):
@@ -1674,20 +1898,36 @@ def generate_reports(results: List[Dict], summary: Dict) -> bool:
                 "archival_object": r['record'],
                 "top_container": r.get('top_container'),
             }
-    if records:
-        try:
-            tmp_path = RECORDS_REPORT + '.tmp'
-            with open(tmp_path, 'w', encoding='utf-8') as f:
-                json.dump({"summary": {k: summary.get(k) for k in
-                                       ('command', 'environment', 'duplicate_mode',
-                                        'dry_run', 'start_time')},
-                           "records": records}, f, indent=2)
-            os.replace(tmp_path, RECORDS_REPORT)
+    # Completeness: every written/verified row should have a record snapshot
+    # unless this was a dry run, and every record that links a container
+    # should have that container's snapshot too. Both are counted separately,
+    # named in the console, and embedded in the records file - which is
+    # written whenever snapshots were expected, even if none were captured,
+    # so incompleteness is on record rather than silently absent.
+    expected = []
+    if not summary.get('dry_run'):
+        expected = [r for r in results if r.get('status') in ('created', 'updated', 'unchanged')]
+        missing = [r.get(col.CATALOG) or r.get('uri') for r in expected if not r.get('record')]
+        with_link = [r for r in expected if r.get('record') and linked_container_ref(r['record'])]
+        containers_missing = [r.get(col.CATALOG) or r.get('uri') for r in with_link
+                              if not r.get('top_container')]
+        summary["snapshots_expected"] = len(expected)
+        summary["snapshots_captured"] = len(expected) - len(missing)
+        if records or expected:
+            # announced here so the JSON receipt carries the path; a failed
+            # write below fails the run (ok=False -> exit 3) regardless
             summary["records_file"] = RECORDS_REPORT
-            logging.info(f"Records file saved: {RECORDS_REPORT} ({len(records)} record(s))")
-        except Exception as e:
-            ok = False
-            logging.error(f"Failed to write records file: {str(e)}")
+        summary["containers_expected"] = len(with_link)
+        summary["containers_captured"] = len(with_link) - len(containers_missing)
+        if missing:
+            summary["snapshots_missing"] = missing
+            logging.warning(f"Records file is incomplete: {len(missing)} of {len(expected)} "
+                            f"record read-backs failed: {', '.join(map(str, missing))}")
+        if containers_missing:
+            summary["containers_missing"] = containers_missing
+            logging.warning(f"Records file is incomplete: {len(containers_missing)} of "
+                            f"{len(with_link)} container read-backs failed: "
+                            f"{', '.join(map(str, containers_missing))}")
     try:
         # Write-then-rename: the final report path only ever holds a COMPLETE
         # file. An interrupt mid-write leaves a .tmp (never mistakable for the
@@ -1720,6 +1960,26 @@ def generate_reports(results: List[Dict], summary: Dict) -> bool:
     except Exception as e:
         ok = False
         logging.error(f"Failed to write JSON report: {str(e)}")
+    # The receipts (CSV + JSON) are the audit trail and are written first;
+    # the records file (snapshots as stored) comes after.
+    if records or expected:
+        try:
+            tmp_path = RECORDS_REPORT + '.tmp'
+            with open(tmp_path, 'w', encoding='utf-8') as f:
+                json.dump({"summary": {k: summary.get(k) for k in
+                                       ('command', 'environment', 'duplicate_mode',
+                                        'dry_run', 'start_time',
+                                        'snapshots_expected', 'snapshots_captured',
+                                        'snapshots_missing',
+                                        'containers_expected', 'containers_captured',
+                                        'containers_missing')
+                                       if k in summary},
+                           "records": records}, f, indent=2)
+            os.replace(tmp_path, RECORDS_REPORT)
+            logging.info(f"Records file saved: {RECORDS_REPORT} ({len(records)} record(s))")
+        except Exception as e:
+            ok = False
+            logging.error(f"Failed to write records file: {str(e)}")
     return ok
 
 
@@ -1776,16 +2036,27 @@ def print_summary(summary: Dict, elapsed_time: str = None):
     
     print(f"\n  Reports: {OUTPUT_DIR}/")
     if summary.get('records_file'):
-        print(f"  Records (as stored in ASpace): {os.path.basename(summary['records_file'])}")
+        print(f"  Records (as stored in ASpace): {os.path.basename(summary['records_file'])} "
+              f"(records: {summary.get('snapshots_captured', '?')} of "
+              f"{summary.get('snapshots_expected', '?')}, containers: "
+              f"{summary.get('containers_captured', '?')} of "
+              f"{summary.get('containers_expected', '?')} captured)")
+    if summary.get('snapshots_missing') or summary.get('containers_missing'):
+        gaps = []
+        if summary.get('snapshots_missing'):
+            gaps.append(f"record read-back failed for {', '.join(map(str, summary['snapshots_missing']))}")
+        if summary.get('containers_missing'):
+            gaps.append(f"container read-back failed for {', '.join(map(str, summary['containers_missing']))}")
+        print(f"  {Colors.YELLOW}Records file incomplete:{Colors.RESET} {'; '.join(gaps)} "
+              f"- the writes succeeded; those snapshots are missing")
     print(f"{Colors.DIM}{'-' * 60}{Colors.RESET}\n")
 
 # ==============================
 # MAIN EXECUTION
 # ==============================
 
-def main():
-    """Main execution function."""
-    
+def build_parser() -> argparse.ArgumentParser:
+    """The importer's command-line parser (module-level so tests can drive it)."""
     # Custom ArgumentParser for cleaner usage and colored errors
     class CustomArgumentParser(argparse.ArgumentParser):
         def format_usage(self):
@@ -1871,8 +2142,51 @@ def main():
         action='store_true',
         help=argparse.SUPPRESS
     )
+    return parser
 
+
+def recorded_command(args: argparse.Namespace) -> str:
+    """The command line for the audit trail, rebuilt from PARSED arguments.
+
+    Raw argv can't be redacted reliably - argparse accepts abbreviated long
+    options (--pass, --p) and clustered short options (-nphunter2) - so the
+    recorded form is regenerated from what the parser understood, with the
+    password reduced to a marker that it was supplied. Canonical spellings
+    throughout, so recorded commands are also directly re-runnable (a
+    password-bearing one fails authentication rather than doing anything).
+    """
+    parts = [os.path.basename(sys.executable), os.path.basename(sys.argv[0])]
+    if args.create_records:
+        parts.append('--create-records')
+    if args.update_only:
+        parts.append('--update-only')
+    if args.skip_duplicates:
+        parts.append('--skip-duplicates')
+    if args.dry_run:
+        parts.append('--dry-run')
+    if args.env:
+        parts += ['--env', args.env]
+    parts += ['-f', args.file]
+    if args.username:
+        parts += ['-u', args.username]
+    if args.no_color:
+        parts.append('--no-color')
+    command = " ".join(_shlex.quote(a) for a in parts)
+    if args.password:
+        # A CLI password was supplied; the value is never recorded. The
+        # placeholder is a plain word (no glob characters) so the recorded
+        # command stays safe to paste into zsh.
+        command += " -p REDACTED"
+    return command
+
+
+def main():
+    """Main execution function."""
+    global RUN_COMMAND
+    parser = build_parser()
     args = parser.parse_args()
+    # From here on the audit trail records the parsed, password-free form.
+    RUN_COMMAND = recorded_command(args)
 
     if not (args.create_records or args.update_only):
         # help=SUPPRESS leaves argparse's own required-group message blank,

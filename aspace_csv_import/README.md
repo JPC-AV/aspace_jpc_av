@@ -177,9 +177,10 @@ answer is never permission to write.
 python aspace_csv_import.py --create-records -f file.csv
 ```
 - For sheets where every row is genuinely new
-- Preflights every catalog number first; if ANY already exists, the whole
-  run aborts before anything is written (the report lists which rows exist,
-  with links)
+- Preflights every row first - catalog number verifiably new, parent
+  exists, format valid, container indicator unambiguous; if ANY row fails,
+  the whole run aborts before anything is written (the report lists every
+  problem row, with links)
 - A clean, careful run: no silent skips hiding a surprise
 
 ### Create, skipping existing (--skip-duplicates)
