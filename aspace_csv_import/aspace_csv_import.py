@@ -92,7 +92,7 @@ def print_section(text: str):
 # (the help text went stale once before for exactly this reason).
 CLI_OPTIONS = [
     ("-f, --file FILE", "(required)", "CSV file to import"),
-    ("-n, --dry-run", "", "Preview changes without creating records"),
+    ("-n, --dry-run", "", "Preview - no ArchivesSpace writes of any kind"),
     ("-u, --username USER", "", "ASpace username (or use creds.py)"),
     ("-p, --password PASS", "", "ASpace password (or use creds.py)"),
     ("--env NAME", "", "Target environment from creds.py (required when several are configured)"),
@@ -178,8 +178,10 @@ import aspace_client
 from aspace_client import ASpaceClient
 import requests  # after aspace_client: its friendly missing-package guard runs first
 
-if not aspace_client.ENVIRONMENTS:
-    print("Warning: creds.py not found. See creds_template.py in repo root for format.")
+# (No import-time warning about creds.py: this module is imported by tools
+# that need no credentials at all - offline validation, the public MADS
+# check - and every tool that DOES need them reports a missing or broken
+# creds.py precisely, at the moment it matters.)
 
 # Import optional logs_dir (may not exist in older creds.py files)
 try:
@@ -308,7 +310,7 @@ def validate_csv_before_import(filename: str, update_only: bool = False) -> Tupl
 
     try:
         with col.open_csv(filename) as csvfile:
-            reader = csv.DictReader(csvfile)
+            reader = csv.DictReader(csvfile, strict=True)
             headers = reader.fieldnames or []
 
             # Duplicate header names are a wrong-record hazard: DictReader
@@ -317,13 +319,7 @@ def validate_csv_before_import(filename: str, update_only: bool = False) -> Tupl
             # a human while being a separate stale column. Compare normalized
             # names; empty header cells (stray trailing commas) are ignored -
             # they carry no data the importer reads.
-            groups = {}
-            for header in headers:
-                key = (header or '').strip().casefold()
-                if key:
-                    groups.setdefault(key, []).append(header)
-            duplicates = sorted(', '.join(repr(n) for n in names)
-                                for names in groups.values() if len(names) > 1)
+            duplicates = col.duplicate_headers(headers)  # shared rule (csv_columns)
             if duplicates:
                 errors.append(f"Duplicate column header(s): {'; '.join(duplicates)} "
                               f"- remove the stale duplicate column(s) first")
@@ -364,12 +360,25 @@ def validate_csv_before_import(filename: str, update_only: bool = False) -> Tupl
 
             # Validate each row
             catalog_numbers = set()
+            row_count = 0
             
             for row_num, row in enumerate(reader, 1):
+                row_count += 1
+                # Cells beyond the header (DictReader files them under None):
+                # an unquoted comma has shifted this row's fields - refuse it
+                # rather than import shifted data and drop the overflow.
+                overflow = col.overflow_problem(row, row_num)  # shared rule (csv_columns)
+                if overflow:
+                    errors.append(overflow)
+                    continue
                 # Check catalog number
-                catalog_num = row.get(col.CATALOG, '').strip()
+                catalog_num = (row.get(col.CATALOG) or '').strip()
                 if not catalog_num:
                     errors.append(f"Row {row_num}: Missing CATALOG_NUMBER")
+                elif not col.valid_catalog_number(catalog_num):
+                    # JPC_AV_12O01 (letter O) must bounce here, not become a record
+                    errors.append(f"Row {row_num}: Malformed CATALOG_NUMBER {catalog_num!r} "
+                                  f"- must be JPC_AV_ followed by digits")
                 elif catalog_num in catalog_numbers:
                     errors.append(f"Row {row_num}: Duplicate CATALOG_NUMBER: {catalog_num}")
                 else:
@@ -377,22 +386,34 @@ def validate_csv_before_import(filename: str, update_only: bool = False) -> Tupl
                 
                 # Check parent ref_id (create runs only - updates never use it)
                 if not update_only:
-                    parent_ref = row.get(col.PARENT_REFID, '').strip()
+                    parent_ref = (row.get(col.PARENT_REFID) or '').strip()
                     if not parent_ref:
                         errors.append(f"Row {row_num}: Missing ASpace Parent RefID")
 
                 # Check dates
                 for date_field, _label in col.DATE_COLUMNS:
-                    date_val = row.get(date_field, '').strip()
+                    date_val = (row.get(date_field) or '').strip()
                     if date_val:
-                        parsed = parse_date(date_val)
+                        parsed = parse_date(date_val, strict_range=not update_only)
                         if parsed is None:  # None means invalid, "" means empty
                             errors.append(f"Row {row_num}: Invalid {date_field}: {date_val}")
+                        elif update_only and not col.begin_in_range(parsed):
+                            # an exported legacy date may sit outside the range;
+                            # it is kept only if it matches the stored date
+                            warnings.append(f"Row {row_num}: {date_field} {date_val} is outside "
+                                            f"{col.AV_DATE_YEAR_RANGE[0]}-{col.AV_DATE_YEAR_RANGE[1]} "
+                                            f"- accepted only if unchanged from the stored date")
 
                 # Check title (warning only; irrelevant when the column isn't managed)
-                if col.TITLE in headers and not row.get(col.TITLE, '').strip():
+                if col.TITLE in headers and not (row.get(col.TITLE) or '').strip():
                     if not update_only:
                         warnings.append(f"Row {row_num}: Empty TITLE (will use CATALOG_NUMBER)")
+
+            if row_count == 0:
+                # Same rule as csv_utils: a header-only sheet is an empty
+                # export or a wrong filter, never a successful zero-row run.
+                errors.append("CSV has no data rows (header only) - an empty "
+                              "export or a wrong filter?")
     
     except Exception as e:
         errors.append(f"Error reading CSV: {str(e)}")
@@ -470,35 +491,64 @@ class ArchivesSpaceClient(ASpaceClient):
             enum_id = None
             if isinstance(enums, list):
                 for enum in enums:
-                    if enum.get('name') == 'extent_extent_type':
+                    if isinstance(enum, dict) and enum.get('name') == 'extent_extent_type':
                         enum_id = enum.get('id')
                         break
             # Guarded fallback to the conventional ID 14, but only if it really is
             # the extent_extent_type enumeration on this instance.
             if enum_id is None:
                 candidate = self.get("/config/enumerations/14")
-                if candidate and candidate.get('name') == 'extent_extent_type':
+                if isinstance(candidate, dict) and candidate.get('name') == 'extent_extent_type':
                     enum_id = 14
             if enum_id is None:
                 logging.error("Could not locate the 'extent_extent_type' enumeration in ArchivesSpace")
                 return None
             result = self.get(f"/config/enumerations/{enum_id}")
-            if result and 'enumeration_values' in result:
-                return [v['value'] for v in result['enumeration_values']] or None
-        except (requests.RequestException, KeyError, TypeError) as e:
+            if not isinstance(result, dict) or result.get('name') != 'extent_extent_type':
+                # The record fetched by id must identify as the enumeration
+                # we resolved - any other vocabulary is the wrong list.
+                logging.error("Fetched enumeration does not identify as 'extent_extent_type'")
+                return None
+            # ArchivesSpace serves the vocabulary two ways: `values` is the
+            # SELECTABLE list, `enumeration_values` the full records including
+            # SUPPRESSED (retired) terms. A retired term must not pass - so
+            # prefer `values`, and when only the full records are present
+            # drop anything flagged suppressed.
+            values = result.get('values')
+            if not isinstance(values, list):
+                values = [v.get('value') for v in result.get('enumeration_values') or []
+                          if isinstance(v, dict) and not v.get('suppressed')]
+            # The vocabulary must be a list of unique, non-empty strings -
+            # anything else is a malformed response, not a smaller vocabulary.
+            if (not values or not all(isinstance(v, str) and v for v in values)
+                    or len(set(values)) != len(values)):
+                logging.error("Malformed extent_extent_type vocabulary response")
+                return None
+            return values
+        except (requests.RequestException, KeyError, TypeError, AttributeError) as e:
             logging.error(f"Could not fetch extent types from API: {e}")
         return None
 
-    def validate_extent_type(self, extent_type: str) -> bool:
-        """Validate that an extent type exists in ArchivesSpace.
-
-        Fails closed: if the controlled vocabulary is unavailable, every extent
-        type is treated as invalid rather than assumed valid."""
+    def extent_type_status(self, extent_type: str) -> str:
+        """'valid', 'invalid', or 'unavailable' (the vocabulary could not be
+        fetched). The three are kept apart so an outage is reported as an
+        outage - never as "your data is wrong". The vocabulary is fetched
+        lazily once; a failed fetch is remembered for the run rather than
+        retried on every row."""
         if not getattr(self, '_valid_extent_types', None):
+            if getattr(self, '_extent_vocab_failed', False):
+                return "unavailable"
             self._valid_extent_types = self.get_extent_types()
-        if not self._valid_extent_types:
-            return False
-        return extent_type in self._valid_extent_types
+            if not self._valid_extent_types:
+                self._extent_vocab_failed = True
+                return "unavailable"
+        return "valid" if extent_type in self._valid_extent_types else "invalid"
+
+    def validate_extent_type(self, extent_type: str) -> bool:
+        """True only for a term present in the live vocabulary. Fails closed:
+        an unavailable vocabulary validates nothing (see extent_type_status
+        for the distinction)."""
+        return self.extent_type_status(extent_type) == "valid"
     
     def find_top_container(self, indicator: str) -> Optional[str]:
         """Legacy sentinel adapter over the shared find_top_container.
@@ -542,9 +592,12 @@ class ArchivesSpaceClient(ASpaceClient):
 # DATE PROCESSING
 # ==============================
 
-def parse_date(date_string: str) -> Optional[str]:
-    """Convert M/D/YYYY or similar formats to YYYY-MM-DD.
-    
+def parse_date(date_string: str, strict_range: bool = True) -> Optional[str]:
+    """Normalize a CSV date: full dates become YYYY-MM-DD; partial ISO dates
+    (YYYY, YYYY-MM) are accepted and kept as-is - many
+    cataloged records carry a year-only begin date, and an export must
+    round-trip untouched.
+
     Returns:
         Formatted date string, empty string if input was empty, or None if invalid.
     """
@@ -552,6 +605,13 @@ def parse_date(date_string: str) -> Optional[str]:
         return ""  # Empty is OK, not an error
     
     date_string = date_string.strip()
+    partial = re.fullmatch(r"([0-9]{4})(?:-([0-9]{2}))?", date_string)  # ASCII digits only
+    if partial:
+        month = partial.group(2)
+        if (month is None or 1 <= int(month) <= 12) and (
+                not strict_range or col.year_in_range(int(partial.group(1)))):
+            return date_string
+        return None
     
     # Accepted formats per the CSV contract: US month-first or ISO. Day-first
     # (%d/%m/%Y) is deliberately NOT accepted - a value like 13/02/2024 is
@@ -567,16 +627,43 @@ def parse_date(date_string: str) -> Optional[str]:
     for fmt in formats:
         try:
             date_obj = datetime.strptime(date_string, fmt)
-            return date_obj.strftime("%Y-%m-%d")
         except ValueError:
             continue
+        if fmt == "%m/%d/%y":
+            # Two-digit year: Python's own cutoff (00-68 -> 20xx) would file a
+            # 1965 tape under 2065. The collection's range (csv_columns) is
+            # fixed, so the same sheet parses the same way in any year.
+            date_obj = date_obj.replace(year=col.resolve_two_digit_year(date_obj.year))
+        if strict_range and not col.year_in_range(date_obj.year):
+            return None  # outside 1940-2020: impossible for this material - a typo
+        return date_obj.strftime("%Y-%m-%d")
     
     # Invalid date - return None to signal error
     return None
 
-def create_date_objects(row: Dict) -> Tuple[List[Dict], List[str]]:
+def out_of_range_date_changes(changes: Dict) -> Optional[str]:
+    """A refusal message if any CHANGED date would set a value outside the
+    AV range, else None. An unchanged legacy date never trips this (it is
+    not in `changes`), so exported sheets round-trip; only writing a new
+    impossible date is refused."""
+    if 'dates' not in changes:
+        return None
+    lo, hi = col.AV_DATE_YEAR_RANGE
+    bad = [f"'{label}' -> {begin}" for label, begin in changes['dates'][1].items()
+           if begin and not col.begin_in_range(begin)]
+    if bad:
+        return (f"Refusing to change a date to a value outside {lo}-{hi} "
+                f"({', '.join(bad)}) - impossible for this material; a typo?")
+    return None
+
+
+def create_date_objects(row: Dict, strict_range: bool = True) -> Tuple[List[Dict], List[str]]:
     """Create ArchivesSpace date objects from CSV row.
-    
+
+    strict_range=False (update paths) lets an out-of-range date through so it
+    can be compared with the stored one; the update paths then refuse any
+    CHANGE to an out-of-range value. Create paths keep the strict rule.
+
     Returns:
         Tuple of (date objects list, error messages list)
     """
@@ -586,7 +673,7 @@ def create_date_objects(row: Dict) -> Tuple[List[Dict], List[str]]:
     for column, label in col.DATE_COLUMNS:
         if not row.get(column):
             continue
-        date_str = parse_date(row[column])
+        date_str = parse_date(row[column], strict_range=strict_range)
         if date_str is None:
             errors.append(f"Invalid {column}: {row[column]}")
         elif date_str:  # Not empty string
@@ -608,7 +695,7 @@ def create_extent_objects(row: Dict) -> List[Dict]:
     """Create ArchivesSpace extent objects from CSV row."""
     extents = []
     
-    original_format = row.get(col.ORIGINAL_FORMAT, '').strip()
+    original_format = (row.get(col.ORIGINAL_FORMAT) or '').strip()
     if original_format:
         extent = {
             "portion": "whole",
@@ -631,7 +718,7 @@ def create_notes(row: Dict) -> List[Dict]:
     # Scope and Contents note from DESCRIPTION
     scope_content_parts = []
     
-    description = row.get(col.DESCRIPTION, '').strip()
+    description = (row.get(col.DESCRIPTION) or '').strip()
     if description:
         scope_content_parts.append({
             "jsonmodel_type": "note_text",
@@ -648,7 +735,7 @@ def create_notes(row: Dict) -> List[Dict]:
         })
     
     # Physical Characteristics and Technical Requirements note from ASpace PhysTech Note
-    phystech_note = row.get(col.PHYSTECH, '').strip()
+    phystech_note = (row.get(col.PHYSTECH) or '').strip()
     if phystech_note:
         notes.append({
             "jsonmodel_type": "note_multipart",
@@ -677,7 +764,7 @@ def create_instances(row: Dict, client: ArchivesSpaceClient) -> Tuple[List[Dict]
     it again if the archival object fails to create. Any errors mean the row
     must not proceed.
     """
-    catalog_number = row.get(col.CATALOG, '').strip()
+    catalog_number = (row.get(col.CATALOG) or '').strip()
     if not catalog_number:
         return [], None, []
 
@@ -773,17 +860,21 @@ def detect_changes(existing_obj: Dict, row: Dict) -> Dict[str, Tuple[Any, Any]]:
     changes = {}
 
     # Check title
-    new_title = row.get(col.TITLE, '').strip()
+    new_title = (row.get(col.TITLE) or '').strip()
     if new_title and existing_obj.get('title') != new_title:
         changes['title'] = (existing_obj.get('title'), new_title)
 
     # Check dates. Dates merge by label: only the labels the CSV supplies are
     # compared/replaced; existing dates under other labels (including ones this
     # importer doesn't manage) are left alone.
-    new_dates, _ = create_date_objects(row)  # Errors checked elsewhere
+    new_dates, _ = create_date_objects(row, strict_range=False)  # Errors checked elsewhere
     existing_dates = existing_obj.get('dates', [])
 
-    existing_begins = {d.get('label'): d.get('begin') for d in existing_dates}
+    # FIRST same-label date - the one the export writes and the apply path
+    # merges - so an untouched exported row never reads as a change.
+    existing_begins = {}
+    for d in existing_dates:
+        existing_begins.setdefault(d.get('label'), d.get('begin'))
     new_begins = {d.get('label'): d.get('begin') for d in new_dates}
 
     changed_labels = {label for label, begin in new_begins.items()
@@ -794,10 +885,10 @@ def detect_changes(existing_obj: Dict, row: Dict) -> Dict[str, Tuple[Any, Any]]:
             {label: new_begins[label] for label in changed_labels},
         )
 
-    # Check extents (only when the CSV provides one). Mirrors the apply rule:
-    # a single-extent record is compared directly; a multi-extent record only
-    # counts as changed when the CSV type is absent entirely (which the apply
-    # step refuses as a destructive collapse).
+    # Check extents (only when the CSV provides one). The CSV value is compared
+    # against the FIRST extent - the one the export writes - so any difference
+    # is a change. On a single-extent record the apply step changes the type;
+    # on a multi-extent record it refuses (the CSV cannot say which extent).
     new_extents = create_extent_objects(row)
     existing_extents = existing_obj.get('extents', [])
 
@@ -805,23 +896,26 @@ def detect_changes(existing_obj: Dict, row: Dict) -> Dict[str, Tuple[Any, Any]]:
     new_extent_types = [e.get('extent_type') for e in new_extents]
 
     if new_extent_types:
-        if len(existing_extent_types) <= 1:
-            if existing_extent_types != new_extent_types:
-                changes['extents'] = (existing_extent_types, new_extent_types)
-        elif new_extent_types[0] not in existing_extent_types:
+        # Compare against the FIRST extent - the value the export writes and
+        # the one an operator edits. On a multi-extent record any difference
+        # is a change (which the apply/preflight guards then refuse, since
+        # the CSV cannot express which extent to alter); matching a value
+        # that merely exists on a LATER extent must never read as unchanged,
+        # or an edit is silently dropped with "No changes needed".
+        if existing_extent_types[:1] != new_extent_types[:1]:
             changes['extents'] = (existing_extent_types, new_extent_types)
 
     # Check scopecontent note
     existing_notes = existing_obj.get('notes', [])
     existing_scope = get_note_content(existing_notes, 'scopecontent')
-    new_description = row.get(col.DESCRIPTION, '').strip()
+    new_description = (row.get(col.DESCRIPTION) or '').strip()
 
     if new_description and existing_scope != new_description:
         changes['description'] = (_note_preview(existing_scope), _note_preview(new_description))
 
     # Check phystech note (imported on create, so update must track it too)
     existing_phystech = get_note_content(existing_notes, 'phystech')
-    new_phystech = row.get(col.PHYSTECH, '').strip()
+    new_phystech = (row.get(col.PHYSTECH) or '').strip()
 
     if new_phystech and existing_phystech != new_phystech:
         changes['phystech'] = (_note_preview(existing_phystech), _note_preview(new_phystech))
@@ -941,12 +1035,12 @@ def create_archival_object(row: Dict, client: ArchivesSpaceClient,
         "publish": True
     }
     
-    title = row.get(col.TITLE, '').strip()
+    catalog_number = (row.get(col.CATALOG) or '').strip()
+    title = (row.get(col.TITLE) or '').strip()
     if not title:
-        title = row.get(col.CATALOG)
+        title = catalog_number  # the same normalized value the record is keyed by
     ao_data["title"] = title
     
-    catalog_number = row.get(col.CATALOG, '').strip()
     if catalog_number:
         ao_data["component_id"] = catalog_number
     
@@ -999,16 +1093,25 @@ def create_archival_object(row: Dict, client: ArchivesSpaceClient,
             # record), so fetch it for the report. If this read fails the
             # record was still created - report the row as created with the
             # ref_id blank, never as a failure.
-            created = client.get(result['uri'])
-            if (record_identity_ok(created, result['uri'], catalog_number)
-                    and created.get('ref_id')):
-                result['ref_id'] = created['ref_id']
-                result['record'] = created  # the read-back, for the records file
-                result['top_container'] = fetch_linked_container(client, created, catalog_number)
-            else:
-                logging.warning(f"Read-back of {result['uri']} failed or did not identify "
-                                f"as that uri - ref_id left blank (record was created; "
-                                f"look it up in ArchivesSpace)")
+            try:
+                created = client.get(result['uri'])
+                if (record_identity_ok(created, result['uri'], catalog_number)
+                        and created.get('ref_id')):
+                    result['ref_id'] = created['ref_id']
+                    result['record'] = created  # the read-back, for the records file
+                    result['top_container'] = fetch_linked_container(client, created, catalog_number)
+                else:
+                    logging.warning(f"Read-back of {result['uri']} failed or did not identify "
+                                    f"as that uri - ref_id left blank (record was created; "
+                                    f"look it up in ArchivesSpace)")
+            except Exception as snap_err:
+                # The write is confirmed; the snapshot is optional. A crash
+                # while collecting it (a malformed read-back) must never turn
+                # a created record into a reported failure.
+                logging.warning(f"Snapshot of {result['uri']} failed after a confirmed create "
+                                f"({snap_err}) - records file will omit it")
+                result.pop('record', None)
+                result.pop('top_container', None)
             return result, []
         else:
             logging.error(f"Failed to create archival object: {catalog_number}")
@@ -1059,7 +1162,7 @@ def update_archival_object(row: Dict, client: ArchivesSpaceClient,
     importer manages - dates merge by label; the extent is replaced only on
     records with at most one extent (multi-extent records are never collapsed;
     an actual extent change on one errors the row); for each managed note type
-    the FIRST note's text is replaced while its non-text subnotes (e.g. the
+    the first TEXT-BEARING note's first paragraph is replaced while its other subnotes (e.g. the
     Duration defined list added by aspace-rename-directories.py) and any
     additional same-type notes are preserved. A blank CSV cell leaves the
     existing value untouched. This import can never clear a field - deletions
@@ -1070,7 +1173,7 @@ def update_archival_object(row: Dict, client: ArchivesSpaceClient,
         Tuple of (result dict or None, changes dict, error messages list)
     """
     
-    catalog_number = row.get(col.CATALOG, '').strip()
+    catalog_number = (row.get(col.CATALOG) or '').strip()
     
     existing_obj = client.get(existing_uri)
     if not existing_obj:
@@ -1086,20 +1189,28 @@ def update_archival_object(row: Dict, client: ArchivesSpaceClient,
             f"{seen.get('component_id')!r}, level={seen.get('level')!r}"
             f"{'' if seen else ', response was not a record'}) - refusing to update"]
     
-    # Check for date errors before proceeding
-    dates, date_errors = create_date_objects(row)
+    # Check for date errors before proceeding (non-strict: an unchanged
+    # legacy date outside the range must not block an unrelated edit)
+    dates, date_errors = create_date_objects(row, strict_range=False)
     if date_errors:
         return None, {}, date_errors
     
     # Detect what would change
     changes = detect_changes(existing_obj, row)
+    bad = out_of_range_date_changes(changes)
+    if bad:
+        return None, changes, [bad]
     
     if not changes:
         logging.info(f"No changes needed for: {catalog_number}")
-        return {"uri": existing_uri, "unchanged": True,
-                "ref_id": existing_obj.get("ref_id", ""),
-                "record": existing_obj,
-                "top_container": fetch_linked_container(client, existing_obj, catalog_number)}, {}, []
+        unchanged = {"uri": existing_uri, "unchanged": True,
+                     "ref_id": existing_obj.get("ref_id", "")}
+        if not dry_run:
+            # the verified record IS its own snapshot - but a dry run writes
+            # no records file at all, so it collects nothing either
+            unchanged["record"] = existing_obj
+            unchanged["top_container"] = fetch_linked_container(client, existing_obj, catalog_number)
+        return unchanged, {}, []
     
     # Apply ONLY the detected changes. Rebuilding an unchanged field from the
     # CSV would replace richer existing objects with minimal generated ones,
@@ -1107,7 +1218,7 @@ def update_archival_object(row: Dict, client: ArchivesSpaceClient,
     # expression/certainty, extent physical_details - which
     # aspace-rename-directories.py sets - note labels/publish flags).
     if 'title' in changes:
-        existing_obj["title"] = row.get(col.TITLE, '').strip()
+        existing_obj["title"] = (row.get(col.TITLE) or '').strip()
 
     # Dates: replace only the CHANGED labels. Same-label dates whose begin is
     # unchanged keep their existing object (expression, certainty, etc.);
@@ -1147,13 +1258,23 @@ def update_archival_object(row: Dict, client: ArchivesSpaceClient,
         merged_dates.extend(new_by_label.values())
         existing_obj["dates"] = merged_dates
 
-    # Extents: this importer manages the record's single extent. Replace it
-    # when the record has at most one; on a multi-extent record (extras added
-    # manually or by another workflow) never collapse them - detection only
-    # flags multi-extent records when the CSV type is absent, which is a
-    # destructive collapse we refuse.
+    # Extents: this importer manages one extent (a record may have zero or
+    # one). Change its type when the record has at most one; on a multi-extent
+    # record (extras added manually or by another workflow) never collapse
+    # them - a detected change there (CSV differs from the first extent) is
+    # refused, since the CSV cannot say which extent to alter.
     if 'extents' in changes:
         extents = create_extent_objects(row)
+        if extents:
+            # The freshly fetched record says the format IS changing (even if
+            # preflight saw it as unchanged): the term must be in the live
+            # vocabulary right now. Cached for the run - no extra requests.
+            status = client.extent_type_status(extents[0]['extent_type'])
+            if status == "unavailable":
+                return None, changes, ["Extent vocabulary could not be fetched from "
+                                       "ArchivesSpace - cannot verify the format change; retry later"]
+            if status == "invalid":
+                return None, changes, [f"Invalid extent type: '{extents[0]['extent_type']}'"]
         existing_extents = existing_obj.get('extents', [])
         if extents and len(existing_extents) <= 1:
             if existing_extents:
@@ -1171,7 +1292,7 @@ def update_archival_object(row: Dict, client: ArchivesSpaceClient,
                 f"Record has {len(existing_extents)} extents; refusing to replace "
                 f"them with the single CSV extent - update extents manually"]
 
-    # Notes: replace only the FIRST note of each CHANGED managed type,
+    # Notes: replace only the first TEXT-BEARING note of each CHANGED managed type,
     # preserving (a) its note-level metadata (label, publish, persistent_id),
     # (b) its non-text subnotes - e.g. the Duration defined list that
     # aspace-rename-directories.py adds to the phystech note - and (c) any
@@ -1242,13 +1363,20 @@ def update_archival_object(row: Dict, client: ArchivesSpaceClient,
             result["ref_id"] = existing_obj.get("ref_id", "")
             # Read the record back as stored (lock_version, system fields,
             # server-side normalization) rather than trusting what was sent.
-            fresh = client.get(existing_uri)
-            if record_identity_ok(fresh, existing_uri, catalog_number):
-                result["record"] = fresh
-                result["top_container"] = fetch_linked_container(client, fresh, catalog_number)
-            else:
-                logging.warning(f"Could not read back {existing_uri} after update "
-                                f"(the update succeeded; records file will omit it)")
+            try:
+                fresh = client.get(existing_uri)
+                if record_identity_ok(fresh, existing_uri, catalog_number):
+                    result["record"] = fresh
+                    result["top_container"] = fetch_linked_container(client, fresh, catalog_number)
+                else:
+                    logging.warning(f"Could not read back {existing_uri} after update "
+                                    f"(the update succeeded; records file will omit it)")
+            except Exception as snap_err:
+                # The update is confirmed; a snapshot crash must not misreport it.
+                logging.warning(f"Snapshot of {existing_uri} failed after a confirmed update "
+                                f"({snap_err}) - records file will omit it")
+                result.pop("record", None)
+                result.pop("top_container", None)
             return result, changes, []
         else:
             if client.last_failure_definitive:
@@ -1321,15 +1449,23 @@ def process_csv_row(row: Dict, row_num: int, client: ArchivesSpaceClient,
     result = make_row_result(row_num, row)
     
     try:
-        catalog_number = row.get(col.CATALOG, '').strip()
+        catalog_number = (row.get(col.CATALOG) or '').strip()
         if not catalog_number:
             result["status"] = "skipped"
             result["message"] = "Missing catalog number"
             logging.warning(f"Row {row_num}: Skipped - missing catalog number")
             return result
+        if not col.valid_catalog_number(catalog_number):
+            # Defense in depth for the single-pass path (validation already
+            # bounces these): a malformed number is never looked up or created.
+            result["status"] = "error"
+            result["message"] = (f"Malformed catalog number {catalog_number!r} "
+                                 f"- must be JPC_AV_ followed by digits")
+            logging.error(f"Row {row_num}: {result['message']}")
+            return result
         
         # Validate extent type
-        original_format = row.get(col.ORIGINAL_FORMAT, '').strip()
+        original_format = (row.get(col.ORIGINAL_FORMAT) or '').strip()
         if original_format:
             if not client.validate_extent_type(original_format):
                 result["status"] = "error"
@@ -1380,7 +1516,7 @@ def process_csv_row(row: Dict, row_num: int, client: ArchivesSpaceClient,
             return result
 
         # Parent RefID is REQUIRED
-        parent_ref_id = row.get(col.PARENT_REFID, '').strip()
+        parent_ref_id = (row.get(col.PARENT_REFID) or '').strip()
         if not parent_ref_id:
             result["status"] = "error"
             result["message"] = "Missing Parent RefID"
@@ -1445,17 +1581,22 @@ def _preflight_update_only_row(row_num: int, row: Dict, client: ArchivesSpaceCli
     `resolved`. No writes happen here. Split out so the caller can contain
     per-row exceptions (a malformed server record must fail the row, not
     crash the run)."""
-    catalog_number = row.get(col.CATALOG, '').strip()
+    catalog_number = (row.get(col.CATALOG) or '').strip()
     if not catalog_number:
         problems.append((row_num, row, "Missing catalog number"))
         return
-
-    # Extent type must be in the live controlled vocabulary (normal mode
-    # checks this in process_csv_row, which update-only bypasses).
-    original_format = row.get(col.ORIGINAL_FORMAT, '').strip()
-    if original_format and not client.validate_extent_type(original_format):
-        problems.append((row_num, row, f"Invalid extent type: '{original_format}'"))
+    if not col.valid_catalog_number(catalog_number):
+        problems.append((row_num, row, f"Malformed catalog number {catalog_number!r} "
+                                       f"- must be JPC_AV_ followed by digits"))
         return
+
+    # Extent type must be in the live controlled vocabulary - but only when
+    # this row would actually CHANGE the extent. An exported row carries the
+    # stored term verbatim; if that term has since been retired (suppressed)
+    # in ArchivesSpace, an unrelated title edit must still round-trip. The
+    # check therefore moves below, after the record is fetched and change
+    # detection has run. (Create modes validate unconditionally.)
+    original_format = (row.get(col.ORIGINAL_FORMAT) or '').strip()
 
     count, uri = client.check_component_unique_id(catalog_number)
     if count is None:
@@ -1471,7 +1612,7 @@ def _preflight_update_only_row(row_num: int, row: Dict, client: ArchivesSpaceCli
         # after earlier rows were already updated: the multi-extent guard
         # and the multi-same-label-date guard. Fetch the record once when
         # the row supplies anything those guards need.
-        supplies_dates = any(row.get(c, '').strip() for c, _ in col.DATE_COLUMNS)
+        supplies_dates = any((row.get(c) or '').strip() for c, _ in col.DATE_COLUMNS)
         record = client.get(uri)
         if not isinstance(record, dict):
             problems.append((row_num, row, f"Could not fetch {catalog_number} to preflight the row"))
@@ -1483,17 +1624,41 @@ def _preflight_update_only_row(row_num: int, row: Dict, client: ArchivesSpaceCli
                              f"{catalog_number} is a {record.get('level') or 'non-item'}-level "
                              f"record, not an item - update-only only edits items"))
             return
+        if not record_identity_ok(record, uri, catalog_number):
+            problems.append((row_num, row,
+                             f"Record at {uri} does not identify as item {catalog_number} "
+                             f"- refusing to update"))
+            return
+        # Change detection runs for EVERY row, not only those supplying a
+        # format or dates: a malformed record shape (garbage dates/notes/
+        # extents) must fail preflight here - with zero writes - not phase 2
+        # after earlier rows have already been written.
+        detected = detect_changes(record, row)
+        bad = out_of_range_date_changes(detected)
+        if bad:
+            problems.append((row_num, row, bad))
+            return
         if original_format or supplies_dates:
             if original_format:
                 existing_extents = record.get('extents', [])
                 existing_types = [e.get('extent_type') for e in existing_extents]
-                if len(existing_extents) > 1 and original_format not in existing_types:
+                if 'extents' in detected:
+                    status = client.extent_type_status(original_format)
+                    if status == "unavailable":
+                        problems.append((row_num, row,
+                                         "Extent vocabulary could not be fetched from ArchivesSpace "
+                                         "- cannot verify the format change; retry later"))
+                        return
+                    if status == "invalid":
+                        problems.append((row_num, row, f"Invalid extent type: '{original_format}'"))
+                        return
+                if len(existing_extents) > 1 and 'extents' in detected:
                     problems.append((row_num, row,
-                                     f"{catalog_number} has {len(existing_extents)} extents and "
-                                     f"'{original_format}' is not among them - update extents manually"))
+                                     f"{catalog_number} has {len(existing_extents)} extents "
+                                     f"({', '.join(map(str, existing_types))}); the CSV cannot say "
+                                     f"which one to change to '{original_format}' - update extents manually"))
                     return
             if supplies_dates:
-                detected = detect_changes(record, row)
                 conflicts = multi_date_conflicts(record, detected)
                 if conflicts:
                     detail = ", ".join(f"{count}x '{label}'" for label, count in conflicts)
@@ -1539,7 +1704,7 @@ def process_csv_file_update_only(filename: str, client: ArchivesSpaceClient,
 
     try:
         with col.open_csv(filename) as csvfile:
-            rows = [normalize_row(r) for r in csv.DictReader(csvfile)]
+            rows = [normalize_row(r) for r in csv.DictReader(csvfile, strict=True)]
     except Exception as e:
         logging.error(f"Error reading CSV file: {str(e)}")
         raise
@@ -1573,7 +1738,7 @@ def process_csv_file_update_only(filename: str, client: ArchivesSpaceClient,
                                  f"because of the rows above:")
             for row_num, row in enumerate(rows, 1):
                 if row_num in resolved:
-                    print_status("skipped", f"Row {row_num}: {row.get(col.CATALOG, '').strip()} "
+                    print_status("skipped", f"Row {row_num}: {(row.get(col.CATALOG) or '').strip()} "
                                             f"({resolved[row_num]})", indent=1)
         for row_num, row in enumerate(rows, 1):
             if row_num in resolved:
@@ -1658,9 +1823,13 @@ def _preflight_create_row(row_num: int, row: Dict, client: ArchivesSpaceClient,
     "multiple matches" and "lookup failed" as abort - an unverifiable answer
     is never permission to write."""
     issues = []
-    catalog_number = row.get(col.CATALOG, '').strip()
+    catalog_number = (row.get(col.CATALOG) or '').strip()
     if not catalog_number:
         problems.append((row_num, row, "Missing catalog number"))
+        return
+    if not col.valid_catalog_number(catalog_number):
+        problems.append((row_num, row, f"Malformed catalog number {catalog_number!r} "
+                                       f"- must be JPC_AV_ followed by digits"))
         return
     count, existing_uri = client.check_component_unique_id(catalog_number)
     if count is None:
@@ -1670,11 +1839,11 @@ def _preflight_create_row(row_num: int, row: Dict, client: ArchivesSpaceClient,
     elif count > 1:
         issues.append(f"{count} records found for {catalog_number} - clean up duplicates first")
 
-    original_format = row.get(col.ORIGINAL_FORMAT, '').strip()
+    original_format = (row.get(col.ORIGINAL_FORMAT) or '').strip()
     if original_format and not client.validate_extent_type(original_format):
         issues.append(f"Invalid extent type: '{original_format}'")
 
-    parent_ref_id = row.get(col.PARENT_REFID, '').strip()
+    parent_ref_id = (row.get(col.PARENT_REFID) or '').strip()
     if not parent_ref_id:
         issues.append("Missing Parent RefID")
     else:
@@ -1739,7 +1908,7 @@ def process_csv_file(filename: str, client: ArchivesSpaceClient,
 
     try:
         with col.open_csv(filename) as csvfile:
-            rows = [normalize_row(r) for r in csv.DictReader(csvfile)]
+            rows = [normalize_row(r) for r in csv.DictReader(csvfile, strict=True)]
     except Exception as e:
         logging.error(f"Error reading CSV file: {str(e)}")
         raise
@@ -1773,7 +1942,7 @@ def process_csv_file(filename: str, client: ArchivesSpaceClient,
                                      f"but were NOT created because of the rows above:")
                 for row_num, row in enumerate(rows, 1):
                     if row_num not in problem_rows:
-                        print_status("skipped", f"Row {row_num}: {row.get(col.CATALOG, '').strip()}",
+                        print_status("skipped", f"Row {row_num}: {(row.get(col.CATALOG) or '').strip()}",
                                      indent=1)
             if any('already exists' in m for n, r, m in problems):
                 print(f"\n  Use --update-only instead of --create-records to change already\n"
@@ -1786,10 +1955,10 @@ def process_csv_file(filename: str, client: ArchivesSpaceClient,
                     results.append(make_row_result(row_num, row, "error", msg))
                     summary["failed"] += 1
                 else:
-                    # "aborted", not "skipped": this row's catalog number was
-                    # verifiably new - it went unwritten only because the run
-                    # stopped. (Only the duplicate check ran; parent/extent
-                    # checks happen at write time.)
+                    # "aborted", not "skipped": this row passed every preflight
+                    # check (catalog number new, parent exists, format valid,
+                    # container unambiguous) - it went unwritten only because
+                    # other rows failed and the run stopped before writing.
                     results.append(make_row_result(row_num, row, "aborted",
                                                    "Not written - this row passed preflight, but the "
                                                    "failed rows stopped the run before any writes"))
@@ -1809,6 +1978,13 @@ def process_csv_file(filename: str, client: ArchivesSpaceClient,
             result = make_row_result(row_num, row, "error", str(stop))
             results.append(result)
             record_row_outcome(result, summary)
+            # Every later input row still gets its line in the receipt: not
+            # written, and why - the totals must reconcile row for row.
+            for later_num, later_row in enumerate(rows[row_num:], row_num + 1):
+                results.append(make_row_result(later_num, later_row, "aborted",
+                                               f"Not written - the run halted at row {row_num} "
+                                               f"(a record appeared after preflight)"))
+                summary["aborted"] += 1
             break
         except KeyboardInterrupt:
             # Ctrl-C DURING row processing: the interrupt may have
@@ -1890,7 +2066,7 @@ def generate_reports(results: List[Dict], summary: Dict) -> bool:
     # JSON summary carries the same counts the console and records file show.
     records = {}
     for r in results:
-        if r.get('record'):
+        if r.get('record') and not summary.get('dry_run'):  # dry runs never write a records file
             key = r.get(col.CATALOG) or r.get('uri') or f"row {r.get('row_number')}"
             records[key] = {
                 "status": r.get('status'),
@@ -1934,6 +2110,11 @@ def generate_reports(results: List[Dict], summary: Dict) -> bool:
         # audit trail), not a well-formed-looking truncated report.
         tmp_path = CSV_REPORT + '.tmp'
         with open(tmp_path, 'w', newline='', encoding='utf-8') as csvfile:
+            # Row 1: provenance - the command, target and time, same as the
+            # export files (every reader in the toolset skips '#' lines).
+            csvfile.write(f"# {RUN_COMMAND} | target: {aspace_client.ACTIVE_ENV} | "
+                          f"{datetime.now().strftime('%Y-%m-%d %H:%M')}"
+                          f"{' | DRY RUN' if summary.get('dry_run') else ''}\n")
             # Outcome columns first, then every mapped CSV column verbatim -
             # the report is a self-contained audit trail of the run.
             fieldnames = ['row_number', 'status', 'message', 'uri', 'ref_id',
@@ -2054,6 +2235,30 @@ def print_summary(summary: Dict, elapsed_time: str = None):
 # ==============================
 # MAIN EXECUTION
 # ==============================
+
+def recover_partial_run(state: Dict, error: Exception):
+    """After an exception escapes processing: the live results/summary the
+    processing functions registered in `state`, marked with the error, or
+    (None, None) if processing never began. Mirrors the Ctrl-C recovery -
+    the receipts must be written on EVERY exit path once rows have run."""
+    results = state.get("results")
+    summary = state.get("summary")
+    if results is None or summary is None:
+        return None, None
+    summary["fatal_error"] = f"{type(error).__name__}: {error}"
+    logging.error(f"Fatal error during processing - writing the partial reports: "
+                  f"{summary['fatal_error']}")
+    return results, summary
+
+
+def _safe_console(status: str, message: str) -> None:
+    """print_status that cannot itself abort the exit path (a closed or
+    broken stdout is one of the ways a run ends up here)."""
+    try:
+        print_status(status, message)
+    except OSError:
+        pass
+
 
 def build_parser() -> argparse.ArgumentParser:
     """The importer's command-line parser (module-level so tests can drive it)."""
@@ -2221,8 +2426,9 @@ def main():
                          f"({', '.join(sorted(aspace_client.ENVIRONMENTS))}) - "
                          f"pass --env NAME to choose the target")
         else:
-            print_status("error", "No environments configured in creds.py "
-                                  "(see creds_template.py)")
+            print_status("error", aspace_client.CONFIG_ERROR
+                                  or "No environments configured in creds.py "
+                                     "(see creds_template.py)")
         sys.exit(1)
 
     username = args.username if args.username else aspace_client.ASPACE_USERNAME
@@ -2272,15 +2478,22 @@ def main():
     # Start timing
     start_time = time.time()
     
-    # Check file
+    # Check file, then read it ONCE: validation and processing both parse
+    # this snapshot, so the rows written are exactly the rows validated -
+    # a file rewritten during authentication is never seen.
     if not os.path.exists(csv_file):
         print_status("error", f"CSV file not found: {csv_file}")
+        sys.exit(1)
+    try:
+        csv_source = col.CsvSnapshot(csv_file)
+    except (OSError, UnicodeDecodeError) as e:
+        print_status("error", f"Could not read {csv_file}: {e}")
         sys.exit(1)
     
     # Validate CSV before proceeding
     print_section("VALIDATING CSV")
     is_valid, val_errors, val_warnings = validate_csv_before_import(
-        csv_file, update_only=args.update_only)
+        csv_source, update_only=args.update_only)
 
     # In update-only mode, say prominently which fields this run will and
     # won't touch - a narrow CSV should look intentional, and on a full sheet
@@ -2288,8 +2501,8 @@ def main():
     needs_extent_vocab = True
     if args.update_only:
         try:
-            with col.open_csv(csv_file) as _f:
-                headers = csv.DictReader(_f).fieldnames or []
+            with col.open_csv(csv_source) as _f:
+                headers = csv.DictReader(_f, strict=True).fieldnames or []
         except Exception:
             headers = []
         managed = [c for c in col.MUTABLE_COLUMNS if c in headers]
@@ -2297,16 +2510,21 @@ def main():
         print_status("info", f"UPDATE-ONLY: will update: {', '.join(managed)}")
         if unmanaged:
             print_status("info", f"Left untouched (not in CSV): {', '.join(unmanaged)}")
-        # A run that can't touch extents shouldn't be blocked by a transient
-        # failure fetching the extent vocabulary it would never consult.
-        needs_extent_vocab = col.ORIGINAL_FORMAT in headers
+        # Update-only never loads the vocabulary up front: validate_extent_type
+        # fetches it lazily (and fails closed) the first time a row would
+        # actually CHANGE an extent. So a title-only update of an exported
+        # sheet neither trips over a retired stored term nor depends on the
+        # vocabulary endpoint being up.
+        needs_extent_vocab = False
 
     if val_warnings:
         for warning in val_warnings[:5]:
             print_status("warning", warning)
         if len(val_warnings) > 5:
             print(f"         {Colors.DIM}... and {len(val_warnings) - 5} more warnings{Colors.RESET}")
-        print(f"\n  {Colors.DIM}Warnings don't need to be fixed - import will continue{Colors.RESET}")
+        print(f"\n  {Colors.DIM}Warnings are not errors - the run continues to the ArchivesSpace "
+              f"checks, which can still refuse a row (e.g. a date outside the range that "
+              f"differs from the stored one){Colors.RESET}")
     
     if not is_valid:
         print_status("error", f"CSV validation failed with {len(val_errors)} error(s)")
@@ -2334,8 +2552,8 @@ def main():
     
     # Load extent types (fail closed: abort if the live controlled vocabulary
     # cannot be retrieved, rather than silently trusting a stale local list).
-    # Skipped when an update-only CSV has no Original Format column - that run
-    # never consults the vocabulary. validate_extent_type still fails closed
+    # Update-only runs skip this up-front load entirely: the vocabulary is
+    # fetched lazily only if a row would change a format. It still fails closed
     # if anything unexpectedly asks.
     if needs_extent_vocab:
         extent_types = client.get_extent_types()
@@ -2347,7 +2565,8 @@ def main():
         client._valid_extent_types = extent_types  # cache so validate_extent_type does not refetch
         print_status("info", f"Loaded {len(extent_types)} valid extent types")
     else:
-        print_status("info", "Extent vocabulary not loaded (Original Format not in this CSV)")
+        print_status("info", "Extent vocabulary loaded only if a row changes a format "
+                             "(update-only)")
     
     print_section("PROCESSING RECORDS")
     
@@ -2358,10 +2577,10 @@ def main():
     state = {}
     try:
         if args.update_only:
-            results, summary = process_csv_file_update_only(csv_file, client, args.dry_run,
+            results, summary = process_csv_file_update_only(csv_source, client, args.dry_run,
                                                             state=state)
         else:
-            results, summary = process_csv_file(csv_file, client, args.dry_run,
+            results, summary = process_csv_file(csv_source, client, args.dry_run,
                                                 duplicate_mode, state=state)
     except KeyboardInterrupt:
         results = state.get("results")
@@ -2375,10 +2594,28 @@ def main():
         summary["interrupted"] = True
         logging.error("Interrupted by operator - writing the partial report")
     except Exception as e:
-        print_status("error", f"Fatal error: {str(e)}")
-        logging.error(f"Fatal error during import: {str(e)}")
+        # Any escaping exception after processing began (a closed output
+        # stream, a disk hiccup mid-print...) must still leave the receipts:
+        # writes may already have happened. Same recovery as an interrupt.
+        results, summary = recover_partial_run(state, e)
+        if results is None:
+            _safe_console("error", f"Fatal error: {str(e)}")
+            logging.error(f"Fatal error during import: {str(e)}")
+            client.logout()
+            sys.exit(1)
+
+    if summary.get("fatal_error"):
+        # Write the audit trail FIRST, without depending on the console
+        # (the console may be what failed); then say what happened.
+        reconcile_summary(results, summary)
+        if not summary.get("end_time"):  # initialized to None, so setdefault would not do
+            summary["end_time"] = datetime.now().isoformat()
+        reports_ok = generate_reports(results, summary)
+        _safe_console("error", f"Fatal error during processing: {summary['fatal_error']} - "
+                               f"partial reports {'written' if reports_ok else 'could NOT be written'} "
+                               f"({len(results)} row(s) recorded)")
         client.logout()
-        sys.exit(1)
+        sys.exit(3 if not reports_ok else 1)
 
     try:
         if summary.get("interrupted"):

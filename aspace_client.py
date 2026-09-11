@@ -18,9 +18,11 @@ once:
     lookup values are Lucene-escaped so a malformed identifier can't silently
     turn into a zero-hit query (a false negative reads as "safe to create")
   - scope-locked writes: every write endpoint must live inside the configured
-    repository (deletes: top containers only); updates additionally refuse a
-    payload whose uri doesn't match the endpoint or whose record lives
-    outside the configured AV resource
+    repository (deletes: top containers only); archival-object creates must
+    target the configured AV resource; updates additionally refuse a payload
+    whose uri doesn't match the endpoint or whose record lives outside it
+  - the environment is chosen once, before any client exists (switching
+    afterwards is refused)
 
 Deliberately NOT here: CLI/help/colors, counters and reporting, dry-run
 logic, domain rules (extents, notes, dates, filenames). The client knows how
@@ -101,12 +103,15 @@ except ImportError:
     _creds = None
 
 ENVIRONMENTS = {}
+CONFIG_ERROR = None  # a creds.py problem found while loading; reported by the tools
+_MISSING = object()
 if _creds is not None:
-    declared = getattr(_creds, "environments", None)
-    if isinstance(declared, dict) and declared:
-        ENVIRONMENTS = declared
-    elif getattr(_creds, "baseURL", None):
-        # Legacy flat creds.py = a single production environment.
+    declared = getattr(_creds, "environments", _MISSING)
+    if declared is _MISSING and getattr(_creds, "baseURL", None):
+        # Legacy flat creds.py (no `environments` attribute at all) = a
+        # single production environment. ONLY reached when the attribute is
+        # genuinely absent - an explicit empty or malformed declaration
+        # below never falls through to here.
         ENVIRONMENTS = {"production": {
             "baseURL": getattr(_creds, "baseURL", None),
             "user": getattr(_creds, "user", None),
@@ -115,6 +120,32 @@ if _creds is not None:
             "resource_id": getattr(_creds, "resource_id", None),
             "staff_url": getattr(_creds, "staff_url", ""),
         }}
+    elif declared is _MISSING:
+        pass  # no environments and no flat fields: nothing configured
+    elif not isinstance(declared, dict):
+        # An explicit `environments` that is not a dict is a broken file -
+        # never a reason to fall back to the flat (production) fields.
+        CONFIG_ERROR = (f"creds.py: environments must be a dict of name -> settings "
+                        f"(got {type(declared).__name__}) - see creds_template.py")
+    elif not declared:
+        # Explicitly empty: nothing configured. Deliberately NOT the legacy
+        # fallback - a migrated creds.py may still carry the old flat
+        # production fields, and an emptied dict must not quietly select
+        # them without --env.
+        CONFIG_ERROR = "creds.py: environments is empty - add at least one environment (see creds_template.py)"
+    elif declared:
+        # Every key must be a non-empty string BEFORE anything sorts or joins
+        # them for a message - a bad key must produce a friendly error, not
+        # a traceback inside the error path.
+        bad_keys = [k for k in declared if not isinstance(k, str) or not k]
+        if bad_keys:
+            # Fatal everywhere: no environment is usable until creds.py is
+            # fixed (a half-valid file must not quietly run on the good half).
+            CONFIG_ERROR = (f"creds.py: environment names must be non-empty strings "
+                            f"(got {', '.join(repr(k) for k in bad_keys)}) - see creds_template.py")
+            ENVIRONMENTS = {}
+        else:
+            ENVIRONMENTS = declared
 
 # Filled by select_environment(); None until an environment is active. Always
 # read these THROUGH the module (aspace_client.REPO_ID) - a from-import
@@ -129,31 +160,66 @@ RESOURCE_URI = None
 STAFF_URL = ""
 
 
+_CLIENTS_CREATED = 0  # see select_environment()
+
+
 def select_environment(name: str) -> None:
     """Activate one configured environment. Raises ValueError for an unknown
-    name - callers surface that as a CLI error, nothing defaults."""
+    name - callers surface that as a CLI error, nothing defaults.
+
+    The environment is chosen ONCE, before any client exists: a client
+    snapshots the host and credentials at construction while the scope
+    locks read the module-level repository/resource, so switching
+    afterwards would split requests across two environments. Refused."""
     global ACTIVE_ENV, ASPACE_URL, ASPACE_USERNAME, ASPACE_PASSWORD
     global REPO_ID, RESOURCE_ID, RESOURCE_URI, STAFF_URL
+    if CONFIG_ERROR:
+        raise ValueError(CONFIG_ERROR)  # creds.py is broken: nothing is selectable
+    if not isinstance(name, str) or not name:
+        raise ValueError(f"Environment names in creds.py must be non-empty strings "
+                         f"(got {name!r}) - see creds_template.py")
     if name not in ENVIRONMENTS:
         known = ", ".join(sorted(ENVIRONMENTS)) or "none configured"
         raise ValueError(f"Unknown environment {name!r} (configured: {known})")
+    if _CLIENTS_CREATED and name != ACTIVE_ENV:
+        raise RuntimeError(f"Cannot switch environment to {name!r}: a client for "
+                           f"{ACTIVE_ENV!r} already exists in this process - select "
+                           f"the environment before constructing any client")
     env = ENVIRONMENTS[name]
+    # Validate EVERYTHING before assigning anything: a rejected selection
+    # must leave the module exactly as it was, never half-switched.
+    if not isinstance(env, dict):
+        raise ValueError(f"Environment {name!r} in creds.py must be a dict of settings "
+                         f"(got {type(env).__name__}) - see creds_template.py")
+    staff_url = env.get("staff_url", "") or ""
+    if not isinstance(staff_url, str):
+        raise ValueError(f"Environment {name!r}: staff_url must be a string "
+                         f"(got {type(staff_url).__name__}) - see creds_template.py")
+    repo_id, resource_id = env.get("repo_id"), env.get("resource_id")
     ACTIVE_ENV = name
     ASPACE_URL = env.get("baseURL")
     ASPACE_USERNAME = env.get("user")
     ASPACE_PASSWORD = env.get("password")
-    REPO_ID = env.get("repo_id")
-    RESOURCE_ID = env.get("resource_id")
+    REPO_ID = repo_id
+    RESOURCE_ID = resource_id
     RESOURCE_URI = (f"/repositories/{REPO_ID}/resources/{RESOURCE_ID}"
                     if REPO_ID and RESOURCE_ID else None)
-    STAFF_URL = env.get("staff_url", "") or ""
+    STAFF_URL = staff_url
 
 
-if len(ENVIRONMENTS) == 1:
-    select_environment(next(iter(ENVIRONMENTS)))
+# A creds.py problem found at import time must not surface as a traceback in
+# whatever tool happened to import this module (including the MADS checker,
+# which needs no environment at all). Record it; the ArchivesSpace tools
+# report it when they go to select an environment.
+if len(ENVIRONMENTS) == 1 and CONFIG_ERROR is None:
+    try:
+        select_environment(next(iter(ENVIRONMENTS)))
+    except ValueError as _e:
+        CONFIG_ERROR = str(_e)
 
 TIMEOUT = 30
 RETRY_ATTEMPTS = 3
+_PLACEHOLDER_CREDS = {"your_username", "your_password", "your_password_here"}
 RETRY_DELAY = 2  # seconds; tests set this to 0
 
 # Lucene/Solr query metacharacters. ArchivesSpace's q parameter is Lucene
@@ -218,6 +284,8 @@ class ASpaceClient:
     """Persistent, fail-closed ArchivesSpace API client."""
 
     def __init__(self, username: str = None, password: str = None):
+        global _CLIENTS_CREATED
+        _CLIENTS_CREATED += 1
         self.base_url = ASPACE_URL
         self.username = username or ASPACE_USERNAME or ""
         self.password = password or ASPACE_PASSWORD or ""
@@ -249,6 +317,20 @@ class ASpaceClient:
                           "baseURL must be an http(s) URL and repo_id/"
                           "resource_id must be numeric (see creds_template.py)")
             return False
+        # The template ships with a real sandbox URL and placeholder
+        # credentials - catch those here rather than as a bare auth failure.
+        if not (isinstance(self.username, str) and isinstance(self.password, str)):
+            logging.error("Refusing to operate: username and password in creds.py must "
+                          f"be strings (got {type(self.username).__name__} / "
+                          f"{type(self.password).__name__})")
+            return False
+        if (not self.username or not self.password
+                or self.username in _PLACEHOLDER_CREDS
+                or self.password in _PLACEHOLDER_CREDS):
+            logging.error("Refusing to operate: creds.py still has the template "
+                          "placeholder username/password - fill in your own "
+                          "(see creds_template.py)")
+            return False
         # Fresh attempt: drop any stale token so a failed re-login can't
         # leave a dead session header installed on the connection.
         self.session_token = None
@@ -275,8 +357,9 @@ class ASpaceClient:
             logging.error("Authentication failed: 200 response was not a JSON object")
             return False
         token = payload.get("session")
-        if not token:
-            logging.error("Authentication failed: 200 response but no session token in body")
+        if not isinstance(token, str) or not token:
+            logging.error("Authentication failed: 200 response but no usable session "
+                          "token in body")
             return False
         self.session_token = token
         self.http.headers["X-ArchivesSpace-Session"] = token
@@ -302,9 +385,23 @@ class ASpaceClient:
     # -- request core -------------------------------------------------------
     def _request(self, method: str, endpoint: str, data: Dict = None,
                  retry_count: int = 0) -> Optional[Dict]:
-        """One code path for every API call. Retries are limited to GETs
-        (plus 412 re-auth for any method - a 412 was rejected outright, so
-        retrying after re-login is safe). Writes fail fast."""
+        """One code path for every API call (see _do_request). Reads never
+        touch last_failure_definitive: it describes the last WRITE, and a
+        lookup made to decide whether compensation is safe must not erase
+        the ambiguity it is checking."""
+        if method == "GET":
+            saved = self.last_failure_definitive
+            try:
+                return self._do_request(method, endpoint, data, retry_count)
+            finally:
+                self.last_failure_definitive = saved
+        return self._do_request(method, endpoint, data, retry_count)
+
+    def _do_request(self, method: str, endpoint: str, data: Dict = None,
+                    retry_count: int = 0) -> Optional[Dict]:
+        """Retries are limited to GETs (plus 412 re-auth for any method - a
+        412 was rejected outright, so retrying after re-login is safe).
+        Writes fail fast."""
         import time as _time
         url = f"{self.base_url}{endpoint}"
         self.last_failure_definitive = True
@@ -377,9 +474,11 @@ class ASpaceClient:
                 return self._request(method, endpoint, data, retry_count + 1)
             return None
 
-        except _InvalidJSONError as e:
-            # The payload could not be serialized - nothing was ever sent, so
-            # this is a definitive local failure (safe to compensate).
+        except (_InvalidJSONError, TypeError) as e:
+            # The payload could not be serialized (requests wraps ValueError
+            # as InvalidJSONError; a set or other non-JSON value raises
+            # TypeError first) - nothing was ever sent, so this is a
+            # definitive local failure (safe to compensate).
             self.last_failure_definitive = True
             logging.error(f"Unserializable payload for {method} {endpoint}: {e}")
             return None
@@ -444,6 +543,16 @@ class ASpaceClient:
             logging.error(f"REFUSING to create at {endpoint}: payload is not "
                           f"a JSON object ({type(payload).__name__})")
             return None
+        if endpoint.endswith("/archival_objects"):
+            # The repository holds millions of records from other resources;
+            # an archival object must be born inside OUR resource, whatever
+            # the caller put in the payload.
+            resource = payload.get("resource")
+            if not isinstance(resource, dict) or resource.get("ref") != RESOURCE_URI:
+                self.last_failure_definitive = True  # nothing sent
+                logging.error(f"REFUSING to create at {endpoint}: payload resource "
+                              f"{resource!r} is not the configured resource {RESOURCE_URI}")
+                return None
         result = self._request("POST", endpoint, payload)
         if result is None:
             return None

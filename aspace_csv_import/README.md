@@ -37,7 +37,7 @@ This script imports item-level archival objects from CSV files into ArchivesSpac
 - **Parent Hierarchy**: Attach items to existing parent objects using ref_ids
 - **Comprehensive Metadata**: Import titles, dates, extents, and notes
 - **Smart Update Mode**: Detects actual changes before updating (shows what changed)
-- **Explicit Modes**: Every run states its intent - `--create-records` or `--update-only`; both verify every row before writing anything
+- **Explicit Modes**: Every run states its intent - `--create-records` or `--update-only`; strict create and update-only preflight every row before writing anything
 - **Colorized Output**: Clean, color-coded terminal output with status indicators
 - **Change Detection**: Only updates records when data actually differs
 - **Error Handling**: Robust error handling with retry logic
@@ -46,7 +46,7 @@ This script imports item-level archival objects from CSV files into ArchivesSpac
 
 ## Prerequisites
 
-- Python 3.6 or higher
+- Python 3.8 or higher
 - Access to ArchivesSpace with appropriate permissions
 - Required Python packages:
   ```bash
@@ -55,17 +55,32 @@ This script imports item-level archival objects from CSV files into ArchivesSpac
 
 ## Installation
 
-1. Clone or download the script files:
+1. Clone the repository (the tools depend on files at two levels):
+
+   **Repository root** (`aspace_jpc_av/`):
+   - `aspace_client.py` - the shared ArchivesSpace client every tool imports (required)
+   - `creds_template.py` - credentials template; your `creds.py` copy lives here too
+   - `requirements.txt`
+
+   **This folder** (`aspace_jpc_av/aspace_csv_import/`):
    - `aspace_csv_import.py` - Main import script
-   - `creds_template.py` - Credentials template
+   - `aspace_csv_export.py` - Export to an import-shaped CSV (round trip, audit columns, `--mads-live`)
+   - `check_mads.py` - MADS liveness checker (public URLs; never touches ArchivesSpace)
    - `csv_utils.py` - CSV validation utilities
    - `check_extent_types.py` - Extent type checker
+   - `csv_columns.py` - The sheet contract: column names and the shared validation rules (imported by the others)
 
-2. Set up credentials:
+2. Set up credentials **at the repository root**:
    ```bash
+   cd aspace_jpc_av
    cp creds_template.py creds.py
-   # Edit creds.py with your username and password
-   # Add creds.py to .gitignore
+   # Edit creds.py with your username and password (see Authentication below)
+   ```
+   `creds.py` is already listed in `.gitignore`.
+
+3. Run the tools **from this folder** - every command in this document assumes it:
+   ```bash
+   cd aspace_csv_import
    ```
 
 ## Related Documentation
@@ -78,18 +93,33 @@ This script imports item-level archival objects from CSV files into ArchivesSpac
 
 ### Method 1: Credentials File (Preferred)
 
-Copy the template and add your credentials:
+Copy the template and add your credentials. Both files live at the
+**repository root**, one level above this folder:
 ```bash
-cp creds_template.py creds.py
+cp ../creds_template.py ../creds.py
 ```
 
-Edit `creds.py`:
+Edit `../creds.py` - credentials live inside the `environments` dict, one
+entry per ArchivesSpace instance (the template ships with the sandbox
+filled in and production commented out):
 ```python
-user = "your_username"
-password = "your_password_here"
+environments = {
+    "sandbox": {
+        "baseURL": "https://api-jpcsb.as.atlas-sys.com",
+        "user": "your_username",
+        "password": "your_password",
+        "repo_id": "2",
+        "resource_id": "7",
+        "staff_url": "https://staff-jpcsb.as.atlas-sys.com",
+    },
+}
 ```
 
-**Important:** Add `creds.py` to your `.gitignore` to avoid exposing credentials!
+With one environment configured it is selected automatically; with several,
+every run must say which with `--env NAME` (there is no default - a
+forgotten flag can never mean production).
+
+`creds.py` is already in `.gitignore`; never commit or share it.
 
 Then run without credential flags:
 ```bash
@@ -111,30 +141,35 @@ Command-line arguments override creds.py settings.
 
 ## CSV File Format
 
-The CSV should have the following columns:
+**Create runs (`--create-records`) require all nine column headers below to
+be present** - the "Required" column describes whether each *cell* may be
+left blank, not whether the column may be omitted. Only `--update-only`
+accepts a narrow sheet (`CATALOG_NUMBER` plus just the columns to change).
 
-| Column | Description | Required | Example |
+| Column | Description | Value required? | Example |
 |--------|-------------|----------|---------|
 | CATALOG_NUMBER | Component Unique Identifier | Yes | JPC_AV_00012 |
 | ASpace Title | Item title | No* | Ebony/Jet Celebrity Showcase |
-| Creation or Recording Date | Creation date (M/D/YYYY) | No | 8/1/1982 |
-| Edit Date | Edit/modified date (M/D/YYYY) | No | 8/2/1982 |
-| Broadcast Date | Broadcast date (M/D/YYYY) | No | 9/1/1982 |
-| Original Format | Physical format (must match dropdown) | Yes | 2 inch videotape |
-| ASpace Parent RefID | Parent object's ref_id | Yes | abc123def456 |
+| Creation or Recording Date | Creation date (M/D/YYYY or M/D/YY, or ISO YYYY-MM-DD / YYYY-MM / YYYY) | No | 8/1/1982 |
+| Edit Date | Edit/modified date (same formats) | No | 8/2/1982 |
+| Broadcast Date | Broadcast date (same formats) | No | 9/1/1982 |
+| Original Format | Physical format (must match dropdown when set or changed; an unchanged stored term round-trips under `--update-only`) | No* | 2 inch videotape |
+| ASpace Parent RefID | Parent object's ref_id | Yes for create; ignored by `--update-only` | abc123def456 |
 | ASpace Scope and Contents Note | Scope and contents | No | Pilot episode featuring... |
 | ASpace PhysTech Note | Physical characteristics / playback notes | No | Slight ringing present... |
 
-*If no title is provided, the catalog number will be used
+**Date range:** every date you set or change must fall within **1940–2020**, the span of the AV material - anything outside is rejected as a typo. **Two-digit years** (`11/2/93`) are therefore unambiguous: `40`–`99` are 19xx, `00`–`20` are 20xx, and `21`–`39` are rejected (impossible in either century). The same sheet parses identically in any year. Day-first dates are never accepted. One exception: `--update-only` preserves a stored date outside the range as long as the sheet leaves it unchanged (an exported legacy value round-trips; the export flags it for you), but refuses to *change* a date to an out-of-range value.
+
+*If no title is provided, the catalog number will be used. If no format is provided the record is created without an extent - every item should have one, but the importer does not insist.
 
 **Note:** The CSV contains 80+ columns, but only 9 are actively mapped. See **POTENTIAL_MAPPINGS.md** for analysis of unmapped fields.
 
 ## Quick Start
 
 ```bash
-# Set up credentials (one time)
-cp creds_template.py creds.py
-# Edit creds.py with your username and password
+# Set up credentials (one time) - at the repository root, one level up
+cp ../creds_template.py ../creds.py
+# Edit ../creds.py with your username and password (see Authentication)
 
 # Run commands (with creds.py configured):
 python aspace_csv_import.py --create-records -n -f your_file.csv   # Dry run
@@ -143,6 +178,12 @@ python aspace_csv_import.py --update-only -f your_file.csv         # Update exis
 
 # Or use command-line credentials:
 python aspace_csv_import.py --create-records -f your_file.csv -u username -p 'password'
+
+# With several environments in creds.py, every command that contacts
+# ArchivesSpace (the importer, csv_utils.py --parents, check_extent_types.py,
+# aspace_csv_export.py) needs --env. csv_utils.py --validate is local, and
+# check_mads.py only talks to the public MADS site - neither needs --env.
+python aspace_csv_import.py --env sandbox --create-records -n -f your_file.csv
 ```
 
 ## Command-Line Options
@@ -154,23 +195,28 @@ Mode (required - choose one):
 
 Options:
   -h, --help            Show help message
-  -n, --dry-run         Test mode - no records created
+  -n, --dry-run         Preview - no ArchivesSpace writes of any kind (no creates, no updates)
   -f FILE, --file FILE  CSV file to import
   -u USERNAME           ArchivesSpace username
   -p PASSWORD           ArchivesSpace password
   --skip-duplicates     With --create-records: create new rows, skip existing ones
+  --env NAME            Target environment from creds.py (required when several are configured)
   --no-color            Disable colored output
 ```
 
 ## Modes
 
 A mode is required: every run states whether it makes new records or changes
-existing ones, and both modes verify every row before writing anything. The
-two aborts are mirror images - `--create-records` aborts if a catalog number
-EXISTS, `--update-only` aborts if one DOESN'T - and an abort always means
-nothing was written, so fixing the sheet and rerunning is safe. In both modes
-a lookup that fails or matches multiple records also aborts: an unverifiable
-answer is never permission to write.
+existing ones. Strict `--create-records` and `--update-only` both preflight
+every row before writing anything, and their aborts are mirror images -
+create aborts if a catalog number EXISTS, update-only aborts if one DOESN'T.
+A preflight abort means nothing was written, so fixing the sheet and
+rerunning is safe. (`--skip-duplicates` is the exception: it is a single
+pass with no preflight, and a runtime API failure mid-run in any mode can
+still leave earlier rows written - the report and non-zero exit say so.) In
+every mode a lookup that fails or matches multiple records is refused - the
+preflighting modes abort the run, `--skip-duplicates` errors that row and
+moves on: an unverifiable answer is never permission to write.
 
 ### Create (--create-records)
 ```bash
@@ -230,36 +276,39 @@ The script provides colorized terminal output:
 ```
 ArchivesSpace CSV Import
 ────────────────────────────────────────────────────────────
+  Target: SANDBOX (https://api-jpcsb.as.atlas-sys.com, repo 2, resource 7)
   File: your_file.csv
-  Mode: update
+  Mode: update-only (never creates)
 
-[>] Connecting to ArchivesSpace...
+[>] Connecting to https://api-jpcsb.as.atlas-sys.com...
 [OK] Authenticated
-[>] Loaded 37 valid extent types
+[>] Extent vocabulary loaded only if a row changes a format (update-only)
 
 ────────────────────────────────────────────────────────────
 PROCESSING RECORDS
 ────────────────────────────────────────────────────────────
-[+] JPC_AV_00463 - Created successfully
-[~] JPC_AV_00468 - Updated: title, description
+[>] Resolving 3 catalog number(s) before writing anything...
+[~] JPC_AV_00468 - Updated: title, description - Ref ID 7e228513...
   [>] title: Old Title --> New Title
   [>] description: Old desc... --> New desc...
-[=] JPC_AV_00471 - No changes needed
-[-] JPC_AV_00472 - Duplicate - skipped
+[=] JPC_AV_00471 - No changes needed - Ref ID 2d2aba84...
+[~] JPC_AV_00472 - Updated: dates - Ref ID bc814158...
+  [>] dates: {'creation': None} --> {'creation': '1987-01-29'}
 
 ────────────────────────────────────────────────────────────
 IMPORT SUMMARY
 ────────────────────────────────────────────────────────────
-  Total Rows:    4
-  Created:       1
-  Updated:       1
+  Total Rows:    3
+  Updated:       2
   Unchanged:     1
-  Skipped:       1
 
-  Mode: update
+  Mode: update-only (never creates)
 
   Reports: ~/aspace_import_reports/
+  Records (as stored in ASpace): import_records_20260910_140212_71021.json (records: 3 of 3, containers: 3 of 3 captured)
 ```
+
+(A `--create-records` run lists `[+] ... Created successfully - Ref ID ...` lines instead; `--skip-duplicates` is the only mode that mixes `[+]` and `[-]` lines.)
 
 ### Status Symbols
 - `[+]` Green - Created new record
@@ -280,10 +329,10 @@ IMPORT SUMMARY
 | CATALOG_NUMBER | `component_id` | Component Unique Identifier |
 | CATALOG_NUMBER | `top_container.indicator` | Container indicator (no barcode) |
 | ASpace Title | `title` | Falls back to CATALOG_NUMBER if empty |
-| Creation or Recording Date | `dates[]` (label: creation) | Converted to YYYY-MM-DD |
-| Edit Date | `dates[]` (label: Edited) | Converted to YYYY-MM-DD |
-| Broadcast Date | `dates[]` (label: broadcast) | Converted to YYYY-MM-DD |
-| Original Format | `extent_type` | Must match ASpace dropdown exactly |
+| Creation or Recording Date | `dates[]` (label: creation) | Converted to YYYY-MM-DD; partial YYYY or YYYY-MM kept as-is |
+| Edit Date | `dates[]` (label: Edited) | Converted to YYYY-MM-DD; partial values kept as-is |
+| Broadcast Date | `dates[]` (label: broadcast) | Converted to YYYY-MM-DD; partial values kept as-is |
+| Original Format | `extent_type` | Must match ASpace dropdown exactly when set or changed; an unchanged stored term round-trips under `--update-only` |
 | ASpace Scope and Contents Note | Scope and Contents note | Multipart note with text subnote |
 | ASpace PhysTech Note | Physical Characteristics note | Playback/quality issues (phystech) |
 | ASpace Parent RefID | `parent.ref` | **Required** - links to parent object |
@@ -300,7 +349,7 @@ IMPORT SUMMARY
 
 ### Duration (Handled Separately)
 
-Duration is **not** imported by `aspace_csv_import.py`. Instead, `aspace-rename-directories.py` extracts exact runtime from `.mkv` files during DAMS ingest and creates an ODD note with a Defined List containing:
+Duration is **not** imported by `aspace_csv_import.py`. Instead, `aspace-rename-directories.py` extracts exact runtime from `.mkv` files after digitization and adds a Defined List subnote to the record's **Physical Characteristics and Technical Requirements (phystech) note** (preserving the note's text) containing:
 - Label: "Duration"
 - Value: hh:mm:ss format (e.g., "01:23:45")
 
@@ -310,9 +359,9 @@ This provides more accurate duration data than CSV estimates.
 When using `--update-only`:
 - ✅ Title
 - ✅ Dates (merged by label — a supplied date replaces only the same-label date; others are preserved)
-- ✅ Extents (format type — only on records with a single extent; multi-extent records are never collapsed, and changing one errors the row)
-- ✅ Scope & Contents notes (first note's text replaced; extra same-type notes preserved)
-- ✅ PhysTech notes (first note's text replaced; Duration defined lists and extra same-type notes preserved)
+- ✅ Extents (format type — on records with zero or one extent, and only the type changes; everything else on the extent is kept; multi-extent records are never collapsed, and changing one errors the row)
+- ✅ Scope & Contents notes (the first note that carries text: its first text paragraph is replaced; other paragraphs and extra same-type notes preserved)
+- ✅ PhysTech notes (same rule; the Duration defined list and extra same-type notes preserved)
 
 What it preserves:
 - ❌ Component ID
@@ -326,22 +375,27 @@ done in ArchivesSpace directly.
 ## Validation
 
 The script validates:
-1. **Required fields**: CATALOG_NUMBER, ASpace Parent RefID (critical error if missing)
-2. **Extent types**: Must match ArchivesSpace dropdown exactly (critical error if not)
-3. **Parent existence**: Parent ref_id must exist in ArchivesSpace
+1. **Required fields**: CATALOG_NUMBER always; ASpace Parent RefID for create runs (critical error if missing; ignored by `--update-only`)
+2. **Extent types**: Must match ArchivesSpace dropdown exactly when a format is being set or changed (critical error if not); an unchanged stored term - even a retired one - round-trips under `--update-only`
+3. **Parent existence**: Parent ref_id must exist in ArchivesSpace (create runs; `--update-only` never re-parents)
 4. **Duplicate detection**: Checks component_id before creating
 
 ## Reports
 
 Generated in `~/aspace_import_reports/` by default. Setting `logs_dir` in
-creds.py moves them to `<logs_dir>/import_reports/` (each tool gets its own
-subfolder there: `import_reports/`, `export_reports/`, `rename_reports/`).
+creds.py moves them to `<logs_dir>/import_reports/`; the other tools' folders
+sit beside it as siblings directly under `<logs_dir>` (`export_reports/`,
+`mads_reports/`, `rename_reports/`).
 
-Files:
+Files (the stamp is `YYYYMMDD_HHMMSS_<pid>`; the `<pid>` is the process
+ID - the number macOS assigns to each running program, unique for the life
+of that run - so two runs started in the same second never share a name,
+and any report can be matched to the run that wrote it):
 
-- `csv_import_YYYYMMDD_HHMMSS.log` - Detailed log file
-- `import_report_YYYYMMDD_HHMMSS.csv` - Row-by-row results
-- `import_report_YYYYMMDD_HHMMSS.json` - Complete JSON data
+- `csv_import_<stamp>.log` - detailed log: target, the exact command, every lookup and write
+- `import_report_<stamp>.csv` - the receipt: one row per input row with status, message, URI, ref ID, staff link, and every mapped column; row 1 is a `# command | target | time` provenance line, like the exports
+- `import_report_<stamp>.json` - the same receipt plus a summary block (counts, mode, environment, command, snapshot completeness) and per-row change details
+- `import_records_<stamp>.json` - the records as ArchivesSpace holds them after the run, read back after each write (archival object plus its top container), keyed by catalog number; not written for dry runs
 
 ## Utility Scripts
 
@@ -359,6 +413,33 @@ Check valid extent types:
 python check_extent_types.py
 python check_extent_types.py your_file.csv  # Validate CSV values
 ```
+
+### aspace_csv_export.py
+The reverse of the importer: pull AV records into an import-shaped CSV
+(same columns, plus ref ID, URI, staff link, MADS URL, created/modified
+audit fields and a Warnings column) for round-trip editing with
+`--update-only`, or as an audit report. Read-only.
+```bash
+python aspace_csv_export.py --level item                    # every item-level record
+python aspace_csv_export.py --parent REFID                  # direct children of one record
+python aspace_csv_export.py --list numbers.txt              # exactly these catalog numbers
+python aspace_csv_export.py --level item --mads-live        # add a 'MADS live' column
+```
+`--list` accepts a plain text file (one number per line) or any CSV with a
+`CATALOG_NUMBER` column. Files land in `~/aspace_import_reports/` by default
+(`<logs_dir>/export_reports/` when `logs_dir` is set) with a `# command`
+provenance line as row 1 (every reader in the toolset skips it).
+
+### check_mads.py
+Check which catalog numbers are live in MADS (the public DAMS delivery).
+Public URLs only - ArchivesSpace is never contacted.
+```bash
+python check_mads.py numbers.txt          # or any CSV with a CATALOG_NUMBER column
+```
+Writes `CATALOG_NUMBER, MADS URL, MADS live, Checked` to `~/aspace_mads_reports/`
+by default (`<logs_dir>/mads_reports/` when `logs_dir` is set).
+`MADS live` is `Yes`, `No`, `check failed`, or `invalid catalog number` -
+the last two are never evidence of absence.
 
 ## Recommended Workflow
 
@@ -408,10 +489,13 @@ ref_ids needed.
    python csv_utils.py --validate your_file.csv --update-only
    ```
 
-2. **Verify extent types** *(only if `Original Format` is one of your columns)*
+2. **Verify extent types** *(only if you intend to CHANGE `Original Format`)*
    ```bash
    python check_extent_types.py your_file.csv
    ```
+   An exported sheet may carry a retired term on an unchanged record; the
+   importer accepts it as long as the format itself isn't being changed, so
+   the checker's "INVALID" for such a value is not a blocker.
 
 3. **Dry run** — check the `will update:` / `Left untouched:` scope lines and
    the proposed `old --> new` changes

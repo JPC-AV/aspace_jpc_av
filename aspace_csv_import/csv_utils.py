@@ -102,18 +102,44 @@ except ImportError:
     # (US month-first or ISO; day-first is malformed). A validator that
     # accepts what the import rejects hands out false green lights.
     from datetime import datetime as dt
-    def parse_date(date_string):
+    def parse_date(date_string, strict_range=True):
         if not date_string or date_string.strip() == "":
             return None
         date_string = date_string.strip()
+        import re as _re
+        partial = _re.fullmatch(r"([0-9]{4})(?:-([0-9]{2}))?", date_string)
+        if partial:  # YYYY / YYYY-MM kept as-is, like the importer
+            month = partial.group(2)
+            ok = (month is None or 1 <= int(month) <= 12) and (
+                not strict_range or col.year_in_range(int(partial.group(1))))
+            return date_string if ok else None
         formats = ["%m/%d/%Y", "%m/%d/%y", "%Y-%m-%d", "%Y/%m/%d"]
         for fmt in formats:
             try:
                 date_obj = dt.strptime(date_string, fmt)
-                return date_obj.strftime("%Y-%m-%d")
             except ValueError:
                 continue
+            if fmt == "%m/%d/%y":
+                date_obj = date_obj.replace(year=col.resolve_two_digit_year(date_obj.year))
+            if strict_range and not col.year_in_range(date_obj.year):
+                return None
+            return date_obj.strftime("%Y-%m-%d")
         return None
+
+# Report locations follow the importer's convention: a custom logs_dir in
+# creds.py puts them under <logs_dir>/import_reports/<sub>; otherwise the
+# default ~/aspace_import_reports/<sub>.
+try:
+    from creds import logs_dir as _logs_dir
+except ImportError:
+    _logs_dir = ""
+
+
+def reports_dir(sub: str) -> str:
+    base = (os.path.join(_logs_dir, "import_reports") if _logs_dir
+            else os.path.expanduser("~/aspace_import_reports"))
+    return os.path.join(base, sub)
+
 
 # ==============================
 # HELP MENU
@@ -175,7 +201,7 @@ def validate_csv_structure(filename: str, update_only: bool = False) -> Dict:
         "valid": True,
         "errors": [],
         "warnings": [],
-        "warnings_note": "Warnings do not need to be fixed - import will still succeed",
+        "warnings_note": "Warnings are not local errors; the import's own ArchivesSpace checks can still refuse a row (e.g. an out-of-range date that differs from the stored one)",
         "statistics": {},
         "duplicate_ids": [],
         "missing_parents": []
@@ -191,20 +217,14 @@ def validate_csv_structure(filename: str, update_only: bool = False) -> Dict:
 
     try:
         with col.open_csv(filename) as csvfile:
-            reader = csv.DictReader(csvfile)
+            reader = csv.DictReader(csvfile, strict=True)
             headers = reader.fieldnames or []
 
             # Duplicate headers: DictReader silently keeps only the LAST exact
             # duplicate's value, and case/whitespace variants look identical
             # to a human while being separate stale columns. Compare
             # normalized names; empty header cells are ignored.
-            groups = {}
-            for header in headers:
-                key = (header or '').strip().casefold()
-                if key:
-                    groups.setdefault(key, []).append(header)
-            duplicates = sorted(', '.join(repr(n) for n in names)
-                                for names in groups.values() if len(names) > 1)
+            duplicates = col.duplicate_headers(headers)  # shared rule (csv_columns)
             if duplicates:
                 results["valid"] = False
                 results["errors"].append(
@@ -216,6 +236,12 @@ def validate_csv_structure(filename: str, update_only: bool = False) -> Dict:
                 if col.CATALOG not in headers:
                     results["valid"] = False
                     results["errors"].append(f"Missing required column: {col.CATALOG}")
+                if col.PARENT_REFID in headers:
+                    # same notice the importer gives: the column is tolerated
+                    # but never read in update-only mode
+                    results["warnings"].append(
+                        f"{col.PARENT_REFID} is ignored in update-only mode "
+                        f"(records are never created or re-parented)")
                 if not any(c in headers for c in col.MUTABLE_COLUMNS):
                     results["valid"] = False
                     results["errors"].append(
@@ -256,11 +282,18 @@ def validate_csv_structure(filename: str, update_only: bool = False) -> Dict:
             for row_num, row in enumerate(reader, 1):
                 total_rows += 1
                 row_errors = []
+                overflow = col.overflow_problem(row, row_num)  # shared rule (csv_columns)
+                if overflow:
+                    results["errors"].append(overflow)
+                    continue
                 
                 # Check catalog number
-                catalog_num = row.get(col.CATALOG, '').strip()
+                catalog_num = (row.get(col.CATALOG) or '').strip()
                 if not catalog_num:
                     row_errors.append(f"Row {row_num}: Missing catalog number")
+                elif not col.valid_catalog_number(catalog_num):
+                    row_errors.append(f"Row {row_num}: Malformed catalog number {catalog_num!r} "
+                                      f"- must be JPC_AV_ followed by digits")
                 elif catalog_num in catalog_numbers:
                     results["duplicate_ids"].append(catalog_num)
                     row_errors.append(f"Row {row_num}: Duplicate catalog number: {catalog_num}")
@@ -271,7 +304,7 @@ def validate_csv_structure(filename: str, update_only: bool = False) -> Dict:
                 # update-only leaves an absent title unmanaged). The catalog-
                 # number fallback only happens when CREATING a record; updates
                 # leave a blank title untouched.
-                if col.TITLE in headers and not row.get(col.TITLE, '').strip():
+                if col.TITLE in headers and not (row.get(col.TITLE) or '').strip():
                     empty_titles += 1
                     if update_only:
                         results["warnings"].append(
@@ -282,15 +315,20 @@ def validate_csv_structure(filename: str, update_only: bool = False) -> Dict:
                 
                 # Check dates
                 for date_field, _label in col.DATE_COLUMNS:
-                    date_val = row.get(date_field, '').strip()
+                    date_val = (row.get(date_field) or '').strip()
                     if date_val:
-                        parsed = parse_date(date_val)
+                        parsed = parse_date(date_val, strict_range=not update_only)
                         if parsed is None:
                             invalid_dates += 1
                             row_errors.append(f"Row {row_num}: Invalid date in {date_field}: {date_val}")
+                        elif update_only and not col.begin_in_range(parsed):
+                            results["warnings"].append(
+                                f"Row {row_num}: {date_field} {date_val} is outside "
+                                f"{col.AV_DATE_YEAR_RANGE[0]}-{col.AV_DATE_YEAR_RANGE[1]} "
+                                f"- accepted only if unchanged from the stored date")
                 
                 # Check parent ref_id (required for create/upsert; never used by updates)
-                parent_ref = row.get(col.PARENT_REFID, '').strip()
+                parent_ref = (row.get(col.PARENT_REFID) or '').strip()
                 if parent_ref:
                     parent_refs.add(parent_ref)
                 elif not update_only:
@@ -315,10 +353,14 @@ def validate_csv_structure(filename: str, update_only: bool = False) -> Dict:
                 "parent_refs_list": list(parent_refs)
             }
             
-            if results["duplicate_ids"]:
-                results["valid"] = False
-            
-            if missing_parent_refs > 0:
+            if total_rows == 0:
+                results["errors"].append("CSV has no data rows (header only) - an empty "
+                                         "export or a wrong filter?")
+
+            # Validity follows the error list - every recorded error (missing
+            # catalog number, duplicate id, missing parent, bad date, no
+            # rows...) fails the sheet; PASSED can never sit next to an error.
+            if results["errors"]:
                 results["valid"] = False
             
             if invalid_dates > 0:
@@ -331,15 +373,16 @@ def validate_csv_structure(filename: str, update_only: bool = False) -> Dict:
     return results
 
 def check_parent_refs(parent_refs: List[str], url: str = None, username: str = None,
-                      password: str = None, repo_id: str = None) -> Dict[str, bool]:
+                      password: str = None, repo_id: str = None) -> Dict[str, object]:
     """Check which parent ref_ids exist in ArchivesSpace.
 
     Uses the shared client's find_parent - the SAME verified, escaped,
     resource-scoped lookup the importer runs - so this diagnostic can no
     longer say "Found" for a fuzzy or cross-resource hit the import would
     then reject. Per-ref values: True = verified found, False = a
-    successful search verified absent, None = the lookup failed (reported
-    as "Not checked", never as found or missing).
+    successful search verified absent, "multiple" = several records share
+    the ref_id (the import will refuse it), None = the lookup failed
+    (reported as "Not checked", never as found or missing).
     """
     results = {}
 
@@ -348,18 +391,21 @@ def check_parent_refs(parent_refs: List[str], url: str = None, username: str = N
         print_status("warning", "Custom --url/--repo overrides are ignored; "
                                 "edit creds.py to target a different instance")
 
-    if not (username or aspace_client.ASPACE_USERNAME) or not (password or aspace_client.ASPACE_PASSWORD):
-        print_status("error", "No credentials available")
-        print(f"         Either add creds.py to repo root, or use {Colors.CYAN}-u{Colors.RESET} and {Colors.CYAN}-p{Colors.RESET} flags")
-        return results
-
+    # Environment first: with several configured and no --env, the missing
+    # choice is the real problem - not "no credentials".
     if not aspace_client.ASPACE_URL:
         if len(aspace_client.ENVIRONMENTS) > 1:
             print_status("error", "Multiple environments configured "
                                   f"({', '.join(sorted(aspace_client.ENVIRONMENTS))}) "
                                   "- pass --env NAME")
         else:
-            print_status("error", "No ArchivesSpace URL configured in creds.py")
+            print_status("error", aspace_client.CONFIG_ERROR
+                                  or "No ArchivesSpace URL configured in creds.py")
+        return results
+
+    if not (username or aspace_client.ASPACE_USERNAME) or not (password or aspace_client.ASPACE_PASSWORD):
+        print_status("error", "No credentials available")
+        print(f"         Either add creds.py to repo root, or use {Colors.CYAN}-u{Colors.RESET} and {Colors.CYAN}-p{Colors.RESET} flags")
         return results
 
     client = ASpaceClient(username, password)
@@ -376,9 +422,16 @@ def check_parent_refs(parent_refs: List[str], url: str = None, username: str = N
             if not ref_id:
                 continue
             lookup = client.find_parent(ref_id)
-            if lookup.status in ("found", "multiple"):
+            if lookup.status == "found":
                 results[ref_id] = True
                 print_status("found", f"{ref_id}")
+            elif lookup.status == "multiple":
+                # The importer refuses an ambiguous parent - so must this
+                # check, or "ready for import" precedes an abort.
+                results[ref_id] = "multiple"
+                print_status("error", f"{ref_id} {Colors.RED}AMBIGUOUS{Colors.RESET} - "
+                                      f"{lookup.count} records share this ref_id; "
+                                      f"clean up duplicates first")
             elif lookup.status == "none":
                 results[ref_id] = False
                 print_status("not_found", f"{ref_id} {Colors.RED}NOT FOUND{Colors.RESET}")
@@ -395,32 +448,66 @@ def generate_parent_lookup_report(csv_file: str, output_file: str = None,
                                   password: str = None, repo_id: str = None):
     """Generate a report of parent ref_ids and their status in ArchivesSpace."""
     
-    report_dir = os.path.expanduser("~/aspace_import_reports/parent_lookups")
-    os.makedirs(report_dir, exist_ok=True)
-    
-    if not output_file:
-        output_file = os.path.join(report_dir, f"parent_lookup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
+    # Timestamp + PID (same stamp every tool uses): two runs in one second
+    # must not share a report path. Only the SELECTED destination's directory
+    # is created - a custom -o neither needs nor touches the default folder.
+    stamp = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{os.getpid()}"
+    output_file = col.resolve_output_path(output_file, reports_dir("parent_lookups"),
+                                          f"parent_lookup_{stamp}.csv")
     
     print_header("Parent Ref ID Lookup")
     print(f"  CSV File: {csv_file}")
     
-    # Get unique parent refs from CSV
+    problem = col.clobber_problem(csv_file, output_file)
+    if problem:
+        print_status("error", problem)
+        return None
+
+    # Get unique parent refs from CSV. The sheet itself must be sound first:
+    # duplicate headers or a missing parent column, and rows with no parent,
+    # are exactly what the importer will refuse - this check must not say
+    # "ready for import" over them.
     parent_refs = set()
-    with col.open_csv(csv_file) as csvfile:
-        reader = csv.DictReader(csvfile)
-        for row in reader:
-            ref = row.get(col.PARENT_REFID, '').strip()
-            if ref:
-                parent_refs.add(ref)
+    blank_parent_rows = 0
+    try:
+        with col.open_csv(csv_file) as csvfile:
+            reader = csv.DictReader(csvfile, strict=True)
+            headers = reader.fieldnames or []
+            duplicates = col.duplicate_headers(headers)
+            if duplicates:
+                print_status("error", f"Duplicate column header(s): {'; '.join(duplicates)} "
+                                      f"- remove the stale duplicate column(s) first")
+                return None
+            if col.PARENT_REFID not in headers:
+                print_status("error", f"CSV has no '{col.PARENT_REFID}' column - nothing to check")
+                return None
+            for row_num, row in enumerate(reader, 1):
+                overflow = col.overflow_problem(row, row_num)
+                if overflow:
+                    print_status("error", f"{overflow} - the import will refuse this sheet")
+                    return None
+                ref = (row.get(col.PARENT_REFID) or '').strip()
+                if ref:
+                    parent_refs.add(ref)
+                else:
+                    blank_parent_rows += 1
+    except csv.Error as e:
+        print_status("error", f"Could not parse {csv_file} as CSV: {e} - malformed quoting? "
+                              f"the import will refuse this sheet")
+        return None
     
     print(f"  Found: {Colors.CYAN}{len(parent_refs)}{Colors.RESET} unique parent ref_ids")
+    if blank_parent_rows:
+        print_status("error", f"{blank_parent_rows} row(s) have no parent ref_id - the import "
+                              f"will refuse them; fix the sheet first")
     
     if parent_refs:
         print_section("Checking ArchivesSpace")
         ref_status = check_parent_refs(list(parent_refs), url, username, password, repo_id)
         
-        # Write report
-        with open(output_file, 'w', newline='') as csvfile:
+        # Write report (atomically: the final path only ever holds a complete file)
+        tmp_path = output_file + '.tmp'
+        with open(tmp_path, 'w', newline='') as csvfile:
             writer = csv.writer(csvfile)
             writer.writerow(['Parent Ref ID', 'Exists in ArchivesSpace', 'Status'])
             
@@ -428,38 +515,54 @@ def generate_parent_lookup_report(csv_file: str, output_file: str = None,
                 exists = ref_status.get(ref, None)
                 if exists is None:
                     status = "Not checked"
+                elif exists == "multiple":
+                    status = "AMBIGUOUS - several records share this ref_id; clean up duplicates"
                 elif exists:
                     status = "Found"
                 else:
                     status = "NOT FOUND - Need to create or fix"
                 
                 writer.writerow([ref, exists, status])
+        os.replace(tmp_path, output_file)
         
         # Summary
-        found = sum(1 for v in ref_status.values() if v)
+        found = sum(1 for v in ref_status.values() if v is True)
         not_found = sum(1 for v in ref_status.values() if v is False)
-        unchecked = len(parent_refs) - found - not_found
+        ambiguous = sum(1 for v in ref_status.values() if v == "multiple")
+        unchecked = len(parent_refs) - found - not_found - ambiguous
 
         print_section("Summary")
         print(f"  {Colors.GREEN}Found:{Colors.RESET}     {found}")
         print(f"  {Colors.RED}Not Found:{Colors.RESET} {not_found}")
+        if ambiguous:
+            print(f"  {Colors.RED}Ambiguous:{Colors.RESET} {ambiguous} (several records share the ref_id)")
         if unchecked:
             print(f"  {Colors.YELLOW}Not checked:{Colors.RESET} {unchecked} (lookup failed)")
 
-        if not_found > 0:
+        if not_found > 0 or ambiguous > 0:
             print()
-            print_status("warning", f"{Colors.YELLOW}{not_found} parent ref_ids not found in ArchivesSpace!{Colors.RESET}")
-            print(f"         These must be created before import will succeed.")
+            if not_found:
+                print_status("warning", f"{Colors.YELLOW}{not_found} parent ref_ids not found in ArchivesSpace!{Colors.RESET}")
+                print(f"         These must be created before import will succeed.")
+            if ambiguous:
+                print_status("warning", f"{Colors.YELLOW}{ambiguous} parent ref_ids are ambiguous - "
+                                        f"the import will refuse them until the duplicates are cleaned up.{Colors.RESET}")
         elif unchecked:
             print()
             print_status("warning", "Some lookups failed - NOT ready to declare the "
                                     "import safe; retry when the API is reachable.")
+        elif blank_parent_rows:
+            print()
+            print_status("warning", "Every listed parent exists, but rows with NO parent "
+                                    "ref_id remain - parent check FAILED until fixed.")
         else:
             print()
-            print_status("success", "All parent ref_ids found - ready for import!")
+            print_status("success", "Parent check passed - every parent ref_id resolves to "
+                                    "exactly one record (run --validate for the rest of the sheet)")
         
         print(f"\n  Report saved: {Colors.CYAN}{output_file}{Colors.RESET}")
         print(f"{Colors.DIM}{'-' * 60}{Colors.RESET}\n")
+        return None if blank_parent_rows else ref_status
 
 def run_validation(csv_file: str, update_only: bool = False):
     """Run CSV validation and display results."""
@@ -486,7 +589,8 @@ def run_validation(csv_file: str, update_only: bool = False):
     print(f"  Missing Parent Refs:  {Colors.RED if stats.get('missing_parent_refs', 0) > 0 else ''}{stats.get('missing_parent_refs', 0)}{Colors.RESET}")
     print(f"  Invalid Dates:        {Colors.RED if stats.get('invalid_dates', 0) > 0 else ''}{stats.get('invalid_dates', 0)}{Colors.RESET}")
     print(f"  Unique Parent Refs:   {stats.get('unique_parent_refs', 0)}")
-    print(f"  Empty Titles:         {stats.get('empty_titles', 0)} {Colors.DIM}(will use catalog #){Colors.RESET}" if stats.get('empty_titles', 0) > 0 else f"  Empty Titles:         0")
+    title_note = "(left unchanged)" if update_only else "(will use catalog #)"
+    print(f"  Empty Titles:         {stats.get('empty_titles', 0)} {Colors.DIM}{title_note}{Colors.RESET}" if stats.get('empty_titles', 0) > 0 else f"  Empty Titles:         0")
     
     # Errors
     if results['errors']:
@@ -499,7 +603,8 @@ def run_validation(csv_file: str, update_only: bool = False):
     # Warnings
     if results['warnings']:
         print_section(f"Warnings ({len(results['warnings'])})")
-        print(f"  {Colors.DIM}These don't need to be fixed - import will still succeed{Colors.RESET}\n")
+        print(f"  {Colors.DIM}These are not local errors. The import's own ArchivesSpace checks can still "
+              f"refuse a row (e.g. an out-of-range date that differs from the stored one){Colors.RESET}\n")
         for warning in results['warnings'][:10]:
             print_status("warning", warning)
         if len(results['warnings']) > 10:
@@ -512,14 +617,17 @@ def run_validation(csv_file: str, update_only: bool = False):
             print_status("error", dup)
     
     # Save detailed report
-    report_dir = os.path.expanduser("~/aspace_import_reports/csv_validation")
-    os.makedirs(report_dir, exist_ok=True)
-    report_file = os.path.join(report_dir, f"validation_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
-    with open(report_file, 'w') as f:
+    stamp = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{os.getpid()}"
+    report_file = col.resolve_output_path(None, reports_dir("csv_validation"),
+                                          f"validation_report_{stamp}.json")
+    tmp_path = report_file + '.tmp'
+    with open(tmp_path, 'w') as f:
         json.dump(results, f, indent=2)
+    os.replace(tmp_path, report_file)  # the final path only ever holds a complete report
     
     print(f"\n  Detailed report: {Colors.CYAN}{report_file}{Colors.RESET}")
     print(f"{Colors.DIM}{'-' * 60}{Colors.RESET}\n")
+    return results['valid']
 
 # ==============================
 # MAIN EXECUTION
@@ -625,18 +733,21 @@ def main():
         if not os.path.exists(args.validate):
             print_status("error", f"File not found: {args.validate}")
             sys.exit(1)
-        run_validation(args.validate, update_only=args.update_only)
+        if not run_validation(args.validate, update_only=args.update_only):
+            sys.exit(1)  # FAILED must be visible to scripts, not just eyes
         
     elif args.parents:
         if not os.path.exists(args.parents):
             print_status("error", f"File not found: {args.parents}")
             sys.exit(1)
-        generate_parent_lookup_report(
+        status = generate_parent_lookup_report(
             args.parents,
             output_file=args.output,
             username=args.username,
             password=args.password
         )
+        if not status or any(v is not True for v in status.values()):
+            sys.exit(1)  # anything but "all found" is not ready for import
 
 if __name__ == "__main__":
     main()

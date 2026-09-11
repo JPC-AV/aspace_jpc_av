@@ -4,10 +4,12 @@ Python scripts for managing audiovisual archival objects in ArchivesSpace for th
 
 ## Overview
 
-This repository contains two scripts that work together for the Johnson Publishing Company Archive (JPCA) audiovisual collection processing. They create and update records in ArchivesSpace and support the ingest workflow of assets to the Smithsonian DAMS.
+This repository contains the tools for the Johnson Publishing Company Archive (JPCA) audiovisual collection processing. They create, update, export and check records in ArchivesSpace and support the ingest workflow of assets to the Smithsonian DAMS.
 
-1. **aspace_csv_import** — Creates item-level archival objects from CSV metadata
-2. **aspace_rename_directories** — Processes digitized video files, extracts runtime, and updates ArchivesSpace records
+1. **aspace_csv_import** — Creates and updates item-level archival objects from CSV metadata
+2. **aspace_csv_export** — Exports AV records to an import-shaped CSV (round trip / audit), optionally checking MADS
+3. **check_mads** — Reports which items are live in MADS, the public DAMS delivery
+4. **aspace_rename_directories** — Processes digitized video files, extracts runtime, and updates ArchivesSpace records
 
 ## Directory Structure
 
@@ -21,8 +23,11 @@ aspace_jpc_av/
 │
 ├── aspace_csv_import/
 │   ├── aspace_csv_import.py      # Main import script
+│   ├── aspace_csv_export.py      # Export AV records to an import-shaped CSV (round trip)
+│   ├── check_mads.py             # Check which items are live in MADS (public DAMS delivery)
 │   ├── check_extent_types.py     # Utility to validate extent types against ASpace
-│   ├── csv_utils.py              # CSV helper functions
+│   ├── csv_utils.py              # CSV validation and parent checks
+│   ├── csv_columns.py            # Master list of CSV column names (imported, never run)
 │   ├── README.md                 # Detailed usage documentation
 │   └── docs/
 │       ├── CSV_TO_ASPACE_MAPPING.md   # Field mapping reference
@@ -49,19 +54,24 @@ More detailed descriptions of each file and usage in directory-specific README.m
 | `creds.py` | User creates/edits | Your local credentials file. You create this from the template. |
 | `requirements.txt` | One-time setup | Python package dependencies. Run `pip install -r requirements.txt` once. |
 | `aspace_csv_import.py` | Run via command line | Main script for importing CSV metadata to ArchivesSpace. |
+| `aspace_csv_export.py` | Run via command line | Exports AV records to an import-shaped CSV with audit columns; `--mads-live` checks MADS. |
+| `check_mads.py` | Run via command line | Checks which catalog numbers are live in MADS (public URLs only). |
 | `check_extent_types.py` | Run via command line | Utility to check valid extent types in your ASpace instance. |
-| `csv_utils.py` | Backend | Helper functions used by the import script. |
+| `csv_utils.py` | Run via command line | Validates a CSV and checks parent ref_ids before import. |
+| `csv_columns.py` | Backend | Master list of CSV column names used by every tool. |
 | `docs/*.md` | Reference | Documentation for field mappings and workflows. |
 | `aspace-rename-directories.py` | Run via command line | Main script for processing video directories. |
 
 ### Logs and Reports
 
-Both scripts generate logs and reports:
+Every tool writes its reports to its own folder:
 
-- **aspace_csv_import** creates logs and reports in `~/aspace_import_reports/`
-- **aspace_rename_directories** creates logs in `~/aspace_rename_reports/`
+- **aspace_csv_import** — `~/aspace_import_reports/`: log, CSV and JSON receipts, and `import_records_*.json` (the records as stored after the run)
+- **aspace_csv_export** — `~/aspace_import_reports/` (export CSVs)
+- **check_mads** — `~/aspace_mads_reports/`
+- **aspace_rename_directories** — `~/aspace_rename_reports/`
 
-Log files include timestamps, actions taken, and any errors encountered.
+Setting `logs_dir` in `creds.py` moves them all under one parent, each tool in its own subfolder (`import_reports/`, `export_reports/`, `mads_reports/`, `rename_reports/`). Log files include the exact command run, timestamps, actions taken, and any errors encountered.
 
 ## Setup
 
@@ -118,14 +128,34 @@ Ask your ArchivesSpace administrator if you don't know these values.
 
 ### aspace_csv_import
 
-Creates archival objects in ArchivesSpace from CSV metadata. Handles titles, dates, extents, notes, and container instances.
+Creates or updates archival objects in ArchivesSpace from CSV metadata. Handles titles, dates, extents, notes, and container instances. Every run states its mode (`--create-records` or `--update-only`) and preflights every row before writing anything.
 
 ```bash
 cd aspace_csv_import
-python3 aspace_csv_import.py -f data.csv --dry-run
+python3 aspace_csv_import.py --create-records -f data.csv --dry-run
 ```
 
 See [aspace_csv_import/README.md](aspace_csv_import/README.md) for full documentation.
+
+### aspace_csv_export
+
+The reverse of the importer: exports AV records to an import-shaped CSV with audit columns (ref ID, URI, staff link, MADS URL, created/modified, Warnings) for round-trip editing with `--update-only` or as an audit report. Read-only.
+
+```bash
+cd aspace_csv_import
+python3 aspace_csv_export.py --level item --mads-live
+```
+
+### check_mads
+
+Reports which catalog numbers are live in MADS (the public DAMS delivery). Public URLs only; ArchivesSpace is never contacted.
+
+```bash
+cd aspace_csv_import
+python3 check_mads.py numbers.txt
+```
+
+Both are documented in [aspace_csv_import/README.md](aspace_csv_import/README.md).
 
 ### aspace_rename_directories
 
@@ -142,9 +172,11 @@ See [aspace_rename_directories/README.md](aspace_rename_directories/README.md) f
 
 Typical usage order:
 
-1. **CSV Import** — Create archival objects from catalog metadata
-2. **Directory Processing** — After digitization, extract runtime and update records
+1. **CSV Import** — Create archival objects from catalog metadata (validate, check parents and formats, dry run, real run)
+2. **Directory Processing** — After digitization, extract runtime and update records; folders gain the ref ID
+3. **DAMS ingest** — Outside these tools; MADS publishes the item within about a day
+4. **Export / MADS check** — Any time: pull records to a CSV for auditing or round-trip edits, and see which items are live in MADS
 
 ## Environments
 
-Both scripts support sandbox and production environments. Update your local `creds.py` with the appropriate `baseURL` and `resource_id` for your target environment.
+Every ArchivesSpace tool supports sandbox and production (`check_mads.py` talks only to the public MADS site and takes no environment). `creds.py` holds an `environments` dict with one entry per instance; with one configured it is selected automatically, with several every run must pass `--env NAME` (there is no default). The environment is chosen once per run, before anything connects.

@@ -31,9 +31,11 @@ except ModuleNotFoundError:
     aspace_client.missing_package_exit("colorama")
 
 if not aspace_client.ENVIRONMENTS:
-    print(f"{Fore.RED}Error: creds.py not found or missing required fields{Style.RESET_ALL}")
-    print("Required fields: baseURL, user, password, repo_id, resource_id")
-    print("See creds_template.py in repo root for format.")
+    # Say what is actually wrong: a broken environments declaration gets
+    # its precise message, a missing file gets the format hint.
+    print(f"{Fore.RED}Error: {aspace_client.CONFIG_ERROR or 'creds.py not found or missing required fields'}{Style.RESET_ALL}")
+    if not aspace_client.CONFIG_ERROR:
+        print("See creds_template.py in repo root for format (an `environments` dict).")
     sys.exit(1)
 
 # Import optional logs_dir (may not exist in older creds.py files)

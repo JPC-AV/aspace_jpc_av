@@ -104,6 +104,9 @@ def get_colored_help():
 {C.BOLD}DESCRIPTION{C.RESET}
     Fetches valid extent types from ArchivesSpace and optionally validates
     the '{col.ORIGINAL_FORMAT}' column in your CSV against the controlled vocabulary.
+    Authoritative for sheets that SET formats (create runs). Advisory for
+    update sheets: a stored value that has since been retired shows INVALID
+    here but round-trips unchanged under --update-only.
 
 {C.BOLD}USAGE{C.RESET}
     {C.GREEN}${C.RESET} python3 check_extent_types.py [options]
@@ -136,24 +139,27 @@ def get_extent_types(username=None, password=None):
     Same login, retries, and enumeration resolution (by name, with the
     guarded ID-14 fallback) as the importer itself - so what this reports
     is exactly what an import run would accept."""
-    if not (username or aspace_client.ASPACE_USERNAME) or not (password or aspace_client.ASPACE_PASSWORD):
-        print_status("error", "No credentials available")
-        print(f"         Either add creds.py to repo root, or use {Colors.CYAN}-u{Colors.RESET} and {Colors.CYAN}-p{Colors.RESET} flags")
-        return None
-
+    # Environment first: with several configured and no --env, the missing
+    # choice is the real problem - not "no credentials".
     if not aspace_client.ASPACE_URL:
         if len(aspace_client.ENVIRONMENTS) > 1:
             print_status("error", "Multiple environments configured "
                                   f"({', '.join(sorted(aspace_client.ENVIRONMENTS))}) "
                                   "- pass --env NAME")
         else:
-            print_status("error", "No ArchivesSpace URL configured in creds.py")
+            print_status("error", aspace_client.CONFIG_ERROR
+                                  or "No ArchivesSpace URL configured in creds.py")
+        return None
+
+    if not (username or aspace_client.ASPACE_USERNAME) or not (password or aspace_client.ASPACE_PASSWORD):
+        print_status("error", "No credentials available")
+        print(f"         Either add creds.py to repo root, or use {Colors.CYAN}-u{Colors.RESET} and {Colors.CYAN}-p{Colors.RESET} flags")
         return None
 
     client = ArchivesSpaceClient(username, password)
     print_status("info", f"Connecting to {aspace_client.ASPACE_URL}...")
     if not client.login():
-        print_status("error", "Authentication failed (see log)")
+        print_status("error", "Authentication failed - check VPN, then the username/password in creds.py")
         return None
     print_status("success", "Authenticated")
 
@@ -175,9 +181,26 @@ def check_csv_values(csv_file):
     used_types = set()
     try:
         with col.open_csv(csv_file) as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                format_type = row.get(col.ORIGINAL_FORMAT, '').strip()
+            reader = csv.DictReader(f, strict=True)
+            headers = reader.fieldnames or []
+            duplicates = col.duplicate_headers(headers)
+            if duplicates:
+                # Two 'Original Format' columns: DictReader keeps the last,
+                # so a bad value in the first would vanish and the check
+                # would go green. Same rule as the importer and csv_utils.
+                print_status("error", f"Duplicate column header(s): {'; '.join(duplicates)} "
+                                      f"- remove the stale duplicate column(s) first")
+                return None
+            if col.ORIGINAL_FORMAT not in headers:
+                print_status("error", f"CSV has no '{col.ORIGINAL_FORMAT}' column - "
+                                      f"nothing to validate (headers: {', '.join(headers) or 'none'})")
+                return None
+            for row_num, row in enumerate(reader, 1):
+                overflow = col.overflow_problem(row, row_num)
+                if overflow:
+                    print_status("error", f"{overflow} - the import will refuse this sheet")
+                    return None
+                format_type = (row.get(col.ORIGINAL_FORMAT) or '').strip()
                 if format_type:
                     used_types.add(format_type)
     except Exception as e:
@@ -281,6 +304,12 @@ def main():
             print_section(f"Validating CSV: {args.csv_file}")
             
             used_types = check_csv_values(args.csv_file)
+            if used_types is None:
+                sys.exit(1)
+            if not used_types:
+                print()
+                print_status("warning", f"The '{col.ORIGINAL_FORMAT}' column is present but "
+                                        f"every cell is empty - nothing to validate")
             if used_types:
                 print(f"\n  Extent types found in CSV:\n")
                 
@@ -310,7 +339,11 @@ def main():
                         else:
                             print(f"    {Colors.RED}'{invalid}'{Colors.RESET} --> {Colors.DIM}no similar type found{Colors.RESET}")
                     
-                    print(f"\n  {Colors.YELLOW}These values must be changed to match valid ArchivesSpace values.{Colors.RESET}")
+                    print(f"\n  {Colors.YELLOW}These values must be changed to match valid ArchivesSpace values{Colors.RESET}")
+                    print(f"  {Colors.DIM}if you intend to SET them. A value already stored on a record (an export's{Colors.RESET}")
+                    print(f"  {Colors.DIM}retired term) round-trips unchanged: --update-only only checks a format it changes.{Colors.RESET}")
+                    print(f"{Colors.DIM}{'-' * 60}{Colors.RESET}\n")
+                    sys.exit(1)
                 else:
                     print()
                     print_status("success", f"{Colors.GREEN}All extent types in CSV are valid!{Colors.RESET}")
