@@ -3,7 +3,7 @@
 
 Pulls every archival object in the configured AV resource and writes a CSV
 shaped EXACTLY like the import sheet (same column headers, from
-csv_columns.py), plus audit columns from ArchivesSpace. That makes the round
+sheet_rules.py), plus audit columns from ArchivesSpace. That makes the round
 trip real: export -> edit in a spreadsheet -> re-import with --update-only.
 
 Round-trip rules this export honors:
@@ -41,7 +41,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-import csv_columns as col  # single source of truth for CSV header names
+import sheet_rules as col  # single source of truth for CSV header names
 
 # Add parent directory to path for the shared client and creds.py import
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -81,14 +81,14 @@ EXPORT_COLUMNS = [
     "Created By", "Create Time", "Last Modified By", "Last Modified Time",
 ]
 OPTIONAL_EXPORT_COLUMNS = {"MADS live"}
-# Stay-in-sync guard (csv_columns owns both lists): every required import
+# Stay-in-sync guard (sheet_rules owns both lists): every required import
 # column is exported, every extra column is a declared audit column, and no
 # column appears twice - so a future edit to either side fails at import time.
 assert len(EXPORT_COLUMNS) == len(set(EXPORT_COLUMNS)), "EXPORT_COLUMNS has a duplicate"
 assert set(col.REQUIRED_COLUMNS) <= set(EXPORT_COLUMNS), \
     "EXPORT_COLUMNS is missing a required import column"
 assert set(EXPORT_COLUMNS) - set(col.REQUIRED_COLUMNS) == set(col.EXPORT_AUDIT_COLUMNS), \
-    "EXPORT_COLUMNS and csv_columns.EXPORT_AUDIT_COLUMNS have drifted"
+    "EXPORT_COLUMNS and sheet_rules.EXPORT_AUDIT_COLUMNS have drifted"
 
 # Public MADS URL for a catalog number (DAMS ingest auto-publishes to MADS,
 # so this is where the item WILL be public - the URL is derived, not checked;

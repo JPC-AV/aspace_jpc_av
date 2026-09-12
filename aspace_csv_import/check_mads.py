@@ -39,7 +39,7 @@ import aspace_client  # noqa: F401  (friendly missing-package guard for requests
 import requests
 
 from aspace_csv_import import Colors, print_status, print_header, RUN_COMMAND
-import csv_columns as col
+import sheet_rules as col
 
 MADS_URL_PREFIX = "https://api.jpc.si.edu/mads/view/JPC-"
 MADS_HOST = "api.jpc.si.edu"
@@ -47,7 +47,7 @@ TIMEOUT = 10
 WORKERS = 8
 # Only well-formed catalog numbers are looked up: MADS answers HTTP 200 + {}
 # for ANY identifier, so a typo would otherwise read as a definitive "No".
-CATALOG_RE = col.CATALOG_NUMBER_RE  # the shared contract (csv_columns)
+CATALOG_RE = col.CATALOG_NUMBER_RE  # the shared contract (sheet_rules)
 
 # Reports directory: same convention as the other tools - a custom logs_dir
 # gets a per-script subfolder.
@@ -143,7 +143,7 @@ def summarize(results):
     return live, not_live, failed
 
 
-# File-safety helpers live in csv_columns (shared by every tool); re-exported
+# File-safety helpers live in sheet_rules (shared by every tool); re-exported
 # here so callers and tests can keep using check_mads.same_file / clobber_problem.
 same_file = col.same_file
 clobber_problem = col.clobber_problem

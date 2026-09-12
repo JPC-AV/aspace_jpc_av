@@ -40,7 +40,7 @@ JPC_AV_00001_refid_b645fa3ffd01ad7364c9658f83fdceda/
 
 ## Prerequisites
 
-- Python 3.6 or higher
+- Python 3.8 or higher
 - `mediainfo` CLI tool installed and on your system PATH
 - Required Python packages:
   ```bash
@@ -50,22 +50,33 @@ JPC_AV_00001_refid_b645fa3ffd01ad7364c9658f83fdceda/
 
 ## Installation
 
-1. Copy the credentials template and add your credentials:
+1. Copy the credentials template (both files live at the repository root)
+   and add your credentials:
    ```bash
    cp creds_template.py creds.py
    ```
 
-2. Edit `creds.py`:
+2. Edit `creds.py` - credentials live inside an `environments` dict, one
+   entry per ArchivesSpace instance (the template ships with the sandbox
+   filled in and production commented out):
    ```python
-   baseURL = "https://api-aspace.jpcarchive.org"
-   user = "your_username"
-   password = "your_password"
-   repo_id = 2
-   resource_id = 7
-   logs_dir = ""  # Optional: set to override default log location
+   environments = {
+       "sandbox": {
+           "baseURL": "https://api-jpcsb.as.atlas-sys.com",
+           "user": "your_username",
+           "password": "your_password",
+           "repo_id": "2",
+           "resource_id": "7",
+           "staff_url": "https://staff-jpcsb.as.atlas-sys.com",
+       },
+   }
+   logs_dir = ""  # Optional: parent folder for every tool's reports
    ```
+   With one environment configured it is selected automatically; with
+   several, every run must pass `--env NAME` (there is no default - a
+   forgotten flag can never mean production).
 
-   **Important:** Add `creds.py` to `.gitignore`.
+   `creds.py` is already in `.gitignore`; never commit or share it.
 
 ## Usage
 
@@ -106,8 +117,9 @@ python3 aspace-rename-directories.py -d /path/to/videos --verbose
 | `--mp4` | Process optical-disc `.mp4` transfers instead of the default `.mkv` (see below) |
 | `--no-rename` | Update ArchivesSpace only; skip directory renaming |
 | `--no-update` | Rename directories only; skip ArchivesSpace record updates |
-| `--rename-media` | Also rename the media file to include `ref_id` (`.mkv` batches only; `--rename-mkv` is an alias) |
+| `--rename-media` | Also rename the media file to include `ref_id` (`.mkv` batches only; `--rename-mkv` is an alias). Refused for a folder whose checksum manifest (`.md5`/`.sha256`...) names the media file (or whose manifests could not be read) - renaming would orphan that entry |
 | `-v, --verbose` | Enable debug-level logging |
+| `--env NAME` | Target environment from `creds.py` (required when several are configured) |
 
 One media format per run: the default is `.mkv` (vrecord digitizations); `--mp4` switches the run to optical-disc transfers. Future formats (`--wav`, `--mp3`) will follow the same pattern — audio formats will skip the `physical_details` fill, since the video default doesn't apply to them.
 

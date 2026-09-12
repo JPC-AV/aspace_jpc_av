@@ -68,7 +68,7 @@ This script imports item-level archival objects from CSV files into ArchivesSpac
    - `check_mads.py` - MADS liveness checker (public URLs; never touches ArchivesSpace)
    - `csv_utils.py` - CSV validation utilities
    - `check_extent_types.py` - Extent type checker
-   - `csv_columns.py` - The sheet contract: column names and the shared validation rules (imported by the others)
+   - `sheet_rules.py` - The sheet contract: column names and the shared validation rules (imported by the others)
 
 2. Set up credentials **at the repository root**:
    ```bash
@@ -546,7 +546,7 @@ aborts with no writes.
   - Blank CSV cells mean "leave the existing value alone"; day-first dates
     (13/02/2024) are rejected as malformed
   - Column names renamed (ASpace Title, ASpace Scope and Contents Note) and
-    centralized in csv_columns.py — future renames are a one-line edit
+    centralized in sheet_rules.py — future renames are a one-line edit
   - `csv_utils.py --validate --update-only` for narrow CSVs; docs corrected
     and expanded (ToC, workflows, real status symbols)
 

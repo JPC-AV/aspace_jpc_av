@@ -27,7 +27,7 @@ aspace_jpc_av/
 │   ├── check_mads.py             # Check which items are live in MADS (public DAMS delivery)
 │   ├── check_extent_types.py     # Utility to validate extent types against ASpace
 │   ├── csv_utils.py              # CSV validation and parent checks
-│   ├── csv_columns.py            # Master list of CSV column names (imported, never run)
+│   ├── sheet_rules.py            # The sheet contract: column names + validation rules (imported, never run)
 │   ├── README.md                 # Detailed usage documentation
 │   └── docs/
 │       ├── CSV_TO_ASPACE_MAPPING.md   # Field mapping reference
@@ -58,7 +58,7 @@ More detailed descriptions of each file and usage in directory-specific README.m
 | `check_mads.py` | Run via command line | Checks which catalog numbers are live in MADS (public URLs only). |
 | `check_extent_types.py` | Run via command line | Utility to check valid extent types in your ASpace instance. |
 | `csv_utils.py` | Run via command line | Validates a CSV and checks parent ref_ids before import. |
-| `csv_columns.py` | Backend | Master list of CSV column names used by every tool. |
+| `sheet_rules.py` | Backend | The sheet contract: column names and the validation rules every tool applies. |
 | `docs/*.md` | Reference | Documentation for field mappings and workflows. |
 | `aspace-rename-directories.py` | Run via command line | Main script for processing video directories. |
 
@@ -128,7 +128,7 @@ Ask your ArchivesSpace administrator if you don't know these values.
 
 ### aspace_csv_import
 
-Creates or updates archival objects in ArchivesSpace from CSV metadata. Handles titles, dates, extents, notes, and container instances. Every run states its mode (`--create-records` or `--update-only`) and preflights every row before writing anything.
+Creates or updates archival objects in ArchivesSpace from CSV metadata. Handles titles, dates, extents, notes, and container instances. Every run states its mode (`--create-records` or `--update-only`); strict `--create-records` and `--update-only` preflight every row before writing anything, while `--skip-duplicates` processes rows individually.
 
 ```bash
 cd aspace_csv_import

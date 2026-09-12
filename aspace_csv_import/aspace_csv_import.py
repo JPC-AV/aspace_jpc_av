@@ -13,7 +13,7 @@ from pathlib import Path
 import time
 import argparse
 
-import csv_columns as col  # single source of truth for CSV header names
+import sheet_rules as col  # single source of truth for CSV header names
 
 # ==============================
 # TERMINAL COLORS
@@ -319,7 +319,7 @@ def validate_csv_before_import(filename: str, update_only: bool = False) -> Tupl
             # a human while being a separate stale column. Compare normalized
             # names; empty header cells (stray trailing commas) are ignored -
             # they carry no data the importer reads.
-            duplicates = col.duplicate_headers(headers)  # shared rule (csv_columns)
+            duplicates = col.duplicate_headers(headers)  # shared rule (sheet_rules)
             if duplicates:
                 errors.append(f"Duplicate column header(s): {'; '.join(duplicates)} "
                               f"- remove the stale duplicate column(s) first")
@@ -367,7 +367,7 @@ def validate_csv_before_import(filename: str, update_only: bool = False) -> Tupl
                 # Cells beyond the header (DictReader files them under None):
                 # an unquoted comma has shifted this row's fields - refuse it
                 # rather than import shifted data and drop the overflow.
-                overflow = col.overflow_problem(row, row_num)  # shared rule (csv_columns)
+                overflow = col.overflow_problem(row, row_num)  # shared rule (sheet_rules)
                 if overflow:
                     errors.append(overflow)
                     continue
@@ -631,7 +631,7 @@ def parse_date(date_string: str, strict_range: bool = True) -> Optional[str]:
             continue
         if fmt == "%m/%d/%y":
             # Two-digit year: Python's own cutoff (00-68 -> 20xx) would file a
-            # 1965 tape under 2065. The collection's range (csv_columns) is
+            # 1965 tape under 2065. The collection's range (sheet_rules) is
             # fixed, so the same sheet parses the same way in any year.
             date_obj = date_obj.replace(year=col.resolve_two_digit_year(date_obj.year))
         if strict_range and not col.year_in_range(date_obj.year):

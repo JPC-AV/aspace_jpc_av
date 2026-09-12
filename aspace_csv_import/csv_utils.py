@@ -13,7 +13,7 @@ import os
 import argparse
 from pathlib import Path
 
-import csv_columns as col  # single source of truth for CSV header names
+import sheet_rules as col  # single source of truth for CSV header names
 
 # ==============================
 # TERMINAL COLORS
@@ -224,7 +224,7 @@ def validate_csv_structure(filename: str, update_only: bool = False) -> Dict:
             # duplicate's value, and case/whitespace variants look identical
             # to a human while being separate stale columns. Compare
             # normalized names; empty header cells are ignored.
-            duplicates = col.duplicate_headers(headers)  # shared rule (csv_columns)
+            duplicates = col.duplicate_headers(headers)  # shared rule (sheet_rules)
             if duplicates:
                 results["valid"] = False
                 results["errors"].append(
@@ -282,7 +282,7 @@ def validate_csv_structure(filename: str, update_only: bool = False) -> Dict:
             for row_num, row in enumerate(reader, 1):
                 total_rows += 1
                 row_errors = []
-                overflow = col.overflow_problem(row, row_num)  # shared rule (csv_columns)
+                overflow = col.overflow_problem(row, row_num)  # shared rule (sheet_rules)
                 if overflow:
                     results["errors"].append(overflow)
                     continue
@@ -494,6 +494,13 @@ def generate_parent_lookup_report(csv_file: str, output_file: str = None,
     except csv.Error as e:
         print_status("error", f"Could not parse {csv_file} as CSV: {e} - malformed quoting? "
                               f"the import will refuse this sheet")
+        return None
+    except UnicodeDecodeError as e:
+        print_status("error", f"Could not read {csv_file}: not UTF-8 text (byte {e.start}: "
+                              f"{e.reason}) - save the file as UTF-8 CSV")
+        return None
+    except OSError as e:
+        print_status("error", f"Could not read {csv_file}: {e}")
         return None
     
     print(f"  Found: {Colors.CYAN}{len(parent_refs)}{Colors.RESET} unique parent ref_ids")

@@ -3,6 +3,7 @@ ASpace phystech (Physical Characteristics and Technical Requirements) note, and
 renames directories to include the record's ref_id."""
 
 import os  # Library for interacting with the operating system (e.g., files, directories)
+import stat  # S_ISREG for the manifest scan
 import sys  # Library for system-specific parameters and functions
 import logging  # Library for logging messages (e.g., info, warnings, errors)
 import subprocess  # Library for running external commands and capturing their output
@@ -240,10 +241,19 @@ def get_refid(client, query):
     ref_id = lookup.record.get("ref_id")
     if not ref_id:
         return None, None, "matched record has no ref_id"
+    if not isinstance(ref_id, str) or not REF_ID_RE.fullmatch(ref_id):
+        # The ref_id becomes part of a directory (and media) name: it must be
+        # a single safe filename component - ArchivesSpace generates 32 hex
+        # characters, and anything else is a malformed record, not a name.
+        return None, None, f"matched record's ref_id {ref_id!r} is not a valid ArchivesSpace ref_id"
     archival_object_id = lookup.uri.rstrip("/").rsplit("/", 1)[-1]
     logging.info(f"Verified archival object with Component Unique Identifier '{query}'")
     logging.info(f"Title: {lookup.record.get('title', 'N/A')}")
     return ref_id, archival_object_id, None
+
+# An ArchivesSpace-generated ref_id: 32 lowercase hex characters. Enforced
+# before a ref_id is ever used in a filesystem path.
+REF_ID_RE = re.compile(r"[0-9a-f]{32}")
 
 # A processable directory is named exactly like a catalog number. Substring
 # matching ("JPC_AV" in name) used to catch things like JPC_AV_NOTES and send
@@ -709,6 +719,27 @@ def rename_and_update_directories(client, target_dir, dry_run=False, no_rename=F
                                       f"{mkv_target_name}. Skipping.")
                         counters["failed"] += 1
                         continue
+                    try:
+                        manifests = checksum_manifests_naming(dir_path, mkv_filename)
+                    except OSError as e:
+                        logging.error(f"Refusing --rename-media for {directory}: could not "
+                                      f"inspect checksum manifests ({e}). Skipping.")
+                        counters["failed"] += 1
+                        continue
+                    if manifests:
+                        # A checksum manifest lists the media by NAME; renaming
+                        # the file would orphan that entry and break any
+                        # filename-based verification downstream. Rewriting
+                        # manifests is not implemented (no workflow uses
+                        # --rename-media with manifests yet) - refuse, and
+                        # say what would have to happen.
+                        logging.error(f"Refusing --rename-media for {directory}: "
+                                      f"{', '.join(manifests)} reference {mkv_filename} by name "
+                                      f"and would be orphaned by the rename. Drop --rename-media "
+                                      f"for this folder, or regenerate the manifest after renaming "
+                                      f"by hand. Skipping.")
+                        counters["failed"] += 1
+                        continue
 
             # Step 4: Extract runtime (only when updating the record). A failed/unparseable
             # read returns None — never write a bogus 00:00:00. Skip the whole directory so
@@ -735,6 +766,17 @@ def rename_and_update_directories(client, target_dir, dry_run=False, no_rename=F
                 archival_object_data = fetch_archival_object(client, archival_object_id)
                 if not archival_object_data:
                     logging.error(f"Failed to fetch archival object for ID: {archival_object_id}. Skipping.")
+                    counters["failed"] += 1
+                    continue
+                # The lookup verified ONE record; this second fetch must be that
+                # same record - same uri, resource, catalog number, item level
+                # and ref_id - before anything is modified or renamed after it.
+                # A malformed or stale response is enough to fail this; no
+                # concurrent writer is required.
+                problem = record_identity_problem(archival_object_data, archival_object_id,
+                                                  directory, refid)
+                if problem:
+                    logging.error(f"Refusing to update {directory}: re-fetched record {problem}")
                     counters["failed"] += 1
                     continue
 
@@ -766,8 +808,16 @@ def rename_and_update_directories(client, target_dir, dry_run=False, no_rename=F
                                  f"ASpace record: {'; '.join(changes)}")
                     counters["updated"] += 1
                 else:
-                    if not update_archival_object(client, archival_object_id, updated_data):
-                        logging.error(f"Failed to update archival object for ID: {archival_object_id}. Skipping.")
+                    # None is the failure signal; a 200 with an empty body is
+                    # still a success (the shared client already treats it so).
+                    if update_archival_object(client, archival_object_id, updated_data) is None:
+                        if client.last_failure_definitive:
+                            logging.error(f"ArchivesSpace rejected the update for "
+                                          f"{archival_object_id}. Skipping (nothing renamed).")
+                        else:
+                            logging.error(f"Update outcome UNKNOWN for {archival_object_id} "
+                                          f"(timeout/lost response) - the write may have "
+                                          f"committed; verify in ArchivesSpace. Nothing renamed.")
                         counters["failed"] += 1
                         continue
                     counters["updated"] += 1
@@ -787,7 +837,22 @@ def rename_and_update_directories(client, target_dir, dry_run=False, no_rename=F
                     logging.info(f"{Fore.YELLOW}[DRY RUN]{Style.RESET_ALL} Would rename .mkv: {mkv_filename} → {mkv_target_name}")
                     counters["mkv_renamed"] += 1
                 else:
-                    os.rename(old_mkv_path, new_mkv_path)
+                    try:
+                        rename_no_overwrite(old_mkv_path, new_mkv_path)
+                    except FileExistsError as e:
+                        # a file appeared at the target since the pre-check:
+                        # refused before anything moved
+                        logging.error(f"Media rename failed for {directory}: {e} - nothing changed")
+                        counters["failed"] += 1
+                        continue
+                    except OSError as e:
+                        # the rename itself failed; the primitive's message
+                        # says whether the folder is known-unchanged or
+                        # needs a look (a rename can land and still report
+                        # an error on a network filesystem)
+                        logging.error(f"Media rename failed for {directory}: {e}")
+                        counters["failed"] += 1
+                        continue
                     logging.info(f".mkv file renamed to: {mkv_target_name}")
                     counters["mkv_renamed"] += 1
                     mkv_renamed_now = True
@@ -801,12 +866,12 @@ def rename_and_update_directories(client, target_dir, dry_run=False, no_rename=F
                     counters["dir_renamed"] += 1
                 else:
                     try:
-                        os.rename(dir_path, dir_target)
+                        rename_no_overwrite(dir_path, dir_target)
                     except OSError as e:
                         logging.error(f"Directory rename failed for {directory}: {e}")
                         if mkv_renamed_now:
                             try:
-                                os.rename(new_mkv_path, old_mkv_path)
+                                rename_no_overwrite(new_mkv_path, old_mkv_path)
                                 counters["mkv_renamed"] -= 1
                                 logging.info(f"Rolled back media file rename: {mkv_target_name} → {mkv_filename}")
                             except OSError as e2:
@@ -839,6 +904,111 @@ def rename_and_update_directories(client, target_dir, dry_run=False, no_rename=F
         logging.info(f"{Fore.YELLOW}This was a DRY RUN - no actual changes were made{Style.RESET_ALL}")
 
     return counters["failed"]
+
+CHECKSUM_MANIFEST_EXTENSIONS = (".md5", ".sha1", ".sha256", ".sha512")
+
+
+def checksum_manifests_naming(dir_path, media_filename):
+    """Checksum manifest files in dir_path whose contents reference the
+    media file by name (the standard `<hash>  <filename>` form, or a sidecar
+    named after the media). Returns their basenames, sorted.
+
+    Raises OSError if the folder cannot be listed or a manifest cannot be
+    read: an inspection that could not complete is not "no manifests", and
+    the caller refuses the rename rather than guess."""
+    found = set()
+    for name in os.listdir(dir_path):
+        if not name.lower().endswith(CHECKSUM_MANIFEST_EXTENSIONS):
+            continue
+        path = os.path.join(dir_path, name)
+        # os.stat, not os.path.isfile: isfile() turns an I/O error into
+        # False, which would silently skip a real manifest. Errors propagate.
+        if not stat.S_ISREG(os.stat(path).st_mode):
+            continue
+        stem = name[:name.rfind(".")]
+        if stem == media_filename or stem == os.path.splitext(media_filename)[0]:
+            found.add(name)  # sidecar named after the media (JPC_AV_00001.mkv.md5)
+            continue
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:  # whole file, streamed: no size cap to slip past
+                if media_filename in line:
+                    found.add(name)
+                    break
+    return sorted(found)
+
+
+def rename_no_overwrite(src, dst):
+    """Rename src to dst, refusing atomically if dst exists.
+
+    os.rename silently REPLACES an existing destination (a file, or an empty
+    directory), so an existence check taken earlier does not protect the
+    moment of the rename. Instead the target NAME is claimed first with an
+    exclusive create - O_EXCL for a file, mkdir for a directory - which is
+    a single check-and-create operation on every filesystem (no hard links,
+    so exFAT and network shares work). The rename then replaces only the
+    placeholder this call just created; a collision raises FileExistsError
+    before anything moves.
+
+    If the rename reports failure, the placeholder is removed ONLY when the
+    destination is provably still that placeholder (same inode, empty) and
+    the source is still in place. On a network filesystem a rename can
+    complete and still report an error (rename(2), BUGS); in that case the
+    source is gone and dst holds the media, so dst is preserved and the
+    error says the outcome is uncertain rather than "nothing changed".
+    """
+    is_dir = os.path.isdir(src)
+    if is_dir:
+        os.mkdir(dst)                       # FileExistsError if dst is taken
+    else:
+        os.close(os.open(dst, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644))
+    placeholder = os.stat(dst)
+    try:
+        os.rename(src, dst)                 # replaces our own placeholder only
+    except OSError as e:
+        if not os.path.lexists(src):
+            raise OSError(f"{e}; but {src} is gone, so the rename may have "
+                          f"completed anyway - {dst} was left in place; "
+                          f"check it before rerunning") from e
+        try:
+            now = os.stat(dst)
+            still_placeholder = (
+                (now.st_dev, now.st_ino) == (placeholder.st_dev, placeholder.st_ino)
+                and (os.listdir(dst) == [] if is_dir else now.st_size == 0))
+        except OSError:
+            still_placeholder = False
+        if not still_placeholder:
+            raise OSError(f"{e}; {dst} no longer looks like the empty placeholder "
+                          f"this run created, so it was left in place - check it "
+                          f"before rerunning") from e
+        try:
+            (os.rmdir if is_dir else os.unlink)(dst)
+        except OSError as e2:
+            raise OSError(f"{e}; and the empty placeholder left at {dst} could "
+                          f"not be removed ({e2}) - delete it by hand before "
+                          f"rerunning") from e
+        raise
+
+
+def record_identity_problem(record, object_id, catalog_number, ref_id):
+    """Why `record` is not the archival object the lookup verified, or None.
+    Checked on the re-fetch that precedes every write: uri, resource, item
+    level, component_id and ref_id must all match what was verified."""
+    if not isinstance(record, dict):
+        return "is not a record"
+    expected_uri = f"/repositories/{aspace_client.REPO_ID}/archival_objects/{object_id}"
+    if record.get("uri") != expected_uri:
+        return f"identifies as {record.get('uri')!r}, not {expected_uri}"
+    resource = record.get("resource")
+    if not isinstance(resource, dict) or resource.get("ref") != aspace_client.RESOURCE_URI:
+        return "is outside the configured resource"
+    if record.get("level") != "item":
+        return f"is level {record.get('level')!r}, not item"
+    if record.get("component_id") != catalog_number:
+        return f"has component_id {record.get('component_id')!r}, not {catalog_number}"
+    if record.get("ref_id") != ref_id:
+        return f"has ref_id {record.get('ref_id')!r}, not the verified {ref_id}"
+    return None
+
 
 def fetch_archival_object(client, object_id):
     """

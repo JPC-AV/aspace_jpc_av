@@ -9,7 +9,7 @@ import os
 import argparse
 from pathlib import Path
 
-import csv_columns as col  # single source of truth for CSV header names
+import sheet_rules as col  # single source of truth for CSV header names
 
 # ==============================
 # TERMINAL COLORS
