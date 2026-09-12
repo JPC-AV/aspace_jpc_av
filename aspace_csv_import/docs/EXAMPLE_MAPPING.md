@@ -1,6 +1,8 @@
 # Example: CSV Row → ArchivesSpace Object
 
-This document shows a complete example of how a single CSV row becomes an ArchivesSpace archival object. For detailed field mappings, see [CSV_TO_ASPACE_MAPPING.md](CSV_TO_ASPACE_MAPPING.md).
+One row followed from the sheet to the record, then through the rename tool
+after digitization. The rules behind each field are in
+[CSV_TO_ASPACE_MAPPING.md](CSV_TO_ASPACE_MAPPING.md).
 
 ## Sample CSV Row
 
@@ -11,12 +13,34 @@ Creation or Recording Date: 8/1/1982
 Edit Date: [empty]
 Broadcast Date: [empty]
 Original Format: 2 inch videotape
-ASpace Parent RefID: abc123def456
+ASpace Parent RefID: 3f9c2a7d0b1e4c6a8d5f7e9b2c4a6d8e
 ASpace Scope and Contents Note: Promotional clip for episode 22 of the Ebony/Jet Celebrity Showcase series.
 ASpace PhysTech Note: Slight ringing present throughout. Hue is inconsistent; skin tones are redder in some sections.
 ```
 
-## Step 1: aspace_csv_import.py Creates the Record
+The parent ref_id is the 32-character hex value ArchivesSpace assigns to
+the parent archival object; the importer resolves it to that object's URI
+and refuses the row unless exactly one object in the resource matches.
+
+## Step 1: `aspace_csv_import.py --create-records`
+
+Before writing, the importer confirms no record with component_id
+`JPC_AV_00012` exists, that the parent resolves, that the extent type is in
+the live vocabulary, and that at most one AV Case container carries this
+indicator.
+
+### Top Container: reused or created
+
+If an AV Case top container with indicator `JPC_AV_00012` already exists it
+is reused. Otherwise this one is created first:
+
+```json
+{
+  "indicator": "JPC_AV_00012",
+  "type": "AV Case",
+  "repository": {"ref": "/repositories/2"}
+}
+```
 
 ### Archival Object Created
 
@@ -50,6 +74,7 @@ ASpace PhysTech Note: Slight ringing present throughout. Hue is inconsistent; sk
     {
       "jsonmodel_type": "note_multipart",
       "type": "scopecontent",
+      "label": "",
       "publish": true,
       "subnotes": [
         {
@@ -61,6 +86,7 @@ ASpace PhysTech Note: Slight ringing present throughout. Hue is inconsistent; sk
     {
       "jsonmodel_type": "note_multipart",
       "type": "phystech",
+      "label": "",
       "publish": true,
       "subnotes": [
         {
@@ -83,31 +109,33 @@ ASpace PhysTech Note: Slight ringing present throughout. Hue is inconsistent; sk
 }
 ```
 
-### Top Container Created
+The blank Edit Date and Broadcast Date cells produce no date objects. Had
+the title cell been blank, `title` would be `JPC_AV_00012`. Had Original
+Format been blank, the record would have no extent.
 
-```json
-{
-  "indicator": "JPC_AV_00012",
-  "type": "AV Case",
-  "repository": {"ref": "/repositories/2"}
-}
-```
+## Step 2: `aspace-rename-directories.py` after digitization
 
-## Step 2: aspace-rename-directories.py Updates the Record
+The folder `JPC_AV_00012/` holds `JPC_AV_00012.mkv`. The tool finds the
+record by component_id, reads the runtime with mediainfo, and:
 
-After digitization, this script extracts runtime from the .mkv file and updates the record.
+1. **Duration:** the record has a phystech note but no Duration item, so a
+   defined list is appended to that note after the existing text.
+2. **Physical details:** the single extent's `physical_details` is blank, so
+   it is filled with the collection default.
+3. Renames the folder to `JPC_AV_00012_refid_<ref_id of this record>`
+   (and the media file too with `--rename-media`).
 
-### Updates Made
+Had a Duration item already been present, it would have been updated in
+place instead. Had `physical_details` already held a value, it would have
+been kept.
 
-1. **Duration** added to Physical Characteristics and Technical Requirements note as a defined list
-2. **Physical details** added to extent
-
-### Updated Physical Characteristics and Technical Requirements Note
+### Updated phystech note
 
 ```json
 {
   "jsonmodel_type": "note_multipart",
   "type": "phystech",
+  "label": "",
   "publish": true,
   "subnotes": [
     {
@@ -116,6 +144,7 @@ After digitization, this script extracts runtime from the .mkv file and updates 
     },
     {
       "jsonmodel_type": "note_definedlist",
+      "publish": true,
       "items": [
         {
           "jsonmodel_type": "note_definedlist_item",
@@ -128,7 +157,7 @@ After digitization, this script extracts runtime from the .mkv file and updates 
 }
 ```
 
-### Updated Extent
+### Updated extent
 
 ```json
 {
@@ -139,6 +168,14 @@ After digitization, this script extracts runtime from the .mkv file and updates 
   "physical_details": "SD video, color, sound"
 }
 ```
+
+## Step 3: a later `--update-only` run
+
+Suppose the sheet is exported, the title cell is edited, and the export is
+re-imported with `--update-only`. Only `title` is written. The dates, extent
+(including the physical details above), both notes (including the Duration
+list), parent, container and component_id are left exactly as they were.
+An unchanged row is reported as "No changes needed" and not written.
 
 ## How It Looks in ArchivesSpace UI
 

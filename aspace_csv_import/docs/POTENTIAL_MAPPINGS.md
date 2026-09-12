@@ -1,26 +1,13 @@
 # Potential Future Mappings
-# separate out encoder settings into separate fields build good formula in Encoder Settings
 
-## Fields Currently Mapped by aspace_csv_import.py
+Analysis of the sheet columns the importer does **not** write to
+ArchivesSpace, and where each could go if that ever changes. The nine
+columns that are imported, and exactly how, are documented in
+[CSV_TO_ASPACE_MAPPING.md](CSV_TO_ASPACE_MAPPING.md); nothing in this file
+is implemented.
 
-| CSV Column | Maps To | Status |
-|------------|---------|--------|
-| **CATALOG_NUMBER** 📼 | `component_id`, `top_container.indicator` | ✅ Active |
-| **ASpace Title** 📼 | `title` | ✅ Active |
-| **Creation or Recording Date** | `dates[]` (label: creation) | ✅ Active |
-| **Edit Date** | `dates[]` (label: Edited) | ✅ Active |
-| **Broadcast Date** | `dates[]` (label: broadcast) | ✅ Active |
-| **Original Format** | `extent_type` | ✅ Active |
-| **ASpace Parent RefID** | `parent.ref` | ✅ Active |
-| **ASpace Scope and Contents Note** 📼 | Scope and Contents note | ✅ Active |
-| **ASpace PhysTech Note** | Physical Characteristics and Technical Requirements note (phystech) | ✅ Active. May contain content from `_TRANSFER_NOTES`, `_PRE_TRANSFER_NOTES`, both, or neither. Assembled and edited by staff before import. Only written when content is present. |
-
-## Fields Handled by aspace-rename-directories.py
-
-| Field | Source | Maps To |
-|-------|--------|---------|
-| **Duration** | Extracted from .mkv via mediainfo | Physical Characteristics and Technical Requirements note > Defined List > "Duration" |
-| **Physical Details** | Hardcoded | `extents[].physical_details` = "SD video, color, sound" |
+Open idea: separate the encoder settings into their own fields and build a
+sound formula for the Encoder Settings column.
 
 ### Matroska Container Tags 📼
 

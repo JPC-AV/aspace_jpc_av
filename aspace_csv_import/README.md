@@ -85,9 +85,9 @@ This script imports item-level archival objects from CSV files into ArchivesSpac
 
 ## Related Documentation
 
-- **CSV_TO_ASPACE_MAPPING.md** - Detailed field mapping from CSV columns to ArchivesSpace fields
-- **POTENTIAL_MAPPINGS.md** - Analysis of unmapped CSV fields and future mapping possibilities
-- **EXAMPLE_MAPPING.md** - Example showing CSV row transformed to ArchivesSpace JSON
+- **docs/CSV_TO_ASPACE_MAPPING.md** - The field contract: what each column becomes on create, what `--update-only` changes, what the rename tool adds
+- **docs/POTENTIAL_MAPPINGS.md** - The sheet columns that are not imported, and where they could go
+- **docs/EXAMPLE_MAPPING.md** - One row followed from the sheet to the record and through the rename tool
 
 ## Authentication
 
@@ -162,7 +162,7 @@ accepts a narrow sheet (`CATALOG_NUMBER` plus just the columns to change).
 
 *If no title is provided, the catalog number will be used. If no format is provided the record is created without an extent - every item should have one, but the importer does not insist.
 
-**Note:** The CSV contains 80+ columns, but only 9 are actively mapped. See **POTENTIAL_MAPPINGS.md** for analysis of unmapped fields.
+**Note:** The CSV contains 80+ columns, but only 9 are actively mapped. See **docs/POTENTIAL_MAPPINGS.md** for analysis of unmapped fields.
 
 ## Quick Start
 

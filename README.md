@@ -33,7 +33,6 @@ aspace_jpc_av/
 │       ├── CSV_TO_ASPACE_MAPPING.md   # Field mapping reference
 │       ├── EXAMPLE_MAPPING.md         # Example CSV to JSON mappings
 │       ├── POTENTIAL_MAPPINGS.md      # Unmapped fields for future use
-│       ├── WORKFLOW.md                # Process documentation
 │       └── archive/                   # Legacy reference files
 │           ├── config_sample.py
 │           └── run_examples.sh
@@ -59,7 +58,7 @@ More detailed descriptions of each file and usage in directory-specific README.m
 | `check_extent_types.py` | Run via command line | Utility to check valid extent types in your ASpace instance. |
 | `csv_utils.py` | Run via command line | Validates a CSV and checks parent ref_ids before import. |
 | `sheet_rules.py` | Backend | The sheet contract: column names and the validation rules every tool applies. |
-| `docs/*.md` | Reference | Documentation for field mappings and workflows. |
+| `docs/*.md` | Reference | Field-mapping contract, a worked example, and the unmapped-column analysis. |
 | `aspace-rename-directories.py` | Run via command line | Main script for processing video directories. |
 
 ### Logs and Reports
