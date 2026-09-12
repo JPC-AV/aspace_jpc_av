@@ -441,8 +441,13 @@ def modify_phystech_note(data, runtime):
         return data
 
     # No Duration anywhere yet - append a new defined list.
+    # publish is stated explicitly: ArchivesSpace treats note-level publish
+    # as optional and applies its own default when the key is absent, which
+    # would leave the runtime's public visibility to configuration rather
+    # than to this tool. Matches what the CSV importer writes.
     duration_defined_list = {
         "jsonmodel_type": "note_definedlist",
+        "publish": True,
         "items": [{
             "jsonmodel_type": "note_definedlist_item",
             "label": "Duration",
@@ -467,6 +472,8 @@ def modify_phystech_note(data, runtime):
         data["notes"].append({
             "jsonmodel_type": "note_multipart",
             "type": "phystech",
+            "label": "",
+            "publish": True,
             "subnotes": [duration_defined_list]
         })
         logging.info(f"Created new Physical Characteristics and Technical Requirements note with Duration: {runtime}")
