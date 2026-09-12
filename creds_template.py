@@ -41,9 +41,13 @@ environments = {
     # },
 }
 
-# Optional: Custom log directory (leave empty to use defaults)
-# aspace_csv_import.py default: ~/aspace_import_reports
-# aspace-rename-directories.py default: ~/aspace_rename_reports
+# Optional: one parent folder for every tool's reports (leave empty to use
+# the defaults). When set, each tool writes to its own subfolder under it:
+#   import_reports/   aspace_csv_import.py   (default ~/aspace_import_reports)
+#   export_reports/   aspace_csv_export.py   (default ~/aspace_import_reports)
+#   mads_reports/     check_mads.py          (default ~/aspace_mads_reports)
+#   rename_reports/   aspace-rename-directories.py (default ~/aspace_rename_reports)
+# All four subfolders are gitignored when logs_dir is the repo root.
 logs_dir = ""
 
 # Note: legacy flat creds.py files (top-level baseURL/user/password/repo_id/
