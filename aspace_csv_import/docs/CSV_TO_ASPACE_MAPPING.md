@@ -22,12 +22,12 @@ accepts a narrow sheet: `CATALOG_NUMBER` plus any of the columns marked
 
 | CSV column | ArchivesSpace field | `--create-records` | `--update-only` |
 |---|---|---|---|
-| CATALOG_NUMBER | `component_id`; `top_container.indicator` | Must match `JPC_AV_<digits>`. Refused if a record with this component_id already exists. The AV Case top container with this indicator is **reused** if exactly one exists, **created** if none, and the row is refused if several share it. | The matching key. Never changed. |
+| CATALOG_NUMBER | `component_id`; `top_container.indicator` | Must match `JPC_AV_<digits>`. A record with this component_id already existing aborts the run before any write (or, with `--skip-duplicates`, skips just that row). The AV Case top container with this indicator is **reused** if exactly one exists, **created** if none, and the row is refused if several share it. | The matching key. Never changed. |
 | ASpace Title | `title` | Blank falls back to the catalog number. | Mutable. Blank leaves the stored title alone. |
 | Creation or Recording Date | `dates[]`, label `creation` | Single date; see *Dates* below. | Mutable; see *Dates*. |
 | Edit Date | `dates[]`, label `Edited` | Same. | Same. |
 | Broadcast Date | `dates[]`, label `broadcast` | Same. | Same. |
-| Original Format | `extents[0].extent_type` | Must be a live term in the extent-type vocabulary. Blank creates the record with **no extent**. | Mutable. Only the type changes; every other extent field is kept. Blank leaves the extent alone. An unchanged stored term round-trips even if the term has since been retired. Refused on a record with two or more extents. |
+| Original Format | `extents[0].extent_type` | Must be a live term in the extent-type vocabulary. Blank creates the record with **no extent**. | Mutable. Only the type changes; every other extent field is kept. Blank leaves the extent alone. An unchanged stored term round-trips even if the term has since been retired. A record with two or more extents is left alone unless the cell would change the first extent's type, which is refused. |
 | ASpace Scope and Contents Note | `scopecontent` note | Multipart note with one text subnote. Blank writes no note. | Mutable; see *Notes*. |
 | ASpace PhysTech Note | `phystech` note | Same. | Same. |
 | ASpace Parent RefID | `parent.ref` | **Required.** Resolved by ref_id lookup; exactly one archival object in the resource must match. | Ignored. Update-only never re-parents. |
