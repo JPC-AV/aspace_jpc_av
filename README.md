@@ -32,10 +32,7 @@ aspace_jpc_av/
 │   └── docs/
 │       ├── CSV_TO_ASPACE_MAPPING.md   # Field mapping reference
 │       ├── EXAMPLE_MAPPING.md         # Example CSV to JSON mappings
-│       ├── POTENTIAL_MAPPINGS.md      # Unmapped fields for future use
-│       └── archive/                   # Legacy reference files
-│           ├── config_sample.py
-│           └── run_examples.sh
+│       └── POTENTIAL_MAPPINGS.md      # Unmapped fields for future use
 │
 └── aspace_rename_directories/
     ├── aspace-rename-directories.py  # Main processing script
