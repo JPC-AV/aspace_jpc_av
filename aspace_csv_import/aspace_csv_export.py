@@ -24,9 +24,19 @@ Round-trip rules this export honors:
 Scope: ONLY the configured AV resource (resource_id in creds.py). The rest
 of the repository is never enumerated.
 
-Selection: everything at a level (--level, default item), one series'
-children (--parent), or an explicit list of catalog numbers (--list FILE,
-plain text one-per-line or any CSV with a CATALOG_NUMBER column).
+Selection: everything at a level (--level, default item; 'all' for the
+whole hierarchy), one record's children (--parent), or an explicit list of
+catalog numbers (--list FILE, plain text one-per-line or any CSV with a
+CATALOG_NUMBER column).
+
+Hierarchy: rows come out in depth-first tree order - the order the staff
+interface shows - and every row carries Level, Depth (0 for a top-level
+series; an ephemera item under a tape is one deeper than the tape) and
+Path (its ancestors' display strings, joined with " > "). Path survives
+sorting and filtering where row order does not, and it says in words what
+the ASpace Parent RefID column says as a ref_id. A --list export keeps
+list order but carries the same three columns. Delete them if unwanted;
+--update-only ignores them either way.
 
 Read-only: this script makes no ArchivesSpace writes (its only output is
 the CSV file).
@@ -60,21 +70,20 @@ from aspace_csv_import import (Colors, print_status, print_header,
 # over the VPN. Kept well under ArchivesSpace's page-size ceiling (250).
 BATCH = 50
 
-# Warning text for non-item rows (in the Warnings cell of every export path;
-# the console counts these once rather than listing every structural node).
-NON_ITEM_NOTE = "not item - --update-only will refuse to change it"
-
 # Archival-object levels ArchivesSpace defines, plus "all". A misspelled
 # --level must be an error, not a successful empty export.
 LEVELS = ["all", "class", "collection", "file", "fonds", "item", "otherlevel",
           "recordgrp", "series", "subfonds", "subgrp", "subseries"]
 
-# Column order of the export file: identity and status first, then the
-# import-shaped metadata, then links and audit trail. "MADS live" appears
-# only when --mads-live was given. Order is cosmetic for round-trips - every
-# reader in the toolset matches columns by header name.
+# Column order of the export file: identity and status first, then where
+# the record sits in the tree (Level, Depth, Path - see hierarchy_for), then
+# the import-shaped metadata, then links and audit trail. "MADS live"
+# appears only when --mads-live was given. Order is cosmetic for round-trips
+# - every reader in the toolset matches columns by header name, and
+# --update-only ignores every column it does not manage.
 EXPORT_COLUMNS = [
     col.CATALOG, "ASpace Ref ID", "Warnings", "MADS live",
+    "Level", "Depth", "Path",
     col.PARENT_REFID, col.TITLE, col.CREATION_DATE, col.EDIT_DATE,
     col.BROADCAST_DATE, col.ORIGINAL_FORMAT, col.DESCRIPTION, col.PHYSTECH,
     "ASpace URI", "ASpace Staff Link", "MADS URL",
@@ -106,13 +115,15 @@ DEFAULT_OUTPUT_DIR = os.path.expanduser("~/aspace_import_reports")
 OUTPUT_DIR = os.path.join(logs_dir, "export_reports") if logs_dir else DEFAULT_OUTPUT_DIR
 
 
-def build_row(record, parent_refid):
+def build_row(record, parent_refid, depth=0, path=""):
     """Map one archival object record to an import-shaped CSV row.
 
+    `depth` and `path` come from hierarchy_for (0 and "" for a root record).
     Returns (row_dict, warnings) where warnings lists the structures the
     importer would refuse to edit on this record, plus metadata gaps worth
     fixing: no component ID (the record is unreachable by anything keyed on
-    catalog number), no title, no dates.
+    catalog number), no title, no dates. A non-item level is not a warning:
+    the Level column says what the record is.
     """
     warnings = []
     row = {
@@ -125,8 +136,6 @@ def build_row(record, parent_refid):
     # nodes, which are generic organizing buckets (Edited/Raw/Promo), not
     # intellectual archival levels - they need neither dates nor IDs.
     level = record.get("level")
-    if level != "item":
-        warnings.append(f"level is {level or 'missing'}, {NON_ITEM_NOTE}")
     if level == "item" and not row[col.CATALOG]:
         warnings.append("no component ID in ASpace")
     elif row[col.CATALOG] and not col.valid_catalog_number(row[col.CATALOG]):
@@ -182,8 +191,96 @@ def build_row(record, parent_refid):
     row["Last Modified By"] = record.get("last_modified_by") or ""
     row["Last Modified Time"] = record.get("user_mtime") or ""
     row["Warnings"] = "; ".join(warnings)
-    row["_level"] = level  # for console notes only; never written (not an export column)
+    row["Level"] = level or ""
+    row["Depth"] = depth
+    row["Path"] = path
     return row, warnings
+
+
+def display_of(record):
+    """What the ArchivesSpace tree shows for a record: its display string
+    (title plus dates), falling back to title, component ID, then uri."""
+    return (record.get("display_string") or record.get("title")
+            or record.get("component_id") or record.get("uri") or "")
+
+
+def fetch_linked(client, uri, cache):
+    """A linked record (a parent or further ancestor), fetched once per
+    distinct uri. Returns (record, None), or (None, reason) when it cannot
+    be used: failed, malformed, identifying as some other record, or outside
+    the configured resource - an ancestor from another resource must never
+    lend its title to a Path or its ref_id to a parent column. The reason
+    says whether a retry could help (a failed read) or the record itself
+    needs fixing (a parent in another resource); the two must not be
+    reported alike. Callers treat None as a failure, never as "no parent":
+    a blank in the sheet would be indistinguishable from a root record."""
+    if uri not in cache:
+        linked = client.get(uri)
+        if (not isinstance(linked, dict) or linked.get("uri") != uri
+                or record_shape_problem(linked)):
+            logging.error(f"Could not read linked record {uri}")
+            cache[uri] = (None, "could not be read - retry later")
+        elif linked["resource"]["ref"] != aspace_client.RESOURCE_URI:
+            logging.error(f"Linked record {uri} belongs to another resource")
+            cache[uri] = (None, "belongs to another resource - fix the record in ArchivesSpace")
+        else:
+            cache[uri] = (linked, None)
+    return cache[uri]
+
+
+def ancestor_chain(record, resolve):
+    """The record's ancestors, root first, each resolved through `resolve`
+    (uri -> (record, None) or (None, reason)). Returns (chain, None), or
+    (None, reason) if any ancestor could not be resolved or the parent
+    links form a cycle - an unknown ancestry must fail the export, never
+    print as a shallower depth or a shorter path."""
+    chain = []
+    seen = {record.get("uri")}
+    parent = record.get("parent")
+    while parent:
+        uri = parent["ref"]
+        if uri in seen:
+            logging.error(f"Parent links of {record.get('uri')} form a cycle at {uri}")
+            return None, f"parent links form a cycle at {uri} - fix the record in ArchivesSpace"
+        seen.add(uri)
+        ancestor, reason = resolve(uri)
+        if ancestor is None:
+            return None, f"linked parent {uri} {reason}"
+        chain.append(ancestor)
+        parent = ancestor.get("parent")
+    chain.reverse()
+    return chain, None
+
+
+def hierarchy_for(record, chain):
+    """(depth, path, sort_key, approximate) placing the record in the tree.
+
+    Depth counts ancestors (0 for a top-level series; an ephemera item under
+    a tape is one deeper than the tape). Path is the ancestors' display
+    strings joined with " > " - the row's own title is already a column, and
+    the path survives sorting and filtering where row order does not. The
+    sort key reproduces the staff tree's order: ArchivesSpace keeps an
+    integer `position` among siblings (gaps are normal after moves, so only
+    the order of the numbers means anything); a parent's key is a prefix of
+    its children's, so sorting rows by it yields depth-first tree order.
+    `approximate` is True when the record or any ancestor has no position,
+    so part of that order came from uri numbers instead.
+    """
+    def own_key(r):
+        pos = r.get("position")
+        oid = int(str(r.get("uri", "")).rsplit("/", 1)[-1] or 0)
+        return ((0, pos) if isinstance(pos, int) and not isinstance(pos, bool)
+                else (1, 0), oid)
+    path = " > ".join(display_of(a) for a in chain)
+    members = [*chain, record]
+    sort_key = tuple(own_key(r) for r in members)
+    # ArchivesSpace assigns a position on every create, so a blank is rare -
+    # but the schema allows it, and a blank ANYWHERE in the chain makes the
+    # order of this row (and its siblings, and their subtrees) fall back to
+    # uri order. The caller discloses that on sorted exports.
+    approximate = any(not isinstance(r.get("position"), int) or isinstance(r.get("position"), bool)
+                      for r in members)
+    return len(chain), path, sort_key, approximate
 
 
 def list_resource_records(client):
@@ -243,30 +340,40 @@ def fetch_records(client, ids):
     return records
 
 
-def parent_refid_for(client, parent_uri, cache):
-    """ref_id of a parent record, fetched once per distinct parent.
-
-    Returns "" for a record with no parent, and None when a linked parent
-    could not be read (failed or malformed response) - callers treat None
-    as a failure, never as "no parent": a blank in the sheet would be
-    indistinguishable from a root record."""
-    if not parent_uri:
+def parent_refid(chain):
+    """ref_id of the immediate parent (last of the ancestor chain), "" for a
+    root record, None when the parent has no usable ref_id - a real linked
+    parent always has one, so anything else is a malformed read, never
+    "no parent"."""
+    if not chain:
         return ""
-    if parent_uri not in cache:
-        parent = client.get(parent_uri)
-        if not isinstance(parent, dict) or parent.get("uri") != parent_uri:
-            logging.error(f"Could not read linked parent {parent_uri}")
-            cache[parent_uri] = None
-        else:
-            ref_id = parent.get("ref_id")
-            if not isinstance(ref_id, str) or not ref_id:
-                # a real linked parent always has one - anything else is a
-                # malformed read, never "no parent"
-                logging.error(f"Linked parent {parent_uri} has no usable ref_id")
-                cache[parent_uri] = None
-            else:
-                cache[parent_uri] = ref_id
-    return cache[parent_uri]
+    ref_id = chain[-1].get("ref_id")
+    if not isinstance(ref_id, str) or not ref_id:
+        logging.error(f"Linked parent {chain[-1].get('uri')} has no usable ref_id")
+        return None
+    return ref_id
+
+
+def place_record(record, resolve):
+    """Everything a row needs about where a record sits: (parent_refid,
+    depth, path, sort_key, approximate), or (None, reason) if its ancestry
+    could not be established. `approximate` is True when a position is
+    missing somewhere in the chain (the sort falls back to uri order)."""
+    chain, reason = ancestor_chain(record, resolve)
+    if chain is None:
+        return None, reason
+    refid = parent_refid(chain)
+    if refid is None:
+        return None, f"linked parent {chain[-1].get('uri')} has no usable ref_id - retry later"
+    depth, path, sort_key, approximate = hierarchy_for(record, chain)
+    return (refid, depth, path, sort_key, approximate), None
+
+
+APPROXIMATE_ORDER_NOTE = "no position in ASpace (this record or an ancestor) - tree order here is approximate"
+
+
+def _add_warning(row, text):
+    row["Warnings"] = "; ".join(w for w in (row.get("Warnings", ""), text) if w)
 
 
 def read_catalog_list(path):
@@ -324,7 +431,7 @@ def export_by_list(client, catalog_numbers):
     """
     rows = []
     problems = []
-    parent_cache = {}
+    linked_cache = {}
     for i, number in enumerate(catalog_numbers, 1):
         if not col.valid_catalog_number(number):
             problems.append(f"{number}: malformed catalog number (must be JPC_AV_ + digits) "
@@ -337,12 +444,14 @@ def export_by_list(client, catalog_numbers):
             if problem:
                 problems.append(f"{number}: malformed record ({problem}) - retry later")
                 continue
-            parent_uri = record["parent"]["ref"] if record.get("parent") else ""
-            parent_refid = parent_refid_for(client, parent_uri, parent_cache)
-            if parent_refid is None:
-                problems.append(f"{number}: its parent {parent_uri} could not be read - retry later")
+            placed, reason = place_record(
+                record, lambda uri: fetch_linked(client, uri, linked_cache))
+            if placed is None:
+                problems.append(f"{number}: its {reason}")
                 continue
-            row, _ = build_row(record, parent_refid)  # non-item rows are flagged by build_row
+            # list order is kept - no tree sort, so no approximate-order note
+            refid, depth, path, _, _ = placed
+            row, _ = build_row(record, refid, depth, path)
             rows.append(row)
         elif lookup.status == "none":
             problems.append(f"{number}: not found in the resource")
@@ -384,7 +493,6 @@ def export_records(client, level, parent_filter_refid=None):
 
     rows = []
     anomalies = 0
-    parent_cache = {}
     # Shape first: a record missing the fields the filters read is malformed
     # and fails the export - it must not be silently dropped (no level),
     # misread as a stale hit (no resource), or crash (parent). In the same
@@ -400,6 +508,16 @@ def export_records(client, level, parent_filter_refid=None):
                           f"- no partial export was written")
         if record["resource"]["ref"] == aspace_client.RESOURCE_URI and record.get("component_id"):
             id_counts[record["component_id"]] = id_counts.get(record["component_id"], 0) + 1
+    # Ancestors come from this same fetch (the whole resource is in hand);
+    # one the index missed (it lags writes) is fetched on demand.
+    by_uri = {r["uri"]: r for r in records
+              if r["resource"]["ref"] == aspace_client.RESOURCE_URI}
+    linked_cache = {}
+    def resolve(uri):
+        if uri in by_uri:
+            return by_uri[uri], None
+        return fetch_linked(client, uri, linked_cache)
+    keyed = []
     for record in records:
         if record["resource"]["ref"] != aspace_client.RESOURCE_URI:
             anomalies += 1  # stale index hit: a well-formed record no longer in the resource
@@ -409,13 +527,19 @@ def export_records(client, level, parent_filter_refid=None):
         parent_uri = record["parent"]["ref"] if record.get("parent") else ""
         if parent_filter_uri and parent_uri != parent_filter_uri:
             continue
-        parent_refid = parent_refid_for(client, parent_uri, parent_cache)
-        if parent_refid is None:
-            return None, (f"linked parent {parent_uri} of "
-                          f"{record.get('component_id') or record.get('uri')} could not be "
-                          f"read - no partial export was written")
-        row, _ = build_row(record, parent_refid)
-        rows.append(row)
+        placed, reason = place_record(record, resolve)
+        if placed is None:
+            return None, (f"{reason} (record "
+                          f"{record.get('component_id') or record.get('uri')}) "
+                          f"- no partial export was written")
+        refid, depth, path, sort_key, approximate = placed
+        row, _ = build_row(record, refid, depth, path)
+        if approximate:
+            _add_warning(row, APPROXIMATE_ORDER_NOTE)
+        keyed.append((sort_key, row))
+    # Depth-first tree order, exactly as the staff interface lists them.
+    keyed.sort(key=lambda kr: kr[0])
+    rows = [row for _, row in keyed]
     flag_duplicate_catalog_numbers(rows, id_counts)
     return rows, anomalies
 
@@ -455,10 +579,15 @@ def record_shape_problem(record):
     # could be round-tripped back as a title; and every collection
     # build_row iterates must be a list of objects, or it crashes.
     for field in ("title", "ref_id", "created_by", "create_time",
-                  "last_modified_by", "user_mtime"):
+                  "last_modified_by", "user_mtime", "display_string"):
         value = record.get(field)
         if value is not None and not isinstance(value, str):
             return field
+    # position orders siblings in the tree (hierarchy_for); absent is
+    # tolerated, anything but an integer is malformed
+    position = record.get("position")
+    if position is not None and (not isinstance(position, int) or isinstance(position, bool)):
+        return "position"
     for field in ("dates", "extents", "notes"):
         items = record.get(field)
         if items is None:
@@ -650,22 +779,22 @@ def main():
     provenance = (f"{RUN_COMMAND} | target: {aspace_client.ACTIVE_ENV} | "
                   f"{datetime.now().strftime('%Y-%m-%d %H:%M')}")
     write_export_csv(rows, out_path, extra_headers, provenance)
-    non_items = sum(1 for r in rows if r.get("_level") not in (None, "item"))
+    non_items = sum(1 for r in rows if r.get("Level") != "item")
     def _other_warnings(r):
-        return [w for w in r.get("Warnings", "").split("; ") if w and NON_ITEM_NOTE not in w]
+        return [w for w in r.get("Warnings", "").split("; ") if w]
     flagged = sum(1 for r in rows if _other_warnings(r))
     print_status("success", f"Exported {len(rows)} record(s) to: {out_path}")
     if non_items:
-        print_status("info", f"{non_items} of those are not item-level records - "
-                             f"--update-only edits items only, so those rows are for "
-                             f"reference, not re-import")
+        print_status("info", f"{non_items} of those are not item-level records (see the "
+                             f"Level column) - --update-only edits items only, so those "
+                             f"rows are for reference, not re-import")
     if flagged:
         print_status("warning", f"{flagged} record(s) have Warnings - metadata gaps "
                                 f"(no component ID/title/date) or structures "
                                 f"--update-only will refuse to edit:")
         for r in rows:
             others = _other_warnings(r)
-            if others:  # the non-item note is in the file; the console counts it once above
+            if others:
                 label = r.get(col.CATALOG) or f"(no catalog number) {r.get(col.TITLE) or '(no title)'}"
                 print_status("warning", f"{label}: {'; '.join(others)}", indent=1)
                 if r.get("ASpace Staff Link"):

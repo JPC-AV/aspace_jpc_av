@@ -68,7 +68,7 @@ MUTABLE_COLUMNS = [
 # here so the validators recognize an exported CSV fed back in (no
 # "unexpected column" noise) - the exporter asserts it stays in sync.
 EXPORT_AUDIT_COLUMNS = [
-    "ASpace Ref ID", "Warnings", "MADS live",
+    "ASpace Ref ID", "Warnings", "MADS live", "Level", "Depth", "Path",
     "ASpace URI", "ASpace Staff Link", "MADS URL",
     "Created By", "Create Time", "Last Modified By", "Last Modified Time",
 ]

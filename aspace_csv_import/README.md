@@ -416,15 +416,24 @@ python check_extent_types.py your_file.csv  # Validate CSV values
 
 ### aspace_csv_export.py
 The reverse of the importer: pull AV records into an import-shaped CSV
-(same columns, plus ref ID, URI, staff link, MADS URL, created/modified
-audit fields and a Warnings column) for round-trip editing with
+(same columns, plus ref ID, Warnings, Level, Depth, Path, URI, staff link,
+MADS URL and created/modified audit fields) for round-trip editing with
 `--update-only`, or as an audit report. Read-only.
 ```bash
 python aspace_csv_export.py --level item                    # every item-level record
+python aspace_csv_export.py --level all                     # the whole hierarchy, every level
 python aspace_csv_export.py --parent REFID                  # direct children of one record
 python aspace_csv_export.py --list numbers.txt              # exactly these catalog numbers
 python aspace_csv_export.py --level item --mads-live        # add a 'MADS live' column
 ```
+Rows are written in tree order (a parent immediately followed by its
+children, siblings as the staff interface orders them), so `--level all`
+reads like the ArchivesSpace tree; `--list` keeps the order of the list. `Level` is the record's level, `Depth`
+its distance from the top (0 for a series; an ephemera item under a tape is
+one deeper than the tape), and `Path` its ancestors joined with ` > ` -
+which survives sorting and filtering, and tells you in words which record
+the `ASpace Parent RefID` points at. `--update-only` ignores all three, so
+delete them or leave them.
 `--list` accepts a plain text file (one number per line) or any CSV with a
 `CATALOG_NUMBER` column. Files land in `~/aspace_import_reports/` by default
 (`<logs_dir>/export_reports/` when `logs_dir` is set) with a `# command`

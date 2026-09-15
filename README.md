@@ -50,7 +50,7 @@ More detailed descriptions of each file and usage in directory-specific README.m
 | `creds.py` | User creates/edits | Your local credentials file. You create this from the template. |
 | `requirements.txt` | One-time setup | Python package dependencies. Run `pip install -r requirements.txt` once. |
 | `aspace_csv_import.py` | Run via command line | Main script for importing CSV metadata to ArchivesSpace. |
-| `aspace_csv_export.py` | Run via command line | Exports AV records to an import-shaped CSV with audit columns; `--mads-live` checks MADS. |
+| `aspace_csv_export.py` | Run via command line | Exports AV records to an import-shaped CSV in tree order with hierarchy and audit columns; `--mads-live` checks MADS. |
 | `check_mads.py` | Run via command line | Checks which catalog numbers are live in MADS (public URLs only). |
 | `check_extent_types.py` | Run via command line | Utility to check valid extent types in your ASpace instance. |
 | `csv_utils.py` | Run via command line | Validates a CSV and checks parent ref_ids before import. |
@@ -135,7 +135,7 @@ See [aspace_csv_import/README.md](aspace_csv_import/README.md) for full document
 
 ### aspace_csv_export
 
-The reverse of the importer: exports AV records to an import-shaped CSV with audit columns (ref ID, URI, staff link, MADS URL, created/modified, Warnings) for round-trip editing with `--update-only` or as an audit report. Read-only.
+The reverse of the importer: exports AV records to an import-shaped CSV with audit columns (ref ID, Warnings, Level, Depth, Path, URI, staff link, MADS URL, created/modified) for round-trip editing with `--update-only` or as an audit report. Rows come out in tree order (`--list` keeps list order), so `--level all` reads like the ArchivesSpace tree. Read-only.
 
 ```bash
 cd aspace_csv_import
