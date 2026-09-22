@@ -73,8 +73,14 @@ EXPORT_AUDIT_COLUMNS = [
     "Created By", "Create Time", "Last Modified By", "Last Modified Time",
 ]
 
+# Columns the exporter's --fill-parents mode reads (the episode and which
+# file record under it: Edited, Promo, ...) and the note column it writes.
+EJS_EPISODE = "EJS Episode"
+FILE_TYPE = "ASpace File Type"
+PARENT_NOTE = "Parent Note"
+
 OPTIONAL_COLUMNS = [
-    "EJS Season", "EJS Episode", "Content TRT", "ORIGINAL_MEDIA_TYPE",
+    "EJS Season", EJS_EPISODE, FILE_TYPE, PARENT_NOTE, "Content TRT", "ORIGINAL_MEDIA_TYPE",
 ] + EXPORT_AUDIT_COLUMNS
 
 

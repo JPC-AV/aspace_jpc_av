@@ -24,6 +24,15 @@ Round-trip rules this export honors:
 Scope: ONLY the configured AV resource (resource_id in creds.py). The rest
 of the repository is never enumerated.
 
+Filling parents (--fill-parents FILE): the other direction. Given a sheet
+with EJS Episode and ASpace File Type columns, fill its empty ASpace Parent
+RefID cells with the ref_id of that file record (Edited, Promo...) under
+that episode, plus Path and Parent Note. Duplicate normalized episode keys abort
+the run without writing a CSV. Otherwise, exactly one file match fills a
+cell; anything else stays blank with the reason. Raw rows are left for a person
+(a multi-tape set has its own file record). Writes a new file; read-only
+against ArchivesSpace like everything else here.
+
 Selection: everything at a level (--level, default item; 'all' for the
 whole hierarchy), one record's children (--parent), or an explicit list of
 catalog numbers (--list FILE, plain text one-per-line or any CSV with a
@@ -464,6 +473,248 @@ def export_by_list(client, catalog_numbers):
     return rows, problems
 
 
+def fetch_resource(client):
+    """Every archival object in the resource, fetched and shape-checked.
+    Returns (records, None) or (None, reason) - a partial or malformed fetch
+    must never pose as the whole resource. Records the search index listed
+    but that turn out to live elsewhere are still in the list; callers
+    filter on resource ref (and count them as anomalies)."""
+    ids = list_resource_records(client)
+    if ids is None:
+        return None, "could not enumerate the resource's records"
+    print_status("info", f"{len(ids)} record(s) in the resource - "
+                         f"fetching in batches of {BATCH}...")
+    records = fetch_records(client, ids)
+    if records is None:
+        return None, "a batch fetch failed - no partial export was written"
+    # Shape first: a record missing the fields the filters read is malformed
+    # and fails the run - it must not be silently dropped (no level), misread
+    # as a stale hit (no resource), or crash (parent).
+    for record in records:
+        problem = record_shape_problem(record)
+        if problem:
+            return None, (f"malformed record {record.get('uri')!r} ({problem}) "
+                          f"- no partial export was written")
+    return records, None
+
+
+# ---------------------------------------------------------------------------
+# --fill-parents: fill ASpace Parent RefID from EJS Episode + ASpace File Type
+# ---------------------------------------------------------------------------
+_EPISODE_TITLE_RE = re.compile(r"Episode\s+(.+)", re.IGNORECASE)
+RAW_NOTE = ("Raw: fill by hand - a multi-tape set goes under its own file "
+            "record beneath Raw")
+
+
+def episode_key(value):
+    """Comparable key for an episode, from a sheet cell ("4006", "Episode
+    4006", "9", "4006.0" out of a spreadsheet) or an ArchivesSpace subseries
+    title ("Episode 09", "Episode pilot"). Numbers compare as numbers, so a
+    sheet's 9 finds "Episode 09"; anything else compares case-insensitively.
+    Returns None for a blank."""
+    value = (value or "").strip()
+    match = _EPISODE_TITLE_RE.fullmatch(value)
+    if match:
+        value = match.group(1).strip()
+    if not value:
+        return None
+    if re.fullmatch(r"[0-9]+(\.0+)?", value):
+        return int(value.split(".")[0])
+    return value.casefold()
+
+
+def index_file_records(client, records):
+    """Map (episode key, file title) -> [(file record, path an item under it
+    would carry)], plus the set of episode keys that exist at all (so "no
+    such episode" and "episode has no Promo record" are told apart).
+    Duplicate normalized episode keys in the resource fail the whole run.
+    Returns (index, episodes, None) or (None, None, reason)."""
+    in_resource = [r for r in records if r["resource"]["ref"] == aspace_client.RESOURCE_URI]
+    by_uri = {r["uri"]: r for r in in_resource}
+    index, episodes, episode_records = {}, set(), {}
+
+    def register_episode(record):
+        if record["level"] != "subseries":
+            return None
+        title = (record.get("title") or "").strip()
+        if not _EPISODE_TITLE_RE.fullmatch(title):
+            return None
+        key = episode_key(title)
+        previous = episode_records.get(key)
+        if previous is not None and previous["uri"] != record["uri"]:
+            return (f"duplicate episode key {key!r}: {previous.get('title')!r} "
+                    f"({previous['uri']}) and {record.get('title')!r} "
+                    f"({record['uri']}) - episode keys must be unique; "
+                    "correct the hierarchy in ArchivesSpace and rerun. No CSV was written")
+        episode_records[key] = record
+        episodes.add(key)
+        return None
+
+    for record in in_resource:
+        reason = register_episode(record)
+        if reason:
+            return None, None, reason
+
+    linked_cache = {}
+    def resolve(uri):
+        if uri in by_uri:
+            return by_uri[uri], None
+        record, reason = fetch_linked(client, uri, linked_cache)
+        if record is not None:
+            reason = register_episode(record)
+            if reason:
+                return None, reason
+        return record, reason
+
+    for record in in_resource:
+        if record["level"] != "file" or not record.get("parent"):
+            continue
+        parent, reason = resolve(record["parent"]["ref"])
+        if parent is None:
+            return None, None, f"linked parent {record['parent']['ref']} {reason}"
+        title = (parent.get("title") or "").strip()
+        if parent.get("level") != "subseries" or not _EPISODE_TITLE_RE.fullmatch(title):
+            continue  # a file under a season or series (Segment Reels...) - not episode-keyed
+        placed, reason = place_record(record, resolve)
+        if placed is None:
+            return None, None, f"{reason} (record {record.get('uri')})"
+        _, _, path, _, _ = placed
+        item_path = " > ".join(p for p in (path, display_of(record)) if p)
+        key = (episode_key(title), (record.get("title") or "").strip().casefold())
+        index.setdefault(key, []).append((record, item_path))
+    return index, episodes, None
+
+
+def read_fill_sheet(path):
+    """The sheet to fill: (headers, rows, None) or (None, None, problem).
+    Same strictness as every other reader - one header each, no overflow
+    cells, UTF-8 - and the four columns the lookup needs must be present."""
+    needed = [col.CATALOG, col.PARENT_REFID, col.EJS_EPISODE, col.FILE_TYPE]
+    try:
+        with col.open_csv(path) as f:
+            reader = csv.DictReader(f, strict=True)
+            headers = reader.fieldnames or []
+            duplicates = col.duplicate_headers(headers)
+            if duplicates:
+                return None, None, (f"{path}: duplicate column header(s): "
+                                    f"{'; '.join(duplicates)} - remove the stale duplicate(s)")
+            missing = [c for c in needed if c not in headers]
+            if missing:
+                return None, None, f"{path}: missing column(s): {', '.join(missing)}"
+            # This mode REWRITES the sheet, so every column must survive the
+            # round trip by name. Two or more unnamed columns all key as ""
+            # and DictReader keeps only the last one's cells - the others'
+            # contents would vanish from the output while the run reports
+            # success. (A single unnamed column round-trips by position.)
+            unnamed = [i for i, h in enumerate(headers, 1) if not (h or "").strip()]
+            if len(unnamed) > 1:
+                return None, None, (f"{path}: {len(unnamed)} columns have no header "
+                                    f"(columns {', '.join(map(str, unnamed))}) - their "
+                                    f"contents could not be carried into the filled file; "
+                                    f"name or remove them")
+            # The two columns this mode adds are matched by exact spelling
+            # (a sheet that already carries "Path" is filled in place). A
+            # near-miss ("path", "Parent Note ") would pass the duplicate
+            # check yet collide with the added column in the OUTPUT - a sheet
+            # the importer's validator then rejects. Refuse it up front.
+            for added in (col.PARENT_NOTE, "Path"):
+                variants = [h for h in headers
+                            if h != added and (h or "").strip().casefold() == added.casefold()]
+                if variants:
+                    return None, None, (f"{path}: column {variants[0]!r} would collide with "
+                                        f"the {added!r} column this mode adds - rename it "
+                                        f"to exactly {added!r} (to be filled) or remove it")
+            rows = []
+            for row_num, row in enumerate(reader, 1):
+                overflow = col.overflow_problem(row, row_num)
+                if overflow:
+                    return None, None, f"{path}: {overflow}"
+                rows.append(row)
+    except UnicodeDecodeError as e:
+        return None, None, (f"could not read {path}: not UTF-8 text (byte {e.start}: "
+                            f"{e.reason}) - save the file as UTF-8 CSV")
+    except csv.Error as e:
+        return None, None, f"could not parse {path} as CSV: {e}"
+    except OSError as e:
+        return None, None, f"could not read {path}: {e}"
+    if not rows:
+        return None, None, f"no data rows in {path}"
+    return list(headers), rows, None
+
+
+def fill_parents(rows, index, episodes):
+    """Fill each row's parent ref_id, Path and Parent Note in place.
+
+    Exactly one matching file record fills the cell; anything else leaves it
+    blank with the reason in Parent Note - never a guess. A value already in
+    the sheet is never replaced (a disagreement is noted). Raw rows are left
+    for a person: whether a tape belongs to a multi-tape set, which has its
+    own file record, cannot be told from the sheet.
+    Returns counts: filled, kept, and unresolved [(row_num, catalog, note)].
+    """
+    filled = kept = 0
+    unresolved = []
+    for row_num, row in enumerate(rows, 1):
+        existing = (row.get(col.PARENT_REFID) or "").strip()
+        file_type = (row.get(col.FILE_TYPE) or "").strip()
+        episode_cell = (row.get(col.EJS_EPISODE) or "").strip()
+        key = episode_key(episode_cell)
+        found, path, note = "", "", ""
+        if file_type.casefold() == "raw":
+            note = RAW_NOTE
+        elif key is None or not file_type:
+            note = "no " + " or ".join(c for c, v in ((col.EJS_EPISODE, episode_cell),
+                                                     (col.FILE_TYPE, file_type)) if not v)
+        else:
+            hits = index.get((key, file_type.casefold()), [])
+            if len(hits) == 1:
+                found, path = hits[0][0].get("ref_id") or "", hits[0][1]
+                if not found:
+                    note = "the matching file record has no ref_id - retry later"
+            elif len(hits) > 1:
+                note = (f"{len(hits)} {file_type} records match Episode {episode_cell} "
+                        f"- fill by hand")
+            elif key in episodes:
+                note = f"Episode {episode_cell} has no {file_type} record in ArchivesSpace"
+            else:
+                note = f"Episode {episode_cell} not found in ArchivesSpace"
+        if existing:
+            kept += 1
+            if found and found != existing:
+                note = f"sheet value kept; the lookup found a different parent ({found})"
+                path = ""
+                unresolved.append((row_num, row.get(col.CATALOG, ""), note))
+            elif not found:
+                note = ""  # nothing to add to a row a person already filled
+        elif found:
+            row[col.PARENT_REFID] = found
+            filled += 1
+        else:
+            unresolved.append((row_num, row.get(col.CATALOG, ""), note))
+        row["Path"] = path
+        row[col.PARENT_NOTE] = note
+    return filled, kept, unresolved
+
+
+def write_filled_csv(headers, rows, path, provenance=None):
+    """The input sheet, column order kept, with Path and Parent Note added
+    (after the parent column) when the sheet did not already carry them.
+    Atomic, provenance first line - same as every export."""
+    fieldnames = list(headers)
+    at = fieldnames.index(col.PARENT_REFID) + 1
+    for extra in (col.PARENT_NOTE, "Path"):
+        if extra not in fieldnames:
+            fieldnames.insert(at, extra)
+    tmp_path = path + ".tmp"
+    with open(tmp_path, "w", newline="", encoding="utf-8") as f:
+        if provenance:
+            f.write(f"# {provenance}\n")
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
+    os.replace(tmp_path, path)
+
+
 def export_records(client, level, parent_filter_refid=None):
     """Pull, filter, and map every matching record.
 
@@ -472,15 +723,9 @@ def export_records(client, level, parent_filter_refid=None):
     against stale search-index hits (the index, not the tree, is the
     enumeration source; an index claim is verified against the record).
     """
-    ids = list_resource_records(client)
-    if ids is None:
-        return None, "could not enumerate the resource's records"
-    print_status("info", f"{len(ids)} record(s) in the resource - "
-                         f"fetching in batches of {BATCH}...")
-
-    records = fetch_records(client, ids)
+    records, reason = fetch_resource(client)
     if records is None:
-        return None, "a batch fetch failed - no partial export was written"
+        return None, reason
 
     # --parent: resolve the target once, then keep only its direct children.
     parent_filter_uri = None
@@ -502,10 +747,6 @@ def export_records(client, level, parent_filter_refid=None):
     # is a series or lives under another parent.
     id_counts = {}
     for record in records:
-        problem = record_shape_problem(record)
-        if problem:
-            return None, (f"malformed record {record.get('uri')!r} ({problem}) "
-                          f"- no partial export was written")
         if record["resource"]["ref"] == aspace_client.RESOURCE_URI and record.get("component_id"):
             id_counts[record["component_id"]] = id_counts.get(record["component_id"], 0) + 1
     # Ancestors come from this same fetch (the whole resource is in hand);
@@ -662,6 +903,45 @@ def write_export_csv(rows, path, extra_headers=(), provenance=None):
     os.replace(tmp_path, path)
 
 
+def run_fill_parents(sheet_path, out_path):
+    """--fill-parents end to end. Returns the exit code: 0 when every row
+    has a parent, 2 when some were left for a person (the file is accurate
+    but not complete), 1 on failure (nothing written)."""
+    headers, rows, problem = read_fill_sheet(sheet_path)  # before any network work
+    if rows is None:
+        print_status("error", problem)
+        return 1
+    client = ASpaceClient()
+    print_status("info", f"Connecting to {aspace_client.ASPACE_URL}...")
+    if not client.login():
+        print_status("error", "Authentication failed")
+        return 1
+    print_status("success", "Authenticated")
+    try:
+        records, reason = fetch_resource(client)
+        if records is not None:
+            index, episodes, reason = index_file_records(client, records)
+    finally:
+        client.logout()
+    if records is None or index is None:
+        print_status("error", f"Hierarchy problem: {reason}")
+        return 1
+    filled, kept, unresolved = fill_parents(rows, index, episodes)
+    provenance = (f"{RUN_COMMAND} | target: {aspace_client.ACTIVE_ENV} | "
+                  f"{datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    write_filled_csv(headers, rows, out_path, provenance)
+    print_status("success", f"Wrote {len(rows)} row(s) to: {out_path}")
+    print_status("info", f"{filled} parent(s) filled, {kept} already in the sheet, "
+                         f"{len(unresolved)} left for a person")
+    if unresolved:
+        print_status("warning", "Rows without a filled parent (see the Parent Note column):")
+        for row_num, catalog, note in unresolved:
+            print_status("warning", f"row {row_num} {catalog or '(no catalog number)'}: {note}",
+                         indent=1)
+        return 2
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Export the AV resource's archival objects to an "
@@ -676,6 +956,11 @@ def main():
                              "text one per line, or any CSV with a "
                              "CATALOG_NUMBER column (--level/--parent do "
                              "not apply)")
+    parser.add_argument("--fill-parents", metavar="FILE", dest="fill_file",
+                        help="Fill the ASpace Parent RefID column of this sheet "
+                             "from its EJS Episode and ASpace File Type columns "
+                             "(adds Path and Parent Note; writes a new file, "
+                             "never edits FILE; Raw rows are left for a person)")
     parser.add_argument("--mads-live", action="store_true",
                         help="Check each record's public MADS URL and add a "
                              "'MADS live' column (Yes / No / check failed / "
@@ -691,6 +976,10 @@ def main():
     if args.list_file and args.parent:
         parser.error("--list names the exact records to export - it cannot "
                      "be combined with --parent")
+    if args.fill_file and (args.list_file or args.parent or args.mads_live
+                           or args.level != "item"):
+        parser.error("--fill-parents fills a sheet's parent column - it cannot be "
+                     "combined with --list, --parent, --level or --mads-live")
 
     # Environment selection: same contract as every other tool - auto with
     # one configured, explicit --env with several, no default.
@@ -708,13 +997,15 @@ def main():
                      or "no environments configured in creds.py (see creds_template.py)")
 
     stamp = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{os.getpid()}"
-    out_path = col.resolve_output_path(
-        args.output, OUTPUT_DIR, f"aspace_export_{aspace_client.ACTIVE_ENV}_{stamp}.csv")
+    default_name = (f"parents_filled_{aspace_client.ACTIVE_ENV}_{stamp}.csv" if args.fill_file
+                    else f"aspace_export_{aspace_client.ACTIVE_ENV}_{stamp}.csv")
+    out_path = col.resolve_output_path(args.output, OUTPUT_DIR, default_name)
 
-    if args.list_file:
-        problem = clobber_problem(args.list_file, out_path)
-        if problem:
-            parser.error(problem)  # before any network work
+    for input_file in (args.list_file, args.fill_file):
+        if input_file:
+            problem = clobber_problem(input_file, out_path)
+            if problem:
+                parser.error(problem)  # before any network work
 
     print_header("ArchivesSpace CSV Export")
     target = (f"{aspace_client.ACTIVE_ENV.upper()} ({aspace_client.ASPACE_URL}, "
@@ -723,6 +1014,9 @@ def main():
     target_color = Colors.RED if aspace_client.ACTIVE_ENV == 'production' else Colors.GREEN
     print(f"  Target: {target_color}{Colors.BOLD}{target}{Colors.RESET}")
     print(f"  Command: {RUN_COMMAND}")
+    if args.fill_file:
+        print(f"  Fill parents: {args.fill_file}")
+        sys.exit(run_fill_parents(args.fill_file, out_path))
     if args.list_file:
         print(f"  List: {args.list_file}")
     else:

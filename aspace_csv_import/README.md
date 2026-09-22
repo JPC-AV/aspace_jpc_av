@@ -434,6 +434,30 @@ one deeper than the tape), and `Path` its ancestors joined with ` > ` -
 which survives sorting and filtering, and tells you in words which record
 the `ASpace Parent RefID` points at. `--update-only` ignores all three, so
 delete them or leave them.
+
+**Filling parent ref IDs.** Before a create run, the exporter can fill a
+sheet's empty `ASpace Parent RefID` column for you:
+```bash
+python aspace_csv_export.py --fill-parents your_file.csv
+```
+The sheet needs `CATALOG_NUMBER`, `ASpace Parent RefID`, `EJS Episode` (`4006`,
+or `9` for Celebrity Showcase) and `ASpace File Type` (`Edited`, `Promo`, ...).
+Each row gets the ref ID of that file record under that episode, plus a
+`Path` showing where it will land and a `Parent Note`. A cell is filled only
+when exactly one record matches; otherwise it stays blank and the note says
+why (no such episode, the episode has no Promo record, multiple matching file records).
+Normalized episode keys must be unique across the selected AV resource:
+a duplicate is a fatal error (exit code 1), names both conflicting records,
+and stops the entire run without writing a CSV. The check uses the sheet
+lookup rules: case and surrounding whitespace are ignored, and numeric
+forms normalize (`Episode 09`, `Episode 9` and `Episode 9.0` conflict).
+Duplicate non-episode subseries titles, such as `Season 1` or `Cosmetics`,
+do not block filling; this is not a resource-wide subseries naming policy.
+A value already in the sheet is never replaced. `Raw` rows are always left
+for a person, because a tape in a multi-tape set goes under that set's own
+file record. The result is a new file (name it with `-o`; yours is never
+edited) and it is the file the rest of the workflow uses. Exit code 2 means
+some rows still need a parent.
 `--list` accepts a plain text file (one number per line) or any CSV with a
 `CATALOG_NUMBER` column. Files land in `~/aspace_import_reports/` by default
 (`<logs_dir>/export_reports/` when `logs_dir` is set) with a `# command`
@@ -454,32 +478,42 @@ the last two are never evidence of absence.
 
 ### Full import (create)
 
-1. **Validate CSV**
+1. **Fill parent ref_ids** *(if the sheet's `ASpace Parent RefID` column is blank)*
    ```bash
-   python csv_utils.py --validate your_file.csv
+   python aspace_csv_export.py --fill-parents your_file.csv -o your_file_filled.csv
+   ```
+   Every later step uses the filled file. Rows the tool left blank (listed
+   on the console and in its `Parent Note` column) must be filled by hand
+   first - the validator rejects a blank parent on a create run. If the
+   parents are already filled and you skip this step, use your original
+   filename throughout.
+
+2. **Validate CSV**
+   ```bash
+   python csv_utils.py --validate your_file_filled.csv
    ```
 
-2. **Check parent ref_ids exist**
+3. **Check parent ref_ids exist**
    ```bash
-   python csv_utils.py --parents your_file.csv
+   python csv_utils.py --parents your_file_filled.csv
    ```
 
-3. **Verify extent types**
+4. **Verify extent types**
    ```bash
-   python check_extent_types.py your_file.csv
+   python check_extent_types.py your_file_filled.csv
    ```
 
-4. **Dry run**
+5. **Dry run**
    ```bash
-   python aspace_csv_import.py --create-records -n -f your_file.csv
+   python aspace_csv_import.py --create-records -n -f your_file_filled.csv
    ```
 
-5. **Run import**
+6. **Run import**
    ```bash
-   python aspace_csv_import.py --create-records -f your_file.csv
+   python aspace_csv_import.py --create-records -f your_file_filled.csv
    ```
 
-6. **Verify in ArchivesSpace**
+7. **Verify in ArchivesSpace**
 
 > **Rerunning after a run that created records:** wait a minute or two before
 > rerunning. The duplicate check uses ArchivesSpace's search index, which is
