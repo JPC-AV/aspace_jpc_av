@@ -499,7 +499,10 @@ environment is configured; use `--env sandbox` for a trial run.
    tool could not resolve are listed on the console and in the `Parent Note`
    column. Mark them in Airtable as needing a parent and remove them from
    this batch: a create run refuses the whole sheet if any row's parent is
-   blank. They go in a later batch once their parent exists.
+   blank. Before one returns in a later batch its parent has to be settled.
+   A `Raw` row always needs a person to choose its parent (a set's own file
+   record under Raw), even when that record already exists; other rows wait
+   for their missing episode or file record to be created.
 
 3. **Validate CSV**
    ```bash

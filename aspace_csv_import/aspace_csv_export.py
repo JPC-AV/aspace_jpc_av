@@ -944,7 +944,7 @@ def run_fill_parents(sheet_path, out_path):
 
 SELECT_OPTIONS = [
     ("--level LEVEL", "", "Only records at this level: item (default), file, subseries, series... or all"),
-    ("--parent REFID", "", "Only the direct children of this record"),
+    ("--parent REFID", "", "Only the direct children of this record (combines with --level)"),
     ("--list FILE", "", "Exactly these catalog numbers (text, one per line, or a CSV with CATALOG_NUMBER); list order kept"),
 ]
 FILL_OPTIONS = [
@@ -971,7 +971,8 @@ def get_colored_help():
     {C.GREEN}3.{C.RESET} Checks whether exported records are live in MADS (--mads-live)
 
 {C.BOLD}USAGE{C.RESET}
-    {C.GREEN}${C.RESET} python3 aspace_csv_export.py [--level LEVEL | --parent REFID | --list FILE] [options]
+    {C.GREEN}${C.RESET} python3 aspace_csv_export.py [--level LEVEL] [--parent REFID] [options]
+    {C.GREEN}${C.RESET} python3 aspace_csv_export.py --list FILE [options]
     {C.GREEN}${C.RESET} python3 aspace_csv_export.py --fill-parents FILE [-o PATH] [--env NAME]
 
 {C.BOLD}SELECT{C.RESET} {C.DIM}(what to export; default: every item-level record){C.RESET}
@@ -992,6 +993,7 @@ def get_colored_help():
 {C.BOLD}EXIT{C.RESET}
     {C.GREEN}0{C.RESET}  done
     {C.YELLOW}2{C.RESET}  file written but incomplete: parents left blank, listed numbers not found, or MADS checks failed
+       (also a bad argument or a creds.py problem - then nothing is written)
     {C.RED}1{C.RESET}  failed - nothing written
 
 {C.BOLD}OUTPUT{C.RESET}
@@ -1006,8 +1008,9 @@ def build_parser():
     class CustomArgumentParser(argparse.ArgumentParser):
         def format_usage(self):
             C = Colors
-            usage = (f"\nusage: {self.prog} [--level LEVEL | --parent REFID | --list FILE "
-                     f"| --fill-parents FILE] [options]\n")
+            usage = (f"\nusage: {self.prog} [--level LEVEL] [--parent REFID] [options]\n"
+                     f"       {self.prog} --list FILE [options]\n"
+                     f"       {self.prog} --fill-parents FILE [-o PATH] [--env NAME]\n")
             hint = f"       {C.DIM}Use -h or --help for detailed information{C.RESET}\n"
             options = "\n" + "\n".join(render_options(group, indent="  ") for group in
                                         (SELECT_OPTIONS, FILL_OPTIONS, EXPORT_CLI_OPTIONS)) + "\n"
