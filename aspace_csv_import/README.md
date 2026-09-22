@@ -159,14 +159,14 @@ columns to change). The last two rows are read only by
 | ASpace Parent RefID | Parent object's ref_id (can be filled with `--fill-parents`) | Yes for create; ignored by `--update-only` | 3f9c2a7d0b1e4c6a8d5f7e9b2c4a6d8e |
 | ASpace Scope and Contents Note | Scope and contents | No | Pilot episode featuring... |
 | ASpace PhysTech Note | Physical characteristics / playback notes | No | Slight ringing present... |
-| EJS Episode | Episode number, for `--fill-parents` | For the fill | 4006, or 9 for Celebrity Showcase |
+| EJS Episode | Episode number, for `--fill-parents` | Recommended - when blank, the title must carry the episode | 4006, or 09 for Celebrity Showcase |
 | ASpace File Type | Which file record under the episode, for `--fill-parents` | For the fill | Edited, Promo, Raw |
 
 **Date range:** every date you set or change must fall within **1940–2020**, the span of the AV material - anything outside is rejected as a typo. **Two-digit years** (`11/2/93`) are therefore unambiguous: `40`–`99` are 19xx, `00`–`20` are 20xx, and `21`–`39` are rejected (impossible in either century). The same sheet parses identically in any year. Day-first dates are never accepted. One exception: `--update-only` preserves a stored date outside the range as long as the sheet leaves it unchanged (an exported legacy value round-trips; the export flags it for you), but refuses to *change* a date to an out-of-range value.
 
 *If no title is provided, the catalog number will be used. If no format is provided the record is created without an extent - every item should have one, but the importer does not insist.
 
-**Other columns** are ignored, so an Airtable export can be used as it is. Two header problems are refused: two or more columns with no header, and a header that only differs in case or spacing from another (for example `path` next to the `Path` column `--fill-parents` adds).
+**Other columns** are ignored, so an Airtable export can be used as it is. Two header problems are refused by `--fill-parents`: two or more columns with no header, and a header that is a near-miss of a column the fill reads or adds (`EJS Episode ` with a trailing space, `path` for `Path`). A near-miss would otherwise be ignored or duplicated.
 
 **Note:** The CSV contains 80+ columns, but only 9 are actively mapped. See **docs/POTENTIAL_MAPPINGS.md** for analysis of unmapped fields.
 
@@ -446,8 +446,30 @@ sheet's empty `ASpace Parent RefID` column for you:
 ```bash
 python aspace_csv_export.py --fill-parents your_file.csv
 ```
-The sheet needs `CATALOG_NUMBER`, `ASpace Parent RefID`, `EJS Episode` (`4006`,
-or `9` for Celebrity Showcase) and `ASpace File Type` (`Edited`, `Promo`, ...).
+The sheet needs `CATALOG_NUMBER`, `ASpace Parent RefID` and `ASpace File Type`
+(`Edited`, `Promo`, ...), plus the episode.
+
+> **Fill `EJS Episode` for every row.** With the column filled, the parent
+> never depends on how a title is worded: the column decides, and the title
+> is only a cross-check (a proofread for free). With it blank, the title is
+> the *only* source, so it must follow the title pattern exactly -
+> `<Series>, Episode <number>[, <Qualifier>]` (`Ebony/Jet Showcase, Episode
+> 4006, Safety Master`), with the episode as one whole comma-separated part
+> and no other two- or four-digit number after it.
+
+How the episode is decided:
+- **`EJS Episode` filled** (`4006`, or `09` for Celebrity Showcase) - it is
+  used. If the title also names an episode and the two disagree, the row is
+  left blank with both values in the note; a supplied parent is kept, but the
+  row is still listed for review. A title that doesn't follow the pattern is
+  simply not read.
+- **`EJS Episode` blank** - the title is read. A title naming no episode, or
+  more than one (`Episode 4006/4007`, `Episode 4006-4007`, `Episode 4006, or
+  4007`), leaves the row for a person.
+
+Either way a nonconforming title can never pick a wrong parent; the worst
+case is a blank parent with the reason in the note.
+
 Each row gets the ref ID of that file record under that episode, plus a
 `Path` showing where it will land and a `Parent Note`. A cell is filled only
 when exactly one record matches; otherwise it stays blank and the note says
@@ -488,7 +510,9 @@ Commands that talk to ArchivesSpace take `--env` when more than one
 environment is configured; use `--env sandbox` for a trial run.
 
 1. **Export the batch from Airtable** with the nine import columns plus
-   `EJS Episode` and `ASpace File Type` (see [CSV File Format](#csv-file-format)).
+   `ASpace File Type` and `EJS Episode` (see [CSV File Format](#csv-file-format)).
+   Keep `EJS Episode` filled: without it the fill has to read the episode
+   from each title, which then has to follow the title pattern exactly.
 
 2. **Fill parent ref_ids** *(if the sheet's `ASpace Parent RefID` column is blank)*
    ```bash

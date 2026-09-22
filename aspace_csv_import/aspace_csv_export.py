@@ -25,9 +25,11 @@ Scope: ONLY the configured AV resource (resource_id in creds.py). The rest
 of the repository is never enumerated.
 
 Filling parents (--fill-parents FILE): the other direction. Given a sheet
-with EJS Episode and ASpace File Type columns, fill its empty ASpace Parent
-RefID cells with the ref_id of that file record (Edited, Promo...) under
-that episode, plus Path and Parent Note. Duplicate normalized episode keys abort
+with an ASpace File Type column, fill its empty ASpace Parent RefID cells
+with the ref_id of that file record (Edited, Promo...) under the row's
+episode - from EJS Episode, or from the title when that is blank (which is
+why EJS Episode should be kept filled: the title then only cross-checks it,
+and must agree) - plus Path and Parent Note. Duplicate normalized episode keys abort
 the run without writing a CSV. Otherwise, exactly one file match fills a
 cell; anything else stays blank with the reason. Raw rows are left for a person
 (a multi-tape set has its own file record). Writes a new file; read-only
@@ -502,6 +504,49 @@ def fetch_resource(client):
 # --fill-parents: fill ASpace Parent RefID from EJS Episode + ASpace File Type
 # ---------------------------------------------------------------------------
 _EPISODE_TITLE_RE = re.compile(r"Episode\s+(.+)", re.IGNORECASE)
+# The title pattern is "<Series>, Episode <n>[, <Qualifier>]": the episode
+# is one whole comma-separated part of the title.
+_EPISODE_WORD_RE = re.compile(r"\bepisode\b", re.IGNORECASE)
+_EPISODE_PART_RE = re.compile(r"episode\s+([0-9]+|[a-z]+)", re.IGNORECASE)
+# Any later comma part holding an episode-shaped number - a standalone two-
+# or four-digit number (Celebrity Showcase / EJS) - means the title may name
+# more than one episode ("4007", "and 4007", "or 4007", "plus 4007",
+# "4007/4008", "thru 4008"), whatever word sits in front of it. Qualifiers
+# with single digits ("Tape 1 of 3") read normally; one with such a number
+# ("30-second promo") is refused - failing toward review, never a guess.
+_EPISODE_SHAPED_NUMBER_RE = re.compile(r"(?<![0-9])(?:[0-9]{2}|[0-9]{4})(?![0-9])")
+UNCLEAR = object()  # the title mentions an episode, but not one it is safe to read
+
+
+def episode_from_title(title):
+    """(key, text) for the episode a title names.
+
+    key is the episode key (4006; "pilot"), None when the title names no
+    episode, or UNCLEAR when it mentions one that cannot be read safely:
+    two mentions ("... recut from Episode 4007"), or an episode part that is
+    not a single number or word ("Episode 4006/4007", "Episode 4006-4007",
+    "Episode 4006.5"). Those need a person, never a best guess. text is the
+    episode part as written, for notes. EJS episodes are four digits and
+    Celebrity Showcase two, so a number alone decides the program (the
+    index refuses to run if two episodes share a key)."""
+    title = title or ""
+    mentions = len(_EPISODE_WORD_RE.findall(title))
+    if mentions == 0:
+        return None, ""
+    parts = [p.strip() for p in title.split(",")]
+    episode_parts = [p for p in parts if _EPISODE_WORD_RE.match(p)]
+    if mentions == 1 and len(episode_parts) == 1:
+        match = _EPISODE_PART_RE.fullmatch(episode_parts[0])
+        # a later part naming another episode-shaped number means the
+        # title may name more than one episode
+        continued = any(_EPISODE_SHAPED_NUMBER_RE.search(p)
+                        for p in parts[parts.index(episode_parts[0]) + 1:])
+        if match and not continued:
+            return episode_key(match.group(1)), episode_parts[0]
+    shown = episode_parts[0] if episode_parts else title
+    return UNCLEAR, shown
+
+
 RAW_NOTE = ("Raw: fill by hand - a multi-tape set goes under its own file "
             "record beneath Raw")
 
@@ -589,7 +634,9 @@ def read_fill_sheet(path):
     """The sheet to fill: (headers, rows, None) or (None, None, problem).
     Same strictness as every other reader - one header each, no overflow
     cells, UTF-8 - and the four columns the lookup needs must be present."""
-    needed = [col.CATALOG, col.PARENT_REFID, col.EJS_EPISODE, col.FILE_TYPE]
+    # EJS Episode is optional: a blank (or absent) column falls back to the
+    # episode named in the title.
+    needed = [col.CATALOG, col.PARENT_REFID, col.FILE_TYPE]
     try:
         with col.open_csv(path) as f:
             reader = csv.DictReader(f, strict=True)
@@ -598,6 +645,23 @@ def read_fill_sheet(path):
             if duplicates:
                 return None, None, (f"{path}: duplicate column header(s): "
                                     f"{'; '.join(duplicates)} - remove the stale duplicate(s)")
+            # The two columns this mode adds are matched by exact spelling
+            # (a sheet that already carries "Path" is filled in place). A
+            # near-miss ("path", "Parent Note ") would pass the duplicate
+            # check yet collide with the added column in the OUTPUT - a sheet
+            # the importer's validator then rejects. Refuse it up front.
+            # The same goes for every column the lookup READS: a near-miss
+            # like "EJS Episode " would otherwise be treated as an absent
+            # column - its values silently ignored, the title winning.
+            for known in (col.CATALOG, col.TITLE, col.PARENT_REFID, col.EJS_EPISODE,
+                          col.FILE_TYPE, col.PARENT_NOTE, "Path"):
+                variants = [h for h in headers
+                            if h != known and (h or "").strip().casefold() == known.casefold()]
+                if variants:
+                    return None, None, (f"{path}: column {variants[0]!r} is not spelled "
+                                        f"exactly {known!r} - rename it (or remove it); "
+                                        f"otherwise its contents would be ignored or "
+                                        f"collide in the filled file")
             missing = [c for c in needed if c not in headers]
             if missing:
                 return None, None, f"{path}: missing column(s): {', '.join(missing)}"
@@ -612,18 +676,6 @@ def read_fill_sheet(path):
                                     f"(columns {', '.join(map(str, unnamed))}) - their "
                                     f"contents could not be carried into the filled file; "
                                     f"name or remove them")
-            # The two columns this mode adds are matched by exact spelling
-            # (a sheet that already carries "Path" is filled in place). A
-            # near-miss ("path", "Parent Note ") would pass the duplicate
-            # check yet collide with the added column in the OUTPUT - a sheet
-            # the importer's validator then rejects. Refuse it up front.
-            for added in (col.PARENT_NOTE, "Path"):
-                variants = [h for h in headers
-                            if h != added and (h or "").strip().casefold() == added.casefold()]
-                if variants:
-                    return None, None, (f"{path}: column {variants[0]!r} would collide with "
-                                        f"the {added!r} column this mode adds - rename it "
-                                        f"to exactly {added!r} (to be filled) or remove it")
             rows = []
             for row_num, row in enumerate(reader, 1):
                 overflow = col.overflow_problem(row, row_num)
@@ -645,6 +697,9 @@ def read_fill_sheet(path):
 def fill_parents(rows, index, episodes):
     """Fill each row's parent ref_id, Path and Parent Note in place.
 
+    The episode comes from EJS Episode, or from the title when that cell is
+    blank ("..., Episode 4006, ..."); when both are present they must agree,
+    or the row is left blank - a typo in either must not pick a parent.
     Exactly one matching file record fills the cell; anything else leaves it
     blank with the reason in Parent Note - never a guess. A value already in
     the sheet is never replaced (a disagreement is noted). Raw rows are left
@@ -659,18 +714,38 @@ def fill_parents(rows, index, episodes):
         file_type = (row.get(col.FILE_TYPE) or "").strip()
         episode_cell = (row.get(col.EJS_EPISODE) or "").strip()
         key = episode_key(episode_cell)
+        title_key, title_text = episode_from_title(row.get(col.TITLE))
+        from_title = key is None and title_key not in (None, UNCLEAR)
+        if from_title:
+            key, episode_cell = title_key, title_text.split(None, 1)[1]
         found, path, note = "", "", ""
-        if file_type.casefold() == "raw":
+        conflict = False  # needs review even when the sheet already has a parent
+        if key is not None and title_key not in (None, UNCLEAR) and key != title_key:
+            # compared whatever the kind (4006 vs "pilot" disagrees too), and
+            # before the Raw rule: a Raw row can contradict itself as well
+            note = (f"{col.EJS_EPISODE} {episode_cell} and the title's {title_text!r} "
+                    f"disagree - correct one of them")
+            conflict = True
+        elif file_type.casefold() == "raw":
             note = RAW_NOTE
+        elif key is None and title_key is UNCLEAR:
+            note = (f"the title's episode ({title_text!r}) is not a single episode - "
+                    f"fill {col.EJS_EPISODE}")
         elif key is None or not file_type:
-            note = "no " + " or ".join(c for c, v in ((col.EJS_EPISODE, episode_cell),
-                                                     (col.FILE_TYPE, file_type)) if not v)
+            missing = []
+            if key is None:
+                missing.append(f"{col.EJS_EPISODE} (and no episode in the title)")
+            if not file_type:
+                missing.append(col.FILE_TYPE)
+            note = "no " + " or ".join(missing)
         else:
             hits = index.get((key, file_type.casefold()), [])
             if len(hits) == 1:
                 found, path = hits[0][0].get("ref_id") or "", hits[0][1]
                 if not found:
                     note = "the matching file record has no ref_id - retry later"
+                elif from_title:
+                    note = "episode taken from the title"
             elif len(hits) > 1:
                 note = (f"{len(hits)} {file_type} records match Episode {episode_cell} "
                         f"- fill by hand")
@@ -684,7 +759,11 @@ def fill_parents(rows, index, episodes):
                 note = f"sheet value kept; the lookup found a different parent ({found})"
                 path = ""
                 unresolved.append((row_num, row.get(col.CATALOG, ""), note))
-            elif not found:
+            elif conflict:
+                # the supplied parent stands, but the sheet contradicts itself
+                note = f"sheet value kept; {note}"
+                unresolved.append((row_num, row.get(col.CATALOG, ""), note))
+            else:
                 note = ""  # nothing to add to a row a person already filled
         elif found:
             row[col.PARENT_REFID] = found
@@ -949,6 +1028,7 @@ SELECT_OPTIONS = [
 ]
 FILL_OPTIONS = [
     ("--fill-parents FILE", "", "Fill blank ASpace Parent RefID cells from EJS Episode + ASpace File Type; writes a new file"),
+    ("", "", "(keep EJS Episode filled - a blank cell falls back to the title, which must then follow the pattern)"),
 ]
 EXPORT_CLI_OPTIONS = [
     ("--mads-live", "", "Add a MADS live column: Yes / No / check failed / invalid catalog number"),
