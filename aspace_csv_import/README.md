@@ -141,10 +141,12 @@ Command-line arguments override creds.py settings.
 
 ## CSV File Format
 
-**Create runs (`--create-records`) require all nine column headers below to
-be present** - the "Required" column describes whether each *cell* may be
-left blank, not whether the column may be omitted. Only `--update-only`
-accepts a narrow sheet (`CATALOG_NUMBER` plus just the columns to change).
+**Create runs (`--create-records`) require all nine import column headers
+below to be present** - the "Value required?" column describes whether each
+*cell* may be left blank, not whether the column may be omitted. Only
+`--update-only` accepts a narrow sheet (`CATALOG_NUMBER` plus just the
+columns to change). The last two rows are read only by
+`aspace_csv_export.py --fill-parents`; the importer ignores them.
 
 | Column | Description | Value required? | Example |
 |--------|-------------|----------|---------|
@@ -154,13 +156,17 @@ accepts a narrow sheet (`CATALOG_NUMBER` plus just the columns to change).
 | Edit Date | Edit/modified date (same formats) | No | 8/2/1982 |
 | Broadcast Date | Broadcast date (same formats) | No | 9/1/1982 |
 | Original Format | Physical format (must match dropdown when set or changed; an unchanged stored term round-trips under `--update-only`) | No* | 2 inch videotape |
-| ASpace Parent RefID | Parent object's ref_id | Yes for create; ignored by `--update-only` | abc123def456 |
+| ASpace Parent RefID | Parent object's ref_id (can be filled with `--fill-parents`) | Yes for create; ignored by `--update-only` | 3f9c2a7d0b1e4c6a8d5f7e9b2c4a6d8e |
 | ASpace Scope and Contents Note | Scope and contents | No | Pilot episode featuring... |
 | ASpace PhysTech Note | Physical characteristics / playback notes | No | Slight ringing present... |
+| EJS Episode | Episode number, for `--fill-parents` | For the fill | 4006, or 9 for Celebrity Showcase |
+| ASpace File Type | Which file record under the episode, for `--fill-parents` | For the fill | Edited, Promo, Raw |
 
 **Date range:** every date you set or change must fall within **1940–2020**, the span of the AV material - anything outside is rejected as a typo. **Two-digit years** (`11/2/93`) are therefore unambiguous: `40`–`99` are 19xx, `00`–`20` are 20xx, and `21`–`39` are rejected (impossible in either century). The same sheet parses identically in any year. Day-first dates are never accepted. One exception: `--update-only` preserves a stored date outside the range as long as the sheet leaves it unchanged (an exported legacy value round-trips; the export flags it for you), but refuses to *change* a date to an out-of-range value.
 
 *If no title is provided, the catalog number will be used. If no format is provided the record is created without an extent - every item should have one, but the importer does not insist.
+
+**Other columns** are ignored, so an Airtable export can be used as it is. Two header problems are refused: two or more columns with no header, and a header that only differs in case or spacing from another (for example `path` next to the `Path` column `--fill-parents` adds).
 
 **Note:** The CSV contains 80+ columns, but only 9 are actively mapped. See **docs/POTENTIAL_MAPPINGS.md** for analysis of unmapped fields.
 
@@ -478,42 +484,54 @@ the last two are never evidence of absence.
 
 ### Full import (create)
 
-1. **Fill parent ref_ids** *(if the sheet's `ASpace Parent RefID` column is blank)*
-   ```bash
-   python aspace_csv_export.py --fill-parents your_file.csv -o your_file_filled.csv
-   ```
-   Every later step uses the filled file. Rows the tool left blank (listed
-   on the console and in its `Parent Note` column) must be filled by hand
-   first - the validator rejects a blank parent on a create run. If the
-   parents are already filled and you skip this step, use your original
-   filename throughout.
+Commands that talk to ArchivesSpace take `--env` when more than one
+environment is configured; use `--env sandbox` for a trial run.
 
-2. **Validate CSV**
+1. **Export the batch from Airtable** with the nine import columns plus
+   `EJS Episode` and `ASpace File Type` (see [CSV File Format](#csv-file-format)).
+
+2. **Fill parent ref_ids** *(if the sheet's `ASpace Parent RefID` column is blank)*
+   ```bash
+   python aspace_csv_export.py --fill-parents your_file.csv -o your_file_filled.csv --env production
+   ```
+   Every later step uses the filled file. If the parents are already filled
+   and you skip this step, use your original filename throughout. Rows the
+   tool could not resolve are listed on the console and in the `Parent Note`
+   column. Mark them in Airtable as needing a parent and remove them from
+   this batch: a create run refuses the whole sheet if any row's parent is
+   blank. They go in a later batch once their parent exists.
+
+3. **Validate CSV**
    ```bash
    python csv_utils.py --validate your_file_filled.csv
    ```
 
-3. **Check parent ref_ids exist**
+4. **Check parent ref_ids exist**
    ```bash
-   python csv_utils.py --parents your_file_filled.csv
+   python csv_utils.py --parents your_file_filled.csv --env production
    ```
 
-4. **Verify extent types**
+5. **Verify extent types**
    ```bash
-   python check_extent_types.py your_file_filled.csv
+   python check_extent_types.py your_file_filled.csv --env production
    ```
 
-5. **Dry run**
+6. **Dry run**
    ```bash
-   python aspace_csv_import.py --create-records -n -f your_file_filled.csv
+   python aspace_csv_import.py --create-records -n -f your_file_filled.csv --env production
    ```
 
-6. **Run import**
+7. **Run import**
    ```bash
-   python aspace_csv_import.py --create-records -f your_file_filled.csv
+   python aspace_csv_import.py --create-records -f your_file_filled.csv --env production
    ```
 
-7. **Verify in ArchivesSpace**
+8. **Confirm what landed** *(after a minute - see below)*
+   ```bash
+   python aspace_csv_export.py --list your_file_filled.csv --env production
+   ```
+   Reads the catalog numbers straight from the sheet and shows each record
+   as stored, where it sits (`Path`), and any warnings.
 
 > **Rerunning after a run that created records:** wait a minute or two before
 > rerunning. The duplicate check uses ArchivesSpace's search index, which is

@@ -136,7 +136,7 @@ def get_colored_help():
     Imports item-level archival objects from CSV into ArchivesSpace:
     {C.GREEN}1.{C.RESET} Creates archival objects with metadata (titles, dates, extents, notes)
     {C.GREEN}2.{C.RESET} Links to parent objects via ref_id
-    {C.GREEN}3.{C.RESET} Creates top containers (AV Case) for each item
+    {C.GREEN}3.{C.RESET} Links each item to its AV Case top container (reused if one exists, else created)
 
 {C.BOLD}USAGE{C.RESET}
     {C.GREEN}${C.RESET} python3 aspace_csv_import.py (--create-records | --update-only) -f FILE [options]
@@ -155,9 +155,11 @@ def get_colored_help():
 {C.BOLD}CSV COLUMNS{C.RESET} {C.DIM}(all required for --create-records; --update-only accepts a subset){C.RESET}
     {", ".join(col.REQUIRED_COLUMNS[:5])},
     {", ".join(col.REQUIRED_COLUMNS[5:])}
+    {C.DIM}Other columns are ignored. A blank ASpace Parent RefID column can be filled first:{C.RESET}
+    {C.GREEN}${C.RESET} python3 aspace_csv_export.py --fill-parents FILE -o FILE_filled.csv
 
 {C.BOLD}OUTPUT{C.RESET}
-    Reports saved to: {C.CYAN}~/aspace_import_reports/{C.RESET} by default
+    Reports saved to: {C.CYAN}{OUTPUT_DIR}/{C.RESET}
     {C.DIM}Can be changed by setting logs_dir in creds.py{C.RESET}
 """
     return help_text

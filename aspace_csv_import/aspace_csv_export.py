@@ -72,7 +72,7 @@ from aspace_client import ASpaceClient
 # shows values the same way an update run would compare them.
 from aspace_csv_import import (Colors, print_status, print_header,
                                get_note_content, staff_link_for, RUN_COMMAND,
-                               parse_date)
+                               parse_date, render_options)
 
 # Batch size for id_set fetches - one API call per BATCH records instead of
 # one call per record, which is the difference between minutes and an hour
@@ -942,35 +942,102 @@ def run_fill_parents(sheet_path, out_path):
     return 0
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Export the AV resource's archival objects to an "
-                    "import-shaped CSV (round-trip with --update-only).")
+SELECT_OPTIONS = [
+    ("--level LEVEL", "", "Only records at this level: item (default), file, subseries, series... or all"),
+    ("--parent REFID", "", "Only the direct children of this record"),
+    ("--list FILE", "", "Exactly these catalog numbers (text, one per line, or a CSV with CATALOG_NUMBER); list order kept"),
+]
+FILL_OPTIONS = [
+    ("--fill-parents FILE", "", "Fill blank ASpace Parent RefID cells from EJS Episode + ASpace File Type; writes a new file"),
+]
+EXPORT_CLI_OPTIONS = [
+    ("--mads-live", "", "Add a MADS live column: Yes / No / check failed / invalid catalog number"),
+    ("-o, --output PATH", "", "Output CSV path (default: timestamped file in the reports folder)"),
+    ("--env NAME", "", "Target environment from creds.py (required when several are configured)"),
+]
+
+
+def get_colored_help():
+    """The -h screen, laid out like the importer's."""
+    C = Colors
+    return "\n" + f"""{C.BOLD}{C.CYAN}===============================================================================
+              ArchivesSpace CSV Export Script
+==============================================================================={C.RESET}
+
+{C.BOLD}DESCRIPTION{C.RESET}
+    Reads AV records from ArchivesSpace - never writes to it:
+    {C.GREEN}1.{C.RESET} Exports records to an import-shaped CSV, in tree order, with Level, Depth and Path
+    {C.GREEN}2.{C.RESET} Fills a sheet's blank ASpace Parent RefID column (--fill-parents)
+    {C.GREEN}3.{C.RESET} Checks whether exported records are live in MADS (--mads-live)
+
+{C.BOLD}USAGE{C.RESET}
+    {C.GREEN}${C.RESET} python3 aspace_csv_export.py [--level LEVEL | --parent REFID | --list FILE] [options]
+    {C.GREEN}${C.RESET} python3 aspace_csv_export.py --fill-parents FILE [-o PATH] [--env NAME]
+
+{C.BOLD}SELECT{C.RESET} {C.DIM}(what to export; default: every item-level record){C.RESET}
+{render_options(SELECT_OPTIONS)}
+
+{C.BOLD}FILL PARENTS{C.RESET} {C.DIM}(instead of an export){C.RESET}
+{render_options(FILL_OPTIONS)}
+
+{C.BOLD}OPTIONS{C.RESET}
+{render_options(EXPORT_CLI_OPTIONS)}
+
+{C.BOLD}EXAMPLES{C.RESET}
+    {C.GREEN}${C.RESET} python3 aspace_csv_export.py --level all --env production
+    {C.GREEN}${C.RESET} python3 aspace_csv_export.py --level item --mads-live --env production
+    {C.GREEN}${C.RESET} python3 aspace_csv_export.py --list batch.csv --env production
+    {C.GREEN}${C.RESET} python3 aspace_csv_export.py --fill-parents batch.csv -o batch_filled.csv --env production
+
+{C.BOLD}EXIT{C.RESET}
+    {C.GREEN}0{C.RESET}  done
+    {C.YELLOW}2{C.RESET}  file written but incomplete: parents left blank, listed numbers not found, or MADS checks failed
+    {C.RED}1{C.RESET}  failed - nothing written
+
+{C.BOLD}OUTPUT{C.RESET}
+    Reports saved to: {C.CYAN}{OUTPUT_DIR}/{C.RESET}
+    {C.DIM}Can be changed by setting logs_dir in creds.py{C.RESET}
+"""
+
+
+def build_parser():
+    """The exporter's command-line parser: same look as the importer's -
+    a styled -h screen, and on error the short usage plus option list."""
+    class CustomArgumentParser(argparse.ArgumentParser):
+        def format_usage(self):
+            C = Colors
+            usage = (f"\nusage: {self.prog} [--level LEVEL | --parent REFID | --list FILE "
+                     f"| --fill-parents FILE] [options]\n")
+            hint = f"       {C.DIM}Use -h or --help for detailed information{C.RESET}\n"
+            options = "\n" + "\n".join(render_options(group, indent="  ") for group in
+                                        (SELECT_OPTIONS, FILL_OPTIONS, EXPORT_CLI_OPTIONS)) + "\n"
+            return usage + hint + options
+
+        def format_help(self):
+            return "\n" + super().format_help()
+
+        def error(self, message):
+            self.print_usage(sys.stderr)
+            self.exit(2, f"\n{Colors.RED}error: {message}{Colors.RESET}\n")
+
+    parser = CustomArgumentParser(description=get_colored_help(),
+                                  formatter_class=argparse.RawDescriptionHelpFormatter,
+                                  add_help=False, usage=argparse.SUPPRESS)
+    parser.add_argument("-h", "--help", action="help", default=argparse.SUPPRESS,
+                        help=argparse.SUPPRESS)
     parser.add_argument("--level", default="item", choices=LEVELS, metavar="LEVEL",
-                        help="Only records at this level (default: item; "
-                             f"'all' for every level; one of: {', '.join(LEVELS)})")
-    parser.add_argument("--parent", metavar="REFID",
-                        help="Only direct children of this parent ref_id")
-    parser.add_argument("--list", metavar="FILE", dest="list_file",
-                        help="Export exactly these catalog numbers: plain "
-                             "text one per line, or any CSV with a "
-                             "CATALOG_NUMBER column (--level/--parent do "
-                             "not apply)")
-    parser.add_argument("--fill-parents", metavar="FILE", dest="fill_file",
-                        help="Fill the ASpace Parent RefID column of this sheet "
-                             "from its EJS Episode and ASpace File Type columns "
-                             "(adds Path and Parent Note; writes a new file, "
-                             "never edits FILE; Raw rows are left for a person)")
-    parser.add_argument("--mads-live", action="store_true",
-                        help="Check each record's public MADS URL and add a "
-                             "'MADS live' column (Yes / No / check failed / "
-                             "invalid catalog number)")
-    parser.add_argument("-o", "--output", metavar="PATH",
-                        help="Output CSV path (default: timestamped file "
-                             f"in {OUTPUT_DIR})")
-    parser.add_argument("--env", metavar="NAME",
-                        help="Target environment from creds.py (required "
-                             "when several are configured)")
+                        help=argparse.SUPPRESS)
+    parser.add_argument("--parent", metavar="REFID", help=argparse.SUPPRESS)
+    parser.add_argument("--list", metavar="FILE", dest="list_file", help=argparse.SUPPRESS)
+    parser.add_argument("--fill-parents", metavar="FILE", dest="fill_file", help=argparse.SUPPRESS)
+    parser.add_argument("--mads-live", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("-o", "--output", metavar="PATH", help=argparse.SUPPRESS)
+    parser.add_argument("--env", metavar="NAME", help=argparse.SUPPRESS)
+    return parser
+
+
+def main():
+    parser = build_parser()
     args = parser.parse_args()
 
     if args.list_file and args.parent:
