@@ -403,6 +403,13 @@ and any report can be matched to the run that wrote it):
 - `import_report_<stamp>.json` - the same receipt plus a summary block (counts, mode, environment, command, snapshot completeness) and per-row change details
 - `import_records_<stamp>.json` - the records as ArchivesSpace holds them after the run, read back after each write (archival object plus its top container), keyed by catalog number; not written for dry runs
 
+When comparing two records files (before and after an update, say), ignore
+`lock_version`, `system_mtime` and `user_mtime` on the nested dates, extents
+and instances: ArchivesSpace bumps them every time the record is saved, even
+when nothing in them changed. A title-only update shows up in a raw diff as
+changed dates, extents and instances; their content is identical. The run's
+own console and receipt report only the fields that actually changed.
+
 ## Utility Scripts
 
 ### csv_utils.py

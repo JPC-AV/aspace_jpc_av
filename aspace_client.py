@@ -163,6 +163,13 @@ STAFF_URL = ""
 _CLIENTS_CREATED = 0  # see select_environment()
 
 
+def console_logging() -> None:
+    """For read-only tools without a log file: show logged detail as an
+    indented, labelled line instead of Python's bare "ERROR:root:" default.
+    A no-op when logging is already configured (the importer's file log)."""
+    logging.basicConfig(level=logging.WARNING, format="      [log] %(message)s")
+
+
 def select_environment(name: str) -> None:
     """Activate one configured environment. Raises ValueError for an unknown
     name - callers surface that as a CLI error, nothing defaults.
@@ -290,6 +297,7 @@ class ASpaceClient:
         self.username = username or ASPACE_USERNAME or ""
         self.password = password or ASPACE_PASSWORD or ""
         self.session_token = None
+        self.login_problem = None  # why the last login() failed, for tools to print
         # One connection reused for every call (keep-alive) - no fresh TCP+TLS
         # handshake per request, which matters over the VPN.
         self.http = requests.Session()
@@ -299,38 +307,42 @@ class ASpaceClient:
         self.last_failure_definitive = True
 
     # -- session ------------------------------------------------------------
+    def _login_failed(self, problem: str, detail: str = None) -> bool:
+        """Record why login failed, in words a person can act on, and log the
+        technical detail. Tools print `login_problem`; the log keeps the rest."""
+        self.login_problem = problem
+        logging.error(detail or problem)
+        return False
+
     def login(self) -> bool:
+        self.login_problem = None
         # An unconfigured client must refuse to operate: with REPO_ID or
         # RESOURCE_ID unset the scope locks would compare against None and
         # fail OPEN (None == None), which is worse than not running at all.
         if not (self.base_url and REPO_ID and RESOURCE_URI):
-            logging.error("Refusing to operate: creds.py must set baseURL, "
-                          "repo_id and resource_id (see creds_template.py)")
-            return False
+            return self._login_failed("creds.py must set baseURL, repo_id and resource_id "
+                                      "(see creds_template.py)")
         # Shape check, not just presence: a copied-but-unedited template
         # (baseURL="URL", repo_id="number") is truthy and would otherwise die
         # later with a confusing network error instead of this message.
         if not (isinstance(self.base_url, str)
                 and self.base_url.startswith(("http://", "https://"))
                 and str(REPO_ID).isdigit() and str(RESOURCE_ID).isdigit()):
-            logging.error("Refusing to operate: creds.py looks unconfigured - "
-                          "baseURL must be an http(s) URL and repo_id/"
-                          "resource_id must be numeric (see creds_template.py)")
-            return False
+            return self._login_failed("creds.py looks unconfigured - baseURL must be an "
+                                      "http(s) URL and repo_id/resource_id must be numeric "
+                                      "(see creds_template.py)")
         # The template ships with a real sandbox URL and placeholder
         # credentials - catch those here rather than as a bare auth failure.
         if not (isinstance(self.username, str) and isinstance(self.password, str)):
-            logging.error("Refusing to operate: username and password in creds.py must "
-                          f"be strings (got {type(self.username).__name__} / "
-                          f"{type(self.password).__name__})")
-            return False
+            return self._login_failed("the username and password in creds.py must be text "
+                                      f"(got {type(self.username).__name__} / "
+                                      f"{type(self.password).__name__})")
         if (not self.username or not self.password
                 or self.username in _PLACEHOLDER_CREDS
                 or self.password in _PLACEHOLDER_CREDS):
-            logging.error("Refusing to operate: creds.py still has the template "
-                          "placeholder username/password - fill in your own "
-                          "(see creds_template.py)")
-            return False
+            return self._login_failed("creds.py still has the template placeholder "
+                                      "username/password - fill in your own "
+                                      "(see creds_template.py)")
         # Fresh attempt: drop any stale token so a failed re-login can't
         # leave a dead session header installed on the connection.
         self.session_token = None
@@ -343,24 +355,36 @@ class ASpaceClient:
                 allow_redirects=False,
             )
         except requests.RequestException as e:
-            logging.error(f"Authentication error: {e}")
-            return False
+            # Name the likely cause: a network outage or a dropped VPN reads
+            # as "authentication failed" otherwise, sending people to check
+            # a password that was never even sent.
+            host = self.base_url.split("//", 1)[-1].split("/", 1)[0]
+            if isinstance(e, getattr(requests, "Timeout", ())):
+                problem = (f"{host} did not respond within {TIMEOUT}s - check the "
+                           f"network or VPN")
+            elif isinstance(e, getattr(requests, "ConnectionError", ())):
+                problem = f"could not reach {host} - check the network or VPN"
+            else:
+                problem = f"could not connect to {host} ({type(e).__name__})"
+            return self._login_failed(problem, f"Login error: {e}")
+        if response.status_code in (401, 403):
+            return self._login_failed(
+                f"the server refused the username/password for this environment "
+                f"(HTTP {response.status_code}) - check creds.py",
+                f"Login failed: {response.status_code} - {response.text}")
         if response.status_code != 200:
-            logging.error(f"Authentication failed: {response.status_code} - {response.text}")
-            return False
+            return self._login_failed(
+                f"login failed with HTTP {response.status_code}",
+                f"Login failed: {response.status_code} - {response.text}")
         try:
             payload = response.json()
         except ValueError:
-            logging.error("Authentication failed: 200 response was not valid JSON")
-            return False
+            return self._login_failed("the login response was not valid JSON")
         if not isinstance(payload, dict):
-            logging.error("Authentication failed: 200 response was not a JSON object")
-            return False
+            return self._login_failed("the login response was not a JSON object")
         token = payload.get("session")
         if not isinstance(token, str) or not token:
-            logging.error("Authentication failed: 200 response but no usable session "
-                          "token in body")
-            return False
+            return self._login_failed("the login response carried no usable session token")
         self.session_token = token
         self.http.headers["X-ArchivesSpace-Session"] = token
         logging.info("Successfully authenticated with ArchivesSpace")

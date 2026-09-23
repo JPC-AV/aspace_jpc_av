@@ -993,7 +993,7 @@ def run_fill_parents(sheet_path, out_path):
     client = ASpaceClient()
     print_status("info", f"Connecting to {aspace_client.ASPACE_URL}...")
     if not client.login():
-        print_status("error", "Authentication failed")
+        print_status("error", f"Could not log in: {client.login_problem}")
         return 1
     print_status("success", "Authenticated")
     try:
@@ -1120,6 +1120,7 @@ def build_parser():
 
 
 def main():
+    aspace_client.console_logging()  # labelled detail, not a bare ERROR:root line
     parser = build_parser()
     args = parser.parse_args()
 
@@ -1175,7 +1176,7 @@ def main():
     client = ASpaceClient()
     print_status("info", f"Connecting to {aspace_client.ASPACE_URL}...")
     if not client.login():
-        print_status("error", "Authentication failed")
+        print_status("error", f"Could not log in: {client.login_problem}")
         sys.exit(1)
     print_status("success", "Authenticated")
 

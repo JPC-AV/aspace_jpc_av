@@ -1235,7 +1235,7 @@ def main():
     # (Always needed - even --no-update requires ASpace lookup for ref_id)
     client = ASpaceClient()
     if not client.login():
-        logging.error("Authentication failed! Exiting the script.")
+        logging.error(f"Could not log in: {client.login_problem}. Exiting the script.")
         sys.exit(1)  # pre-loop failure - nothing was processed
 
     # Log successful login

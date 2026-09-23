@@ -1769,7 +1769,8 @@ def process_csv_file_update_only(filename: str, client: ArchivesSpaceClient,
                                          uri=resolved[row_num],
                                          ref_id=ao_result.get('ref_id'))
             elif ao_result:
-                message = f"Updated: {', '.join(changes.keys())}" if changes else "Updated"
+                verb = "Would update" if dry_run else "Updated"
+                message = f"{verb}: {', '.join(changes.keys())}" if changes else verb
                 result = make_row_result(row_num, row, "updated", message,
                                          uri=resolved[row_num], changes=changes,
                                          ref_id=ao_result.get('ref_id'))
@@ -2193,11 +2194,15 @@ def print_summary(summary: Dict, elapsed_time: str = None):
     skipped = summary['skipped']
     
     print(f"  Total Rows:    {total}")
-    
+
+    # A dry run writes nothing: say what WOULD happen, never "Created".
+    dry = summary.get('dry_run', False)
     if created > 0:
-        print(f"  {Colors.GREEN}Created:{Colors.RESET}       {created}")
+        label = "Would create:" if dry else "Created:"
+        print(f"  {Colors.GREEN}{label}{Colors.RESET}{' ' * (15 - len(label))}{created}")
     if updated > 0:
-        print(f"  {Colors.BLUE}Updated:{Colors.RESET}       {updated}")
+        label = "Would update:" if dry else "Updated:"
+        print(f"  {Colors.BLUE}{label}{Colors.RESET}{' ' * (15 - len(label))}{updated}")
     if unchanged > 0:
         print(f"  {Colors.DIM}Unchanged:{Colors.RESET}     {unchanged}")
     if skipped > 0:
@@ -2548,7 +2553,7 @@ def main():
     # Authenticate
     print_status("info", f"Connecting to {aspace_client.ASPACE_URL}...")
     if not client.login():
-        print_status("error", "Authentication failed")
+        print_status("error", f"Could not log in: {client.login_problem}")
         sys.exit(1)
     print_status("success", "Authenticated")
     

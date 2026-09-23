@@ -411,7 +411,7 @@ def check_parent_refs(parent_refs: List[str], url: str = None, username: str = N
     client = ASpaceClient(username, password)
     print_status("info", f"Connecting to {aspace_client.ASPACE_URL}...")
     if not client.login():
-        print_status("error", "Authentication failed (see log)")
+        print_status("error", f"Could not log in: {client.login_problem}")
         return results
     print_status("success", "Authenticated")
 
@@ -642,6 +642,7 @@ def run_validation(csv_file: str, update_only: bool = False):
 
 def main():
     """Main utility function."""
+    aspace_client.console_logging()  # labelled detail, not a bare ERROR:root line
     
     # Custom ArgumentParser for cleaner usage and colored errors
     class CustomArgumentParser(argparse.ArgumentParser):

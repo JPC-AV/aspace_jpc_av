@@ -159,7 +159,7 @@ def get_extent_types(username=None, password=None):
     client = ArchivesSpaceClient(username, password)
     print_status("info", f"Connecting to {aspace_client.ASPACE_URL}...")
     if not client.login():
-        print_status("error", "Authentication failed - check VPN, then the username/password in creds.py")
+        print_status("error", f"Could not log in: {client.login_problem}")
         return None
     print_status("success", "Authenticated")
 
@@ -215,6 +215,7 @@ def check_csv_values(csv_file):
 
 def main():
     """Main function."""
+    aspace_client.console_logging()  # labelled detail, not a bare ERROR:root line
     
     # Custom ArgumentParser for cleaner usage and colored errors
     class CustomArgumentParser(argparse.ArgumentParser):
