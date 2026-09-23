@@ -151,7 +151,7 @@ columns to change). The last two rows are read only by
 | Column | Description | Value required? | Example |
 |--------|-------------|----------|---------|
 | CATALOG_NUMBER | Component Unique Identifier | Yes | JPC_AV_00012 |
-| ASpace Title | Item title | No* | Ebony/Jet Celebrity Showcase |
+| ASpace Title | Item title, no date (see the manual's title rules) | No* | Ebony/Jet Celebrity Showcase, Episode 22, Promo |
 | Creation or Recording Date | Creation date (M/D/YYYY or M/D/YY, or ISO YYYY-MM-DD / YYYY-MM / YYYY) | No | 8/1/1982 |
 | Edit Date | Edit/modified date (same formats) | No | 8/2/1982 |
 | Broadcast Date | Broadcast date (same formats) | No | 9/1/1982 |

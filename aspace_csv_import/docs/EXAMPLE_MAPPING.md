@@ -8,7 +8,7 @@ after digitization. The rules behind each field are in
 
 ```
 CATALOG_NUMBER: JPC_AV_00012
-ASpace Title: Ebony/Jet Celebrity Showcase, episode 22, promo
+ASpace Title: Ebony/Jet Celebrity Showcase, Episode 22, Promo
 Creation or Recording Date: 8/1/1982
 Edit Date: [empty]
 Broadcast Date: [empty]
@@ -51,7 +51,7 @@ is reused. Otherwise this one is created first:
   "parent": {"ref": "/repositories/2/archival_objects/12345"},
   "level": "item",
   "publish": true,
-  "title": "Ebony/Jet Celebrity Showcase, episode 22, promo",
+  "title": "Ebony/Jet Celebrity Showcase, Episode 22, Promo",
   "component_id": "JPC_AV_00012",
   "dates": [
     {
@@ -181,7 +181,7 @@ An unchanged row is reported as "No changes needed" and not written.
 
 ### Basic Information
 - **Level:** Item
-- **Title:** Ebony/Jet Celebrity Showcase, episode 22, promo
+- **Title:** Ebony/Jet Celebrity Showcase, Episode 22, Promo
 - **Component Unique ID:** JPC_AV_00012
 
 ### Dates
