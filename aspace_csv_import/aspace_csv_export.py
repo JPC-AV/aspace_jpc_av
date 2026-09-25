@@ -173,7 +173,7 @@ def build_row(record, parent_refid, depth=0, path=""):
             warnings.append(f"'{label}' date {row[column]} is outside {lo}-{hi} - check it "
                             f"(--update-only keeps it only if unchanged)")
         if len(matching) > 1:
-            warnings.append(f"{len(matching)} '{label}' dates")
+            warnings.append(f"{len(matching)} '{label}' dates - --update-only will refuse to change them")
         elif matching and (matching[0].get("end")
                            or matching[0].get("date_type") != "single"):
             # a range (or a non-single/untyped date): a one-value CSV cell
@@ -185,7 +185,7 @@ def build_row(record, parent_refid, depth=0, path=""):
     extents = record.get("extents") or []
     row[col.ORIGINAL_FORMAT] = (extents[0].get("extent_type") or "") if extents else ""
     if len(extents) > 1:
-        warnings.append(f"{len(extents)} extents")
+        warnings.append(f"{len(extents)} extents - --update-only will refuse to change Original Format")
 
     notes = record.get("notes") or []
     # (Multiple same-type notes are NOT flagged: --update-only edits the
@@ -1234,9 +1234,7 @@ def main():
                              f"Level column) - --update-only edits items only, so those "
                              f"rows are for reference, not re-import")
     if flagged:
-        print_status("warning", f"{flagged} record(s) have Warnings - metadata gaps "
-                                f"(no component ID/title/date) or structures "
-                                f"--update-only will refuse to edit:")
+        print_status("warning", f"{flagged} record(s) have Warnings:")
         for r in rows:
             others = _other_warnings(r)
             if others:
