@@ -178,9 +178,9 @@ def build_row(record, parent_refid, depth=0, path=""):
                            or matching[0].get("date_type") != "single"):
             # a range (or a non-single/untyped date): a one-value CSV cell
             # cannot express it, so --update-only will refuse to change it
-            shape = ("with an end date" if matching[0].get("end")
-                     else f"date_type {matching[0].get('date_type') or 'missing'}")
-            warnings.append(f"'{label}' date is {shape} - --update-only will refuse to change it")
+            shape = ("has an end date" if matching[0].get("end")
+                     else f"has date_type {matching[0].get('date_type') or 'missing'}")
+            warnings.append(f"'{label}' date {shape} - --update-only will refuse to change it")
 
     extents = record.get("extents") or []
     row[col.ORIGINAL_FORMAT] = (extents[0].get("extent_type") or "") if extents else ""
