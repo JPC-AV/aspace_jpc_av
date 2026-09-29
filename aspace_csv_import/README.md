@@ -490,9 +490,12 @@ Duplicate non-episode subseries titles, such as `Season 1` or `Cosmetics`,
 do not block filling; this is not a resource-wide subseries naming policy.
 A value already in the sheet is never replaced. `Raw` rows are always left
 for a person, because a tape in a multi-tape set goes under that set's own
-file record. The result is a new file (name it with `-o`; yours is never
-edited) and it is the file the rest of the workflow uses. Exit code 2 means
-some rows still need a parent.
+file record. The sheet itself is never edited: the fill writes two new files
+beside it, `your_file_ready.csv` (the parent-ready rows - the file the rest
+of the workflow uses) and `your_file_review.csv` (the rows left for a person,
+with a `Fix in` column saying where to look first). It refuses to run if
+either already exists, and `-o` does not apply. Exit code 2 means some rows
+are in the review file - expected, and both files are written.
 `--list` accepts a plain text file (one number per line) or any CSV with a
 `CATALOG_NUMBER` column. Files land in `~/aspace_import_reports/` by default
 (`<logs_dir>/export_reports/` when `logs_dir` is set) with a `# command`
@@ -516,59 +519,70 @@ the last two are never evidence of absence.
 Commands that talk to ArchivesSpace take `--env` when more than one
 environment is configured; use `--env sandbox` for a trial run.
 
-1. **Export the batch from Airtable** with the nine import columns plus
-   `ASpace File Type` and `EJS Episode` (see [CSV File Format](#csv-file-format)).
-   Keep `EJS Episode` filled: without it the fill has to read the episode
-   from each title, which then has to follow the title pattern exactly.
+> A fuller, step-by-step version of this workflow is coming with the next
+> round of changes to these tools. The steps below are current.
 
-2. **Fill parent ref_ids** *(if the sheet's `ASpace Parent RefID` column is blank)*
+1. **Make the batch's view in Airtable** - a grid view in
+   `<<< ASpace_import >>>` holding only items not yet in ArchivesSpace
+   (filter out rows whose `ASpace Item Record Created` is Yes), with the nine
+   import columns plus `ASpace File Type` and `EJS Episode` visible (see
+   [CSV File Format](#csv-file-format)). Keep `EJS Episode` filled: without
+   it the fill has to read the episode from each title, which then has to
+   follow the title pattern exactly.
+
+2. **Pull the view to a CSV** (read-only; needs `airtable_pat_read_only`
+   in `creds.py`)
    ```bash
-   python aspace_csv_export.py --fill-parents your_file.csv -o your_file_filled.csv --env production
+   python airtable_pull.py VIEW_NAME
    ```
-   Every later step uses the filled file. If the parents are already filled
-   and you skip this step, use your original filename throughout. Rows the
-   tool could not resolve are listed on the console and in the `Parent Note`
-   column. Mark them in Airtable as needing a parent and remove them from
-   this batch: a create run refuses the whole sheet if any row's parent is
-   blank. Before one returns in a later batch, resolve it as its
-   `Parent Note` says:
+   Writes `__airtable_exports__/VIEW_NAME_<YYYYMMDD_HHMM>.csv`. Leave it as
+   pulled; if the view changes, pull again and use only the new file.
+
+3. **Fill parent ref_ids**
+   ```bash
+   python aspace_csv_export.py --fill-parents __airtable_exports__/VIEW_NAME_<stamp>.csv --env production
+   ```
+   Writes `..._ready.csv` and `..._review.csv` beside the pull (see
+   [aspace_csv_export.py](#aspace_csv_exportpy)). Every later step uses the
+   **ready** file. Review rows are fixed in Airtable - or, when `Fix in`
+   says so and Airtable's values are right, in the ArchivesSpace hierarchy -
+   and come back in a later pull:
    - **Raw** - a person chooses the parent: *Raw* itself for an independent
      tape, or the set's own file record beneath Raw for a tape in a set.
+     Enter it in Airtable's `ASpace Parent RefID`.
+   - **TBD or several episodes** - enter the parent in Airtable, or leave
+     the row for later.
    - **Several matching records, or a supplied parent that disagrees** -
      sort out which record is right.
-   - **Episode or file record not found** - it is created first.
+   - **Episode or file record not found** - check Airtable's episode and
+     file type first; if they are right, the record is created first.
 
-3. **Validate CSV**
+4. **Dry run** - checks every row before anything is written (new catalog
+   number, parent exists, valid format, unambiguous container)
    ```bash
-   python csv_utils.py --validate your_file_filled.csv
+   python aspace_csv_import.py --create-records -n -f __airtable_exports__/VIEW_NAME_<stamp>_ready.csv --env production
    ```
 
-4. **Check parent ref_ids exist**
+5. **Run import** - the same file and flags, without `-n`
    ```bash
-   python csv_utils.py --parents your_file_filled.csv --env production
+   python aspace_csv_import.py --create-records -f __airtable_exports__/VIEW_NAME_<stamp>_ready.csv --env production
    ```
 
-5. **Verify extent types**
+6. **Record the results in Airtable** - promptly, from the run's JSON report
+   (`import_report_<stamp>.json`, same stamp as the `import_records_...json`
+   the summary names). Needs `airtable_pat_read_only` and
+   `airtable_pat_write` in `creds.py`.
    ```bash
-   python check_extent_types.py your_file_filled.csv --env production
+   python airtable_writeback.py <reports>/import_report_<stamp>.json --run
    ```
+   Reads Airtable, shows the plan, and writes only after you type `yes`:
+   each created row's parent into `ASpace Parent RefID` and
+   `ASpace Item Record Created` = Yes. Without `--run` it only previews.
+   `--exclude-catalog NUM` leaves out a record deleted since the import.
 
-6. **Dry run**
-   ```bash
-   python aspace_csv_import.py --create-records -n -f your_file_filled.csv --env production
-   ```
-
-7. **Run import**
-   ```bash
-   python aspace_csv_import.py --create-records -f your_file_filled.csv --env production
-   ```
-
-8. **Confirm what landed** *(after a minute - see below)*
-   ```bash
-   python aspace_csv_export.py --list your_file_filled.csv --env production
-   ```
-   Reads the catalog numbers straight from the sheet and shows each record
-   as stored, where it sits (`Path`), and any warnings.
+`csv_utils.py --validate` / `--parents` and `check_extent_types.py` remain
+available for troubleshooting a sheet; the dry run already runs the same
+checks.
 
 > **Rerunning after a run that created records:** wait a minute or two before
 > rerunning. The duplicate check uses ArchivesSpace's search index, which is

@@ -156,7 +156,7 @@ def get_colored_help():
     {", ".join(col.REQUIRED_COLUMNS[:5])},
     {", ".join(col.REQUIRED_COLUMNS[5:])}
     {C.DIM}Other columns are ignored. A blank ASpace Parent RefID column can be filled first:{C.RESET}
-    {C.GREEN}${C.RESET} python3 aspace_csv_export.py --fill-parents FILE -o FILE_filled.csv
+    {C.GREEN}${C.RESET} python3 aspace_csv_export.py --fill-parents FILE --env production   # writes FILE_ready.csv + FILE_review.csv
 
 {C.BOLD}OUTPUT{C.RESET}
     Reports saved to: {C.CYAN}{OUTPUT_DIR}/{C.RESET}

@@ -547,6 +547,26 @@ def episode_from_title(title):
     return UNCLEAR, shown
 
 
+def episode_cell_rule(cell):
+    """(value, note) for an EJS Episode cell, before any lookup.
+
+    Airtable's EJS Episode is a single select whose options include TBD and
+    several-episode lists ("14, 15"). Neither names one episode, so the row
+    is left for a person with a note - a deliberate rule, not the result of
+    a failed lookup, and never overridden by the title. One pair of wrapping
+    quotes is dropped first: Airtable's Download CSV writes a comma-holding
+    option as '"14, 15"'. note is None for an ordinary value."""
+    value = (cell or "").strip()
+    if len(value) >= 2 and value[0] == value[-1] == '"':
+        value = value[1:-1].strip()
+    if value.casefold() == "tbd":
+        return value, f"{col.EJS_EPISODE} is TBD - fill it once the episode is known"
+    if "," in value:
+        return value, (f"{col.EJS_EPISODE} {value!r} names more than one episode - "
+                       f"choose the parent by hand")
+    return value, None
+
+
 RAW_NOTE = ("Raw: fill by hand - a multi-tape set goes under its own file "
             "record beneath Raw")
 
@@ -698,7 +718,9 @@ def fill_parents(rows, index, episodes):
     """Fill each row's parent ref_id, Path and Parent Note in place.
 
     The episode comes from EJS Episode, or from the title when that cell is
-    blank ("..., Episode 4006, ..."); when both are present they must agree,
+    blank ("..., Episode 4006, ..."). An EJS Episode of TBD or a list
+    ("14, 15") is left for a person outright - no title fallback, no lookup
+    (episode_cell_rule). When both are present they must agree,
     or the row is left blank - a typo in either must not pick a parent.
     Exactly one matching file record fills the cell; anything else leaves it
     blank with the reason in Parent Note - never a guess. A value already in
@@ -712,15 +734,20 @@ def fill_parents(rows, index, episodes):
     for row_num, row in enumerate(rows, 1):
         existing = (row.get(col.PARENT_REFID) or "").strip()
         file_type = (row.get(col.FILE_TYPE) or "").strip()
-        episode_cell = (row.get(col.EJS_EPISODE) or "").strip()
-        key = episode_key(episode_cell)
-        title_key, title_text = episode_from_title(row.get(col.TITLE))
-        from_title = key is None and title_key not in (None, UNCLEAR)
-        if from_title:
-            key, episode_cell = title_key, title_text.split(None, 1)[1]
+        episode_cell, cell_note = episode_cell_rule(row.get(col.EJS_EPISODE))
+        if cell_note:
+            key, title_key, title_text, from_title = None, None, "", False
+        else:
+            key = episode_key(episode_cell)
+            title_key, title_text = episode_from_title(row.get(col.TITLE))
+            from_title = key is None and title_key not in (None, UNCLEAR)
+            if from_title:
+                key, episode_cell = title_key, title_text.split(None, 1)[1]
         found, path, note = "", "", ""
         conflict = False  # needs review even when the sheet already has a parent
-        if key is not None and title_key not in (None, UNCLEAR) and key != title_key:
+        if cell_note:
+            note = cell_note
+        elif key is not None and title_key not in (None, UNCLEAR) and key != title_key:
             # compared whatever the kind (4006 vs "pilot" disagrees too), and
             # before the Raw rule: a Raw row can contradict itself as well
             note = (f"{col.EJS_EPISODE} {episode_cell} and the title's {title_text!r} "
@@ -775,13 +802,21 @@ def fill_parents(rows, index, episodes):
     return filled, kept, unresolved
 
 
-def write_filled_csv(headers, rows, path, provenance=None):
+FIX_IN = "Fix in"  # review file only: where a row's problem gets fixed
+
+
+def write_filled_csv(headers, rows, path, provenance=None, extra_columns=()):
     """The input sheet, column order kept, with Path and Parent Note added
-    (after the parent column) when the sheet did not already carry them.
-    Atomic, provenance first line - same as every export."""
+    (after the parent column) when the sheet did not already carry them,
+    plus any extra_columns after Parent Note. Atomic, provenance first
+    line - same as every export."""
     fieldnames = list(headers)
     at = fieldnames.index(col.PARENT_REFID) + 1
     for extra in (col.PARENT_NOTE, "Path"):
+        if extra not in fieldnames:
+            fieldnames.insert(at, extra)
+    at = fieldnames.index(col.PARENT_NOTE) + 1
+    for extra in reversed(extra_columns):
         if extra not in fieldnames:
             fieldnames.insert(at, extra)
     tmp_path = path + ".tmp"
@@ -982,10 +1017,46 @@ def write_export_csv(rows, path, extra_headers=(), provenance=None):
     os.replace(tmp_path, path)
 
 
-def run_fill_parents(sheet_path, out_path):
-    """--fill-parents end to end. Returns the exit code: 0 when every row
-    has a parent, 2 when some were left for a person (the file is accurate
-    but not complete), 1 on failure (nothing written)."""
+def fill_output_paths(sheet_path):
+    """(ready, review): <sheet>_ready.csv and <sheet>_review.csv beside the
+    sheet. The pulled file itself is never touched."""
+    stem = os.path.join(os.path.dirname(sheet_path) or ".",
+                        os.path.splitext(os.path.basename(sheet_path))[0])
+    return f"{stem}_ready.csv", f"{stem}_review.csv"
+
+
+def fix_in(note):
+    """Where to look first for a review row. "Airtable" when the sheet
+    itself needs a person (TBD, several episodes, Raw, a conflict): enter
+    the parent or correct the episode, then pull again. When the lookup
+    found nothing, or too much, in ArchivesSpace, the cause may still be an
+    Airtable typo (episode, file type) - so check Airtable first, and fix
+    the ArchivesSpace hierarchy only if Airtable's value is right."""
+    if ("in ArchivesSpace" in note or "records match" in note
+            or "has no ref_id" in note):
+        return "Airtable, then ArchivesSpace"
+    return "Airtable"
+
+
+def split_filled(rows, filled, unresolved):
+    """(ready, review, counts) from fill_parents' results. The split follows
+    the explicit unresolved list - never the note text or a blank cell.
+    counts: ready rows whose parent came from the lookup vs. was already in
+    the sheet (a person's value, taken as given)."""
+    review_nums = {row_num for row_num, _, _ in unresolved}
+    ready = [r for i, r in enumerate(rows, 1) if i not in review_nums]
+    review = [r for i, r in enumerate(rows, 1) if i in review_nums]
+    for r in review:
+        r[FIX_IN] = fix_in(r.get(col.PARENT_NOTE) or "")
+    return ready, review, {"by lookup": filled, "supplied": len(ready) - filled}
+
+
+def run_fill_parents(sheet_path, ready_path, review_path):
+    """--fill-parents end to end: writes the parent-ready rows and the rows
+    for review as two files. Returns the exit code: 0 when every row is
+    parent-ready, 2 when some are for review (expected - both files are
+    written), 1 on failure - nothing written, except when the ready file
+    fails after the review file was written (the message then says so)."""
     headers, rows, problem = read_fill_sheet(sheet_path)  # before any network work
     if rows is None:
         print_status("error", problem)
@@ -1006,19 +1077,33 @@ def run_fill_parents(sheet_path, out_path):
         print_status("error", f"Hierarchy problem: {reason}")
         return 1
     filled, kept, unresolved = fill_parents(rows, index, episodes)
+    ready, review, counts = split_filled(rows, filled, unresolved)
     provenance = (f"{RUN_COMMAND} | target: {aspace_client.ACTIVE_ENV} | "
                   f"{datetime.now().strftime('%Y-%m-%d %H:%M')}")
-    write_filled_csv(headers, rows, out_path, provenance)
-    print_status("success", f"Wrote {len(rows)} row(s) to: {out_path}")
-    print_status("info", f"{filled} parent(s) filled, {kept} already in the sheet, "
-                         f"{len(unresolved)} left for a person")
-    if unresolved:
-        print_status("warning", "Rows without a filled parent (see the Parent Note column):")
-        for row_num, catalog, note in unresolved:
-            print_status("warning", f"row {row_num} {catalog or '(no catalog number)'}: {note}",
-                         indent=1)
-        return 2
-    return 0
+    # review first, ready last: a ready file never appears without its pair
+    try:
+        write_filled_csv(headers, review, review_path, provenance, extra_columns=(FIX_IN,))
+    except OSError as e:
+        print_status("error", f"Could not write {review_path}: {e} - nothing written")
+        return 1
+    try:
+        write_filled_csv(headers, ready, ready_path, provenance)
+    except OSError as e:
+        print_status("error", f"Could not write {ready_path}: {e} - the pair is incomplete; "
+                              f"delete {review_path} and run the fill again")
+        return 1
+    print_status("success", f"Parent-ready: {len(ready)} row(s) -> {ready_path}")
+    print_status("info", f"{counts['by lookup']} filled by lookup, {counts['supplied']} "
+                         f"already in the sheet (a person's value, used as given)", indent=1)
+    if not review:
+        print_status("success", f"For review: 0 rows -> {review_path}")
+        return 0
+    print_status("warning", f"For review: {len(review)} row(s) -> {review_path} "
+                            f"(see the Parent Note and {FIX_IN} columns)")
+    for row_num, catalog, note in unresolved:
+        print_status("warning", f"row {row_num} {catalog or '(no catalog number)'}: {note}",
+                     indent=1)
+    return 2
 
 
 SELECT_OPTIONS = [
@@ -1027,12 +1112,14 @@ SELECT_OPTIONS = [
     ("--list FILE", "", "Exactly these catalog numbers (text, one per line, or a CSV with CATALOG_NUMBER); list order kept"),
 ]
 FILL_OPTIONS = [
-    ("--fill-parents FILE", "", "Fill blank ASpace Parent RefID cells from EJS Episode + ASpace File Type; writes a new file"),
+    ("--fill-parents FILE", "", "Fill blank ASpace Parent RefID cells from EJS Episode + ASpace File Type"),
     ("", "", "(keep EJS Episode filled - a blank cell falls back to the title, which must then follow the pattern)"),
+    ("", "", "Writes FILE_ready.csv (import this) and FILE_review.csv (rows needing a person) beside FILE;"),
+    ("", "", "never overwrites either - FILE itself is left untouched"),
 ]
 EXPORT_CLI_OPTIONS = [
     ("--mads-live", "", "Add a MADS live column: Yes / No / check failed / invalid catalog number"),
-    ("-o, --output PATH", "", "Output CSV path (default: timestamped file in the reports folder)"),
+    ("-o, --output PATH", "", "Export CSV path (default: timestamped file in the reports folder)"),
     ("--env NAME", "", "Target environment from creds.py (required when several are configured)"),
 ]
 
@@ -1053,7 +1140,7 @@ def get_colored_help():
 {C.BOLD}USAGE{C.RESET}
     {C.GREEN}${C.RESET} python3 aspace_csv_export.py [--level LEVEL] [--parent REFID] [options]
     {C.GREEN}${C.RESET} python3 aspace_csv_export.py --list FILE [options]
-    {C.GREEN}${C.RESET} python3 aspace_csv_export.py --fill-parents FILE [-o PATH] [--env NAME]
+    {C.GREEN}${C.RESET} python3 aspace_csv_export.py --fill-parents FILE [--env NAME]
 
 {C.BOLD}SELECT{C.RESET} {C.DIM}(what to export; default: every item-level record){C.RESET}
 {render_options(SELECT_OPTIONS)}
@@ -1068,13 +1155,14 @@ def get_colored_help():
     {C.GREEN}${C.RESET} python3 aspace_csv_export.py --level all --env production
     {C.GREEN}${C.RESET} python3 aspace_csv_export.py --level item --mads-live --env production
     {C.GREEN}${C.RESET} python3 aspace_csv_export.py --list batch.csv --env production
-    {C.GREEN}${C.RESET} python3 aspace_csv_export.py --fill-parents batch.csv -o batch_filled.csv --env production
+    {C.GREEN}${C.RESET} python3 aspace_csv_export.py --fill-parents batch.csv --env production      {C.DIM}# batch_ready.csv + batch_review.csv{C.RESET}
 
 {C.BOLD}EXIT{C.RESET}
     {C.GREEN}0{C.RESET}  done
-    {C.YELLOW}2{C.RESET}  file written but incomplete: parents left blank, listed numbers not found, or MADS checks failed
+    {C.YELLOW}2{C.RESET}  written but incomplete: rows for review (--fill-parents, expected), listed numbers not found, or MADS checks failed
        (also a bad argument or a creds.py problem - then nothing is written)
-    {C.RED}1{C.RESET}  failed - nothing written
+    {C.RED}1{C.RESET}  failed - nothing written (a fill whose ready file fails after its review file
+       was written says so, and names the review file to delete)
 
 {C.BOLD}OUTPUT{C.RESET}
     Reports saved to: {C.CYAN}{OUTPUT_DIR}/{C.RESET}
@@ -1090,7 +1178,7 @@ def build_parser():
             C = Colors
             usage = (f"\nusage: {self.prog} [--level LEVEL] [--parent REFID] [options]\n"
                      f"       {self.prog} --list FILE [options]\n"
-                     f"       {self.prog} --fill-parents FILE [-o PATH] [--env NAME]\n")
+                     f"       {self.prog} --fill-parents FILE [--env NAME]\n")
             hint = f"       {C.DIM}Use -h or --help for detailed information{C.RESET}\n"
             options = "\n" + "\n".join(render_options(group, indent="  ") for group in
                                         (SELECT_OPTIONS, FILL_OPTIONS, EXPORT_CLI_OPTIONS)) + "\n"
@@ -1131,6 +1219,9 @@ def main():
                            or args.level != "item"):
         parser.error("--fill-parents fills a sheet's parent column - it cannot be "
                      "combined with --list, --parent, --level or --mads-live")
+    if args.fill_file and args.output:
+        parser.error("--fill-parents always writes FILE_ready.csv and FILE_review.csv "
+                     "beside FILE - -o does not apply")
 
     # Environment selection: same contract as every other tool - auto with
     # one configured, explicit --env with several, no default.
@@ -1148,15 +1239,27 @@ def main():
                      or "no environments configured in creds.py (see creds_template.py)")
 
     stamp = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{os.getpid()}"
-    default_name = (f"parents_filled_{aspace_client.ACTIVE_ENV}_{stamp}.csv" if args.fill_file
-                    else f"aspace_export_{aspace_client.ACTIVE_ENV}_{stamp}.csv")
-    out_path = col.resolve_output_path(args.output, OUTPUT_DIR, default_name)
-
-    for input_file in (args.list_file, args.fill_file):
-        if input_file:
-            problem = clobber_problem(input_file, out_path)
+    if args.fill_file:
+        # Both handoff files sit beside the pulled sheet and are never
+        # overwritten: if either exists, nothing is written at all.
+        fill_paths = fill_output_paths(args.fill_file)
+        existing = [p for p in fill_paths if os.path.lexists(p)]  # a dangling symlink too
+        if existing:
+            parser.error(f"{' and '.join(existing)} already exist(s) - move or rename "
+                         f"before filling again (nothing was written)")
+        for path in fill_paths:
+            problem = clobber_problem(args.fill_file, path)
             if problem:
-                parser.error(problem)  # before any network work
+                parser.error(problem)
+        out_path = None
+    else:
+        default_name = f"aspace_export_{aspace_client.ACTIVE_ENV}_{stamp}.csv"
+        out_path = col.resolve_output_path(args.output, OUTPUT_DIR, default_name)
+
+    if args.list_file:
+        problem = clobber_problem(args.list_file, out_path)
+        if problem:
+            parser.error(problem)  # before any network work
 
     print_header("ArchivesSpace CSV Export")
     target = (f"{aspace_client.ACTIVE_ENV.upper()} ({aspace_client.ASPACE_URL}, "
@@ -1167,7 +1270,7 @@ def main():
     print(f"  Command: {RUN_COMMAND}")
     if args.fill_file:
         print(f"  Fill parents: {args.fill_file}")
-        sys.exit(run_fill_parents(args.fill_file, out_path))
+        sys.exit(run_fill_parents(args.fill_file, *fill_paths))
     if args.list_file:
         print(f"  List: {args.list_file}")
     else:

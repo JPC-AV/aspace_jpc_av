@@ -135,11 +135,21 @@ See [aspace_csv_import/README.md](aspace_csv_import/README.md) for full document
 
 ### aspace_csv_export
 
-The reverse of the importer: exports AV records to an import-shaped CSV with audit columns (ref ID, Warnings, Level, Depth, Path, URI, staff link, MADS URL, created/modified) for round-trip editing with `--update-only` or as an audit report. Rows come out in tree order (`--list` keeps list order), so `--level all` reads like the ArchivesSpace tree. `--fill-parents FILE` fills a sheet's empty parent ref IDs from its `EJS Episode` and `ASpace File Type` columns. Read-only.
+The reverse of the importer: exports AV records to an import-shaped CSV with audit columns (ref ID, Warnings, Level, Depth, Path, URI, staff link, MADS URL, created/modified) for round-trip editing with `--update-only` or as an audit report. Rows come out in tree order (`--list` keeps list order), so `--level all` reads like the ArchivesSpace tree. `--fill-parents FILE` fills a sheet's empty parent ref IDs from its `EJS Episode` and `ASpace File Type` columns, writing `FILE_ready.csv` and `FILE_review.csv` beside it. Read-only.
 
 ```bash
 cd aspace_csv_import
 python3 aspace_csv_export.py --level item --mads-live
+```
+
+### airtable_pull and airtable_writeback
+
+`airtable_pull.py VIEW` saves one grid view of the Airtable `<<< ASpace_import >>>` table as a CSV (read-only). After a real production create run, `airtable_writeback.py REPORT.json --run` records the results in Airtable: each created row's parent and `ASpace Item Record Created` = Yes, written only after you confirm. Tokens go in `creds.py` as `airtable_pat_read_only` (all reads) and `airtable_pat_write` (writes only).
+
+```bash
+cd aspace_csv_import
+python3 airtable_pull.py VIEW_NAME
+python3 airtable_writeback.py <reports>/import_report_<stamp>.json --run
 ```
 
 ### check_mads
@@ -151,7 +161,7 @@ cd aspace_csv_import
 python3 check_mads.py numbers.txt
 ```
 
-Both are documented in [aspace_csv_import/README.md](aspace_csv_import/README.md).
+All of these are documented in [aspace_csv_import/README.md](aspace_csv_import/README.md).
 
 ### aspace_rename_directories
 

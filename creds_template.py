@@ -21,6 +21,7 @@
 #
 # The JPCA sandbox values below are already filled in - most people only
 # need to enter their own sandbox username and password.
+
 environments = {
     "sandbox": {
         "baseURL": "https://api-jpcsb.as.atlas-sys.com",
@@ -49,6 +50,17 @@ environments = {
 #   rename_reports/   aspace-rename-directories.py (default ~/aspace_rename_reports)
 # All four subfolders are gitignored when logs_dir is the repo root.
 logs_dir = ""
+
+# Optional: a READ-ONLY Airtable personal access token, used for every
+# Airtable read (airtable_pull.py, and airtable_writeback.py's reads).
+# Scopes data.records:read and schema.bases:read only, limited to the JPC
+# base. (AIRTABLE_PAT_READ_ONLY in the shell works too.)
+airtable_pat_read_only = ""
+
+# Optional: a SEPARATE Airtable token for airtable_writeback.py's writes -
+# data.records:write, limited to the JPC base. Reads still use
+# airtable_pat_read_only. (AIRTABLE_PAT_WRITE in the shell works too.)
+airtable_pat_write = ""
 
 # Note: legacy flat creds.py files (top-level baseURL/user/password/repo_id/
 # resource_id/staff_url) still work and are treated as a single "production"
