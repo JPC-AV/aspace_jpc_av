@@ -276,6 +276,29 @@ def _resource_ref(record: Dict) -> str:
     return ref
 
 
+def _short(text, limit: int = 300) -> str:
+    """A response body trimmed for the log - an HTML error page is thousands
+    of characters of markup nobody reads."""
+    text = text if isinstance(text, str) else ""
+    text = " ".join(text.split())
+    return text if len(text) <= limit else text[:limit] + " ..."
+
+
+def _web_page_block(response) -> Optional[str]:
+    """A short description when a login response is a web page rather than
+    the API's JSON (e.g. a Cloudflare block page), else None. Names
+    Cloudflare and its Ray ID when present - the ID is what the host's
+    support desk asks for."""
+    text = response.text if isinstance(getattr(response, "text", None), str) else ""
+    head = text.lstrip()[:200].lower()
+    if not (head.startswith("<!doctype html") or head.startswith("<html")):
+        return None
+    if "cloudflare" in text.lower():
+        ray = re.search(r"Ray ID:\s*(?:<[^>]*>\s*)*([0-9a-f]{8,})", text, re.IGNORECASE)
+        return "a Cloudflare block page" + (f", Ray ID {ray.group(1)}" if ray else "")
+    return "a web page instead of the API"
+
+
 @dataclass
 class Lookup:
     """Dumb result object for verified lookups. No behavior, no policy."""
@@ -367,15 +390,25 @@ class ASpaceClient:
             else:
                 problem = f"could not connect to {host} ({type(e).__name__})"
             return self._login_failed(problem, f"Login error: {e}")
+        page = _web_page_block(response)
+        if page:
+            # The API answers login with JSON; a web page means something in
+            # front of it (a firewall such as Cloudflare) turned the request
+            # away before the password was ever checked.
+            return self._login_failed(
+                f"login was blocked before your password was checked (HTTP "
+                f"{response.status_code}, {page}) - often the network or VPN; "
+                f"not necessarily a creds.py problem",
+                f"Login blocked: HTTP {response.status_code} - {page}")
         if response.status_code in (401, 403):
             return self._login_failed(
                 f"the server refused the username/password for this environment "
                 f"(HTTP {response.status_code}) - check creds.py",
-                f"Login failed: {response.status_code} - {response.text}")
+                f"Login failed: {response.status_code} - {_short(response.text)}")
         if response.status_code != 200:
             return self._login_failed(
                 f"login failed with HTTP {response.status_code}",
-                f"Login failed: {response.status_code} - {response.text}")
+                f"Login failed: {response.status_code} - {_short(response.text)}")
         try:
             payload = response.json()
         except ValueError:

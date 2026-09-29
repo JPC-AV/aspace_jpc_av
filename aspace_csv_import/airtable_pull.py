@@ -109,7 +109,7 @@ def get_colored_help():
     C = Colors
     return f"""
 {C.BOLD}{C.CYAN}===============================================================================
-                          Airtable View Pull
+                    Read an Airtable view (read-only)
 ==============================================================================={C.RESET}
 
 {C.BOLD}DESCRIPTION{C.RESET}
@@ -341,7 +341,7 @@ def main():
     if args.no_color:
         Colors.disable()
 
-    print_header("Airtable View Pull")
+    print_header("Read an Airtable view (read-only)")
     print(f"  Base/table: {BASE_ID} / {TABLE_ID}")
     print(f"  View: {args.view}")
 

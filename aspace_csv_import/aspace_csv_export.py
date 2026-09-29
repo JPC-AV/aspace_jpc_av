@@ -1106,6 +1106,116 @@ def run_fill_parents(sheet_path, ready_path, review_path):
     return 2
 
 
+CHECK_OUTCOMES = ("found", "not found", "ambiguous", "could not check")
+
+
+def check_numbers(client, numbers):
+    """Which catalog numbers already have a record in ArchivesSpace.
+
+    Returns [(number, outcome, detail)] in list order. outcome is one of
+    CHECK_OUTCOMES: "found" (exactly one record; detail = title and where it
+    sits), "not found" (verified absent - new), "ambiguous" (several records
+    share the number), "could not check" (the lookup failed, or the number
+    is malformed and was not looked up). Only "not found" means new: a
+    failed lookup is never evidence of absence. Read-only; metadata is not
+    compared.
+    """
+    results = []
+    linked_cache = {}
+    for i, number in enumerate(numbers, 1):
+        if not col.valid_catalog_number(number):
+            results.append((number, "could not check",
+                            "not of the form JPC_AV_ + digits - not looked up"))
+        else:
+            lookup = client.find_archival_object(number)
+            if lookup.status == "found":
+                title = (lookup.record.get("title") or "").strip() or "(no title)"
+                placed, _ = place_record(
+                    lookup.record, lambda uri: fetch_linked(client, uri, linked_cache))
+                path = placed[2] if placed else ""
+                results.append((number, "found", f"{title}" + (f"  ({path})" if path else "")))
+            elif lookup.status == "none":
+                results.append((number, "not found", ""))
+            elif lookup.status == "multiple":
+                results.append((number, "ambiguous",
+                                f"{lookup.count} records share this number - clean up first"))
+            else:
+                results.append((number, "could not check",
+                                "lookup failed - retry; do not treat as new"))
+        if i % 25 == 0:
+            print_status("info", f"Checked {i}/{len(numbers)}...")
+    return results
+
+
+def print_check(results):
+    """The check's answer, grouped, on screen. Returns the exit code: 0 when
+    every number got a definite answer, 2 when any is ambiguous or could
+    not be checked (those need a person or a rerun before anything else)."""
+    groups = {o: [(n, d) for n, out, d in results if out == o] for o in CHECK_OUTCOMES}
+    found, new = groups["found"], groups["not found"]
+    print()
+    print_status("success", f"In ArchivesSpace: {len(found)}")
+    for number, detail in found:
+        print(f"      {number}  {detail}")
+    print()
+    print(f"{Colors.YELLOW}{Colors.BOLD}[>] Not in ArchivesSpace (new): {len(new)}{Colors.RESET}")
+    for number, _ in new:
+        print(f"      {number}")
+    for outcome, symbol in (("ambiguous", "warning"), ("could not check", "error")):
+        if groups[outcome]:
+            print_status(symbol, f"{outcome.capitalize()}: {len(groups[outcome])}")
+            for number, detail in groups[outcome]:
+                print(f"      {number}  {detail}")
+    print(f"\n  {Colors.DIM}\"In ArchivesSpace\" means a record with that number exists - "
+          f"its metadata was not compared.{Colors.RESET}")
+    return 2 if groups["ambiguous"] or groups["could not check"] else 0
+
+
+def write_check_csv(results, path, provenance=None):
+    """The check's answer as a small CSV, only when -o asks for one."""
+    tmp_path = path + ".tmp"
+    with open(tmp_path, "w", newline="", encoding="utf-8") as f:
+        if provenance:
+            f.write(f"# {provenance}\n")
+        writer = csv.writer(f)
+        writer.writerow([col.CATALOG, "In ArchivesSpace", "Detail"])
+        for number, outcome, detail in results:
+            writer.writerow([number, outcome, detail])
+    os.replace(tmp_path, path)
+
+
+def run_check(list_path, csv_path=None):
+    """--check end to end. Returns the exit code (see print_check); 1 when
+    the list cannot be read or login fails (nothing checked)."""
+    numbers, problem = read_catalog_list(list_path)  # before any network work
+    if numbers is None:
+        print_status("error", problem)
+        return 1
+    client = ASpaceClient()
+    print_status("info", f"Connecting to {aspace_client.ASPACE_URL}...")
+    if not client.login():
+        print_status("error", f"Could not log in: {client.login_problem}")
+        return 1
+    print_status("success", "Authenticated")
+    print_status("info", f"Checking {len(numbers)} catalog number(s)...")
+    try:
+        results = check_numbers(client, numbers)
+    finally:
+        client.logout()
+    code = print_check(results)
+    if csv_path:
+        provenance = (f"{RUN_COMMAND} | target: {aspace_client.ACTIVE_ENV} | "
+                      f"{datetime.now().strftime('%Y-%m-%d %H:%M')}")
+        write_check_csv(results, csv_path, provenance)
+        print_status("info", f"Also saved to: {csv_path}")
+    return code
+
+
+CHECK_OPTIONS = [
+    ("--check FILE", "", "Which of these catalog numbers are already in ArchivesSpace (text list or any CSV"),
+    ("", "", "with CATALOG_NUMBER, e.g. an Airtable pull). Prints: in ArchivesSpace / new / ambiguous /"),
+    ("", "", "could not check. Writes no file unless -o is given. Metadata is not compared."),
+]
 SELECT_OPTIONS = [
     ("--level LEVEL", "", "Only records at this level: item (default), file, subseries, series... or all"),
     ("--parent REFID", "", "Only the direct children of this record (combines with --level)"),
@@ -1134,13 +1244,18 @@ def get_colored_help():
 {C.BOLD}DESCRIPTION{C.RESET}
     Reads AV records from ArchivesSpace - never writes to it:
     {C.GREEN}1.{C.RESET} Exports records to an import-shaped CSV, in tree order, with Level, Depth and Path
-    {C.GREEN}2.{C.RESET} Fills a sheet's blank ASpace Parent RefID column (--fill-parents)
-    {C.GREEN}3.{C.RESET} Checks whether exported records are live in MADS (--mads-live)
+    {C.GREEN}2.{C.RESET} Checks which catalog numbers are already in ArchivesSpace (--check)
+    {C.GREEN}3.{C.RESET} Fills a sheet's blank ASpace Parent RefID column (--fill-parents)
+    {C.GREEN}4.{C.RESET} Checks whether exported records are live in MADS (--mads-live)
 
 {C.BOLD}USAGE{C.RESET}
     {C.GREEN}${C.RESET} python3 aspace_csv_export.py [--level LEVEL] [--parent REFID] [options]
     {C.GREEN}${C.RESET} python3 aspace_csv_export.py --list FILE [options]
+    {C.GREEN}${C.RESET} python3 aspace_csv_export.py --check FILE [-o PATH] [--env NAME]
     {C.GREEN}${C.RESET} python3 aspace_csv_export.py --fill-parents FILE [--env NAME]
+
+{C.BOLD}CHECK{C.RESET} {C.DIM}(instead of an export){C.RESET}
+{render_options(CHECK_OPTIONS)}
 
 {C.BOLD}SELECT{C.RESET} {C.DIM}(what to export; default: every item-level record){C.RESET}
 {render_options(SELECT_OPTIONS)}
@@ -1155,11 +1270,13 @@ def get_colored_help():
     {C.GREEN}${C.RESET} python3 aspace_csv_export.py --level all --env production
     {C.GREEN}${C.RESET} python3 aspace_csv_export.py --level item --mads-live --env production
     {C.GREEN}${C.RESET} python3 aspace_csv_export.py --list batch.csv --env production
+    {C.GREEN}${C.RESET} python3 aspace_csv_export.py --check batch.csv --env production
     {C.GREEN}${C.RESET} python3 aspace_csv_export.py --fill-parents batch.csv --env production      {C.DIM}# batch_ready.csv + batch_review.csv{C.RESET}
 
 {C.BOLD}EXIT{C.RESET}
     {C.GREEN}0{C.RESET}  done
-    {C.YELLOW}2{C.RESET}  written but incomplete: rows for review (--fill-parents, expected), listed numbers not found, or MADS checks failed
+    {C.YELLOW}2{C.RESET}  written but incomplete: rows for review (--fill-parents, expected), listed numbers not found, or MADS checks failed;
+       --check: some numbers are ambiguous or could not be checked (new numbers alone are exit 0)
        (also a bad argument or a creds.py problem - then nothing is written)
     {C.RED}1{C.RESET}  failed - nothing written (a fill whose ready file fails after its review file
        was written says so, and names the review file to delete)
@@ -1178,10 +1295,12 @@ def build_parser():
             C = Colors
             usage = (f"\nusage: {self.prog} [--level LEVEL] [--parent REFID] [options]\n"
                      f"       {self.prog} --list FILE [options]\n"
+                     f"       {self.prog} --check FILE [-o PATH] [--env NAME]\n"
                      f"       {self.prog} --fill-parents FILE [--env NAME]\n")
             hint = f"       {C.DIM}Use -h or --help for detailed information{C.RESET}\n"
             options = "\n" + "\n".join(render_options(group, indent="  ") for group in
-                                        (SELECT_OPTIONS, FILL_OPTIONS, EXPORT_CLI_OPTIONS)) + "\n"
+                                        (CHECK_OPTIONS, SELECT_OPTIONS, FILL_OPTIONS,
+                                         EXPORT_CLI_OPTIONS)) + "\n"
             return usage + hint + options
 
         def format_help(self):
@@ -1200,6 +1319,7 @@ def build_parser():
                         help=argparse.SUPPRESS)
     parser.add_argument("--parent", metavar="REFID", help=argparse.SUPPRESS)
     parser.add_argument("--list", metavar="FILE", dest="list_file", help=argparse.SUPPRESS)
+    parser.add_argument("--check", metavar="FILE", dest="check_file", help=argparse.SUPPRESS)
     parser.add_argument("--fill-parents", metavar="FILE", dest="fill_file", help=argparse.SUPPRESS)
     parser.add_argument("--mads-live", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("-o", "--output", metavar="PATH", help=argparse.SUPPRESS)
@@ -1219,6 +1339,10 @@ def main():
                            or args.level != "item"):
         parser.error("--fill-parents fills a sheet's parent column - it cannot be "
                      "combined with --list, --parent, --level or --mads-live")
+    if args.check_file and (args.list_file or args.fill_file or args.parent
+                            or args.mads_live or args.level != "item"):
+        parser.error("--check only looks catalog numbers up - it cannot be combined "
+                     "with --list, --fill-parents, --parent, --level or --mads-live")
     if args.fill_file and args.output:
         parser.error("--fill-parents always writes FILE_ready.csv and FILE_review.csv "
                      "beside FILE - -o does not apply")
@@ -1252,16 +1376,24 @@ def main():
             if problem:
                 parser.error(problem)
         out_path = None
+    elif args.check_file and not args.output:
+        out_path = None  # screen only: no path, no reports folder touched
     else:
         default_name = f"aspace_export_{aspace_client.ACTIVE_ENV}_{stamp}.csv"
         out_path = col.resolve_output_path(args.output, OUTPUT_DIR, default_name)
 
-    if args.list_file:
-        problem = clobber_problem(args.list_file, out_path)
-        if problem:
-            parser.error(problem)  # before any network work
+    for input_file in (args.list_file, args.check_file):
+        if input_file and (args.output or not args.check_file):
+            problem = clobber_problem(input_file, out_path)
+            if problem:
+                parser.error(problem)  # before any network work
 
-    print_header("ArchivesSpace CSV Export")
+    if args.check_file:
+        print_header("Check catalog numbers in ArchivesSpace (read-only)")
+    elif args.fill_file:
+        print_header("Fill parents from ArchivesSpace (read-only)")
+    else:
+        print_header("Export ArchivesSpace records to CSV (read-only)")
     target = (f"{aspace_client.ACTIVE_ENV.upper()} ({aspace_client.ASPACE_URL}, "
               f"repo {aspace_client.REPO_ID}, resource {aspace_client.RESOURCE_ID})")
     # Production gets the loud color, same convention as the importer.
@@ -1271,6 +1403,9 @@ def main():
     if args.fill_file:
         print(f"  Fill parents: {args.fill_file}")
         sys.exit(run_fill_parents(args.fill_file, *fill_paths))
+    if args.check_file:
+        print(f"  Check: {args.check_file}")
+        sys.exit(run_check(args.check_file, out_path if args.output else None))
     if args.list_file:
         print(f"  List: {args.list_file}")
     else:

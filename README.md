@@ -23,7 +23,9 @@ aspace_jpc_av/
 │
 ├── aspace_csv_import/
 │   ├── aspace_csv_import.py      # Main import script
-│   ├── aspace_csv_export.py      # Export AV records to an import-shaped CSV (round trip)
+│   ├── aspace_csv_export.py      # Export AV records to a CSV; --check, --fill-parents
+│   ├── airtable_pull.py          # Save an Airtable view as a CSV (read-only)
+│   ├── airtable_writeback.py     # Record a create run's results in Airtable
 │   ├── check_mads.py             # Check which items are live in MADS (public DAMS delivery)
 │   ├── check_extent_types.py     # Utility to validate extent types against ASpace
 │   ├── csv_utils.py              # CSV validation and parent checks
@@ -50,10 +52,12 @@ More detailed descriptions of each file and usage in directory-specific README.m
 | `creds.py` | User creates/edits | Your local credentials file. You create this from the template. |
 | `requirements.txt` | One-time setup | Python package dependencies. Run `pip install -r requirements.txt` once. |
 | `aspace_csv_import.py` | Run via command line | Main script for importing CSV metadata to ArchivesSpace. |
-| `aspace_csv_export.py` | Run via command line | Exports AV records to an import-shaped CSV in tree order with hierarchy and audit columns; `--mads-live` checks MADS. |
+| `aspace_csv_export.py` | Run via command line | Exports AV records to an import-shaped CSV in tree order with hierarchy and audit columns; `--mads-live` checks MADS; `--check` says which catalog numbers are already in ArchivesSpace; `--fill-parents` fills parent ref IDs. Read-only. |
+| `airtable_pull.py` | Run via command line | Saves one Airtable view of `<<< ASpace_import >>>` as a CSV. Read-only. |
+| `airtable_writeback.py` | Run via command line | After a production create run, records each created item's parent and `ASpace Item Record Created` = Yes in Airtable, after you confirm. |
 | `check_mads.py` | Run via command line | Checks which catalog numbers are live in MADS (public URLs only). |
-| `check_extent_types.py` | Run via command line | Utility to check valid extent types in your ASpace instance. |
-| `csv_utils.py` | Run via command line | Validates a CSV and checks parent ref_ids before import. |
+| `check_extent_types.py` | Run via command line | Troubleshooting: lists valid extent types in your ASpace instance. The import's dry run already checks formats. |
+| `csv_utils.py` | Run via command line | Troubleshooting: validates a CSV and checks parent ref_ids. The import's dry run already runs these checks. |
 | `sheet_rules.py` | Backend | The sheet contract: column names and the validation rules every tool applies. |
 | `docs/*.md` | Reference | Field-mapping contract, a worked example, and the unmapped-column analysis. |
 | `aspace-rename-directories.py` | Run via command line | Main script for processing video directories. |
@@ -124,7 +128,7 @@ Ask your ArchivesSpace administrator if you don't know these values.
 
 ### aspace_csv_import
 
-Creates or updates archival objects in ArchivesSpace from CSV metadata. Handles titles, dates, extents, notes, and container instances. Every run states its mode (`--create-records` or `--update-only`); strict `--create-records` and `--update-only` preflight every row before writing anything, while `--skip-duplicates` processes rows individually.
+Creates or updates archival objects in ArchivesSpace from CSV metadata. Handles titles, dates, extents, notes, and container instances. Every run states its mode (`--create-records` or `--update-only`), checks every row first, and prints a plan of what it will create, skip, refuse or change; a real run writes only after you type `yes`, and a real create ends with the exact command to record the results in Airtable. A dry run (`-n`) shows the plan and writes nothing.
 
 ```bash
 cd aspace_csv_import
@@ -135,7 +139,7 @@ See [aspace_csv_import/README.md](aspace_csv_import/README.md) for full document
 
 ### aspace_csv_export
 
-The reverse of the importer: exports AV records to an import-shaped CSV with audit columns (ref ID, Warnings, Level, Depth, Path, URI, staff link, MADS URL, created/modified) for round-trip editing with `--update-only` or as an audit report. Rows come out in tree order (`--list` keeps list order), so `--level all` reads like the ArchivesSpace tree. `--fill-parents FILE` fills a sheet's empty parent ref IDs from its `EJS Episode` and `ASpace File Type` columns, writing `FILE_ready.csv` and `FILE_review.csv` beside it. Read-only.
+The reverse of the importer: exports AV records to an import-shaped CSV with audit columns (ref ID, Warnings, Level, Depth, Path, URI, staff link, MADS URL, created/modified) for round-trip editing with `--update-only` or as an audit report. Rows come out in tree order (`--list` keeps list order), so `--level all` reads like the ArchivesSpace tree. `--check FILE` prints which catalog numbers are already in ArchivesSpace (in ArchivesSpace / new / ambiguous / could not check). `--fill-parents FILE` fills a sheet's empty parent ref IDs from its `EJS Episode` and `ASpace File Type` columns, writing `FILE_ready.csv` and `FILE_review.csv` beside it. Read-only.
 
 ```bash
 cd aspace_csv_import
@@ -144,7 +148,7 @@ python3 aspace_csv_export.py --level item --mads-live
 
 ### airtable_pull and airtable_writeback
 
-`airtable_pull.py VIEW` saves one grid view of the Airtable `<<< ASpace_import >>>` table as a CSV (read-only). After a real production create run, `airtable_writeback.py REPORT.json --run` records the results in Airtable: each created row's parent and `ASpace Item Record Created` = Yes, written only after you confirm. Tokens go in `creds.py` as `airtable_pat_read_only` (all reads) and `airtable_pat_write` (writes only).
+`airtable_pull.py VIEW` saves one grid view of the Airtable `<<< ASpace_import >>>` table as a CSV (read-only). After a real production create run, `airtable_writeback.py REPORT.json --run` records the results in Airtable: each created row's parent and `ASpace Item Record Created` = Yes. It lists every change row by row and writes only after you type `yes`. Tokens go in `creds.py` as `airtable_pat_read_only` (all reads) and `airtable_pat_write` (writes only).
 
 ```bash
 cd aspace_csv_import

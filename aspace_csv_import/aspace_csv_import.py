@@ -138,6 +138,11 @@ def get_colored_help():
     {C.GREEN}2.{C.RESET} Links to parent objects via ref_id
     {C.GREEN}3.{C.RESET} Links each item to its AV Case top container (reused if one exists, else created)
 
+    Every run checks all rows first and prints the PLAN (what will be created,
+    skipped, refused or changed - titles, dates, parents, notes in full). A real
+    run then asks you to type {C.BOLD}yes{C.RESET}; anything else writes nothing. After a real
+    create run it prints the exact command that records the results in Airtable.
+
 {C.BOLD}USAGE{C.RESET}
     {C.GREEN}${C.RESET} python3 aspace_csv_import.py (--create-records | --update-only) -f FILE [options]
 
@@ -272,16 +277,19 @@ VALIDATE_EXTENT_TYPES = True
 
 def setup_environment(dry_run: bool = False, csv_file: str = None):
     """Create output directories and configure logging."""
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    
-    # Configure logging - only to file, not console (we use print for console)
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.FileHandler(LOG_FILE),
-        ]
-    )
+    # A dry run writes no files at all - not even a log; the terminal is
+    # its whole output. Real runs log to a file (the console uses print).
+    if dry_run:
+        logging.basicConfig(level=logging.INFO, handlers=[logging.NullHandler()])
+    else:
+        os.makedirs(OUTPUT_DIR, exist_ok=True)
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(levelname)s - %(message)s',
+            handlers=[
+                logging.FileHandler(LOG_FILE),
+            ]
+        )
     
     logging.info("=" * 60)
     logging.info("ArchivesSpace CSV Import Script Started")
@@ -856,6 +864,10 @@ def detect_changes(existing_obj: Dict, row: Dict) -> Dict[str, Tuple[Any, Any]]:
     value. This mirrors what update_archival_object applies; keep the two in
     sync or the script will report updates it did not make.
 
+    Values are complete - notes included - because the changes are also what
+    a real run compares against the approved preview; shortening happens only
+    where a note is printed.
+
     Returns:
         Dict mapping field names to (old_value, new_value) tuples
     """
@@ -913,14 +925,14 @@ def detect_changes(existing_obj: Dict, row: Dict) -> Dict[str, Tuple[Any, Any]]:
     new_description = (row.get(col.DESCRIPTION) or '').strip()
 
     if new_description and existing_scope != new_description:
-        changes['description'] = (_note_preview(existing_scope), _note_preview(new_description))
+        changes['description'] = (existing_scope, new_description)
 
     # Check phystech note (imported on create, so update must track it too)
     existing_phystech = get_note_content(existing_notes, 'phystech')
     new_phystech = (row.get(col.PHYSTECH) or '').strip()
 
     if new_phystech and existing_phystech != new_phystech:
-        changes['phystech'] = (_note_preview(existing_phystech), _note_preview(new_phystech))
+        changes['phystech'] = (existing_phystech, new_phystech)
 
     return changes
 
@@ -1157,7 +1169,8 @@ def create_archival_object(row: Dict, client: ArchivesSpaceClient,
             return None, errors
 
 def update_archival_object(row: Dict, client: ArchivesSpaceClient,
-                          existing_uri: str, dry_run: bool = False) -> Tuple[Optional[Dict], Dict, List[str]]:
+                          existing_uri: str, dry_run: bool = False,
+                          expected_changes: Dict = None) -> Tuple[Optional[Dict], Dict, List[str]]:
     """Update an existing archival object from a CSV row.
 
     Replacement semantics: a non-blank CSV value replaces only what this
@@ -1202,6 +1215,13 @@ def update_archival_object(row: Dict, client: ArchivesSpaceClient,
     bad = out_of_range_date_changes(changes)
     if bad:
         return None, changes, [bad]
+    if expected_changes is not None and changes != expected_changes:
+        # The record changed between the preview and this write: what was
+        # approved is no longer what would be written.
+        return None, changes, [
+            f"Record changed after the preview (previewed: "
+            f"{', '.join(expected_changes) or 'no changes'}; now: "
+            f"{', '.join(changes) or 'no changes'}) - not written; rerun to see its current changes"]
     
     if not changes:
         logging.info(f"No changes needed for: {catalog_number}")
@@ -1425,7 +1445,7 @@ def make_row_result(row_num: int, row: Dict, status: str = "pending",
     return result
 
 
-def record_row_outcome(result: Dict, summary: Dict):
+def record_row_outcome(result: Dict, summary: Dict, echo: bool = True):
     """Tally one row result into the summary and print its status line.
 
     The single bookkeeping point for BOTH normal and update-only processing -
@@ -1436,12 +1456,16 @@ def record_row_outcome(result: Dict, summary: Dict):
     summary_key = "failed" if status == "error" else status
     if summary_key in summary:
         summary[summary_key] += 1
+    if not echo:
+        return
     line = f"{result[col.CATALOG]} - {result['message']}"
     if result.get("ref_id"):
         line += f" - Ref ID {result['ref_id']}"
     print_status(status, line)
     if status == "updated":
         for field, (old, new) in result.get("changes", {}).items():
+            if field in ("description", "phystech"):  # full text is in the PLAN
+                old, new = _note_preview(old), _note_preview(new)
             print_status("info", f"{field}: {old} --> {new}", indent=1)
 
 
@@ -1576,7 +1600,7 @@ def process_csv_row(row: Dict, row_num: int, client: ArchivesSpaceClient,
     return result
 
 def _preflight_update_only_row(row_num: int, row: Dict, client: ArchivesSpaceClient,
-                               resolved: Dict, problems: List):
+                               resolved: Dict, problems: List, plan: Dict = None):
     """Phase-1 resolution/preflight for ONE update-only row.
 
     Appends to `problems` on any issue, or records the row's uri in
@@ -1676,11 +1700,44 @@ def _preflight_update_only_row(row_num: int, row: Dict, client: ArchivesSpaceCli
                                      f"express ({detail}) - update dates manually"))
                     return
         resolved[row_num] = uri
+        if plan is not None:
+            plan[row_num] = {"catalog": catalog_number, "changes": detected, "record": record}
+
+
+def _show(value) -> str:
+    """A preview value: blank shown as (none), dates as label value pairs."""
+    if isinstance(value, dict):
+        return ", ".join(f"{k} {v or '(none)'}" for k, v in value.items()) or "(none)"
+    if isinstance(value, list):
+        return ", ".join(map(str, value)) or "(none)"
+    return str(value) if value not in (None, "") else "(none)"
+
+
+def print_update_plan(rows: List[Dict], plan: Dict) -> int:
+    """The plan for an update run: every changing record with each field's
+    current and new value in full (notes too - the change report's short
+    form is not enough to approve a note edit). Returns how many records
+    will change."""
+    print_section("PLAN - what this run will change (nothing written yet)")
+    changing = 0
+    for row_num, row in enumerate(rows, 1):
+        entry = plan.get(row_num)
+        if not entry or not entry["changes"]:
+            continue
+        changing += 1
+        record = entry["record"]
+        _plan_line("update", Colors.BLUE, f"{entry['catalog']}  {record.get('title') or ''}")
+        for field, (old, new) in entry["changes"].items():
+            print(f"           {field + ':':<12} {_show(old)}")
+            print(f"           {'':<12} -> {_show(new)}")
+    unchanged = len(rows) - changing
+    print(f"\n  {changing} record(s) to update, {unchanged} unchanged (nothing to write for them)")
+    return changing
 
 
 def process_csv_file_update_only(filename: str, client: ArchivesSpaceClient,
                                  dry_run: bool = False,
-                                 state: Dict = None) -> Tuple[List[Dict], Dict]:
+                                 state: Dict = None, confirm=None) -> Tuple[List[Dict], Dict]:
     """Process a (possibly narrow) CSV in strict update-only mode.
 
     Never creates records. Phase 1 resolves EVERY catalog number to exactly one
@@ -1721,9 +1778,10 @@ def process_csv_file_update_only(filename: str, client: ArchivesSpaceClient,
     print_status("info", f"Resolving {len(rows)} catalog number(s) before writing anything...")
     resolved = {}
     problems = []
+    plan = {}
     for row_num, row in enumerate(rows, 1):
         try:
-            _preflight_update_only_row(row_num, row, client, resolved, problems)
+            _preflight_update_only_row(row_num, row, client, resolved, problems, plan)
         except Exception as e:
             # A malformed record shape must fail the ROW (aborting the run,
             # since phase 1 aborts on any problem) with a diagnosis - not
@@ -1757,11 +1815,21 @@ def process_csv_file_update_only(filename: str, client: ArchivesSpaceClient,
         summary["end_time"] = datetime.now().isoformat()
         return results, summary
 
-    # --- Phase 2: apply updates. ---
+    changing = print_update_plan(rows, plan)
+    if not dry_run and confirm is not None and changing:
+        fields = sorted({f for e in plan.values() for f in e["changes"]})
+        if not confirm([f"Update {changing} record(s): {', '.join(fields)}",
+                        f"{len(rows) - changing} unchanged"]):
+            _cancel_all(rows, results, summary)
+            return results, summary
+    print_section("DRY RUN - nothing is written" if dry_run else "WRITING")
+
+    # --- Phase 2: apply exactly the previewed changes. ---
     for row_num, row in enumerate(rows, 1):
         try:
             ao_result, changes, errors = update_archival_object(
-                row, client, resolved[row_num], dry_run)
+                row, client, resolved[row_num], dry_run,
+                expected_changes=plan[row_num]["changes"] if row_num in plan else None)
             if errors:
                 result = make_row_result(row_num, row, "error", "; ".join(errors))
             elif ao_result and ao_result.get('unchanged'):
@@ -1813,8 +1881,94 @@ def process_csv_file_update_only(filename: str, client: ArchivesSpaceClient,
     return results, summary
 
 
+def record_path(client: ArchivesSpaceClient, uri: str, record: Optional[Dict],
+                cache: Dict) -> str:
+    """'Series > Season > Episode > Edited' - where a record sits, ending at
+    the record itself, as the staff interface names each level. Read-only;
+    ancestors are cached across rows. Display only: a failed fetch gives
+    "(path unavailable)", never an error."""
+    names, seen = [], set()
+    while uri and uri not in seen and len(names) < 12:
+        seen.add(uri)
+        if uri not in cache:
+            rec = record if (record is not None and not names) else client.get(uri)
+            if not isinstance(rec, dict):
+                return "(path unavailable)"
+            parent = rec.get('parent')
+            cache[uri] = (rec.get('display_string') or rec.get('title') or uri,
+                          parent.get('ref') if isinstance(parent, dict) else None)
+        name, uri = cache[uri]
+        names.append(name)
+    return " > ".join(reversed(names))
+
+
+def ask_to_write(lines: List[str]) -> bool:
+    """Show what a real run is about to write and ask for an explicit yes.
+    Anything else - no, blank, closed input, Ctrl-C - means nothing is
+    written, containers included."""
+    print(f"\n  {Colors.BOLD}About to write to ArchivesSpace "
+          f"({(aspace_client.ACTIVE_ENV or '').upper()}){Colors.RESET}")
+    for line in lines:
+        print(f"    {line}")
+    try:
+        answer = input("\n  Type yes to write, anything else to cancel: ")
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return False
+    return answer.strip().lower() == "yes"
+
+
+def _cancel_all(rows: List[Dict], results: List[Dict], summary: Dict):
+    """Record a run cancelled at the prompt: every row unwritten."""
+    for row_num, row in enumerate(rows, 1):
+        results.append(make_row_result(row_num, row, "aborted",
+                                       "Not written - cancelled at the confirmation prompt"))
+    summary["aborted"] = len(rows)
+    summary["cancelled"] = True
+    summary["end_time"] = datetime.now().isoformat()
+
+
+def _plan_line(label: str, color: str, text: str) -> None:
+    """A plan line: what WILL happen, labelled in words so it is never
+    mistaken for an outcome line ([+] / [~] mean it already happened)."""
+    print(f"  {color}{label:<8}{Colors.RESET} {text}")
+
+
+def print_create_plan(rows: List[Dict], plan: Dict) -> Dict[str, int]:
+    """The plan for a create run, one block per row: what will be created
+    (title, where it goes, dates, format, container, notes in full), what
+    is skipped as already existing, and what is refused and why. Returns
+    the counts."""
+    print_section("PLAN - what this run will do (nothing written yet)")
+    counts = {"create": 0, "skip": 0, "refuse": 0, "new_containers": 0}
+    for row_num, row in enumerate(rows, 1):
+        e = plan.get(row_num) or {"action": "refuse", "catalog": "?", "reason": "not checked"}
+        counts[e["action"]] += 1
+        if e["action"] == "skip":
+            _plan_line("skip", Colors.YELLOW, f"{e['catalog']}  {e['reason']}")
+            continue
+        if e["action"] == "refuse":
+            _plan_line("refused", Colors.RED, f"{e['catalog'] or f'row {row_num}'}  {e['reason']}")
+            continue
+        if e["container"] == "new":
+            counts["new_containers"] += 1
+        _plan_line("create", Colors.GREEN, f"{e['catalog']}  {e['title']}")
+        dates = ", ".join(f"{label} {begin}" for label, begin in e["dates"]) or "none"
+        print(f"           under:     {e['parent_path']}")
+        print(f"           dates:     {dates}    format: {e['format'] or 'none'}    "
+              f"container: {'new AV Case' if e['container'] == 'new' else 'existing AV Case'}")
+        for label, text in (("scope", e["scope"]), ("phystech", e["phystech"])):
+            if text:
+                print(f"           {label + ':':<10} {text}")
+    print(f"\n  {counts['create']} to create ({counts['new_containers']} new AV Case "
+          f"container(s)), {counts['skip']} to skip, {counts['refuse']} refused")
+    return counts
+
+
 def _preflight_create_row(row_num: int, row: Dict, client: ArchivesSpaceClient,
-                          problems: List, parent_cache: Dict = None):
+                          problems: List, parent_cache: Dict = None,
+                          plan: Dict = None, allow_existing: bool = False,
+                          path_cache: Dict = None):
     """Phase-1 check for ONE strict-create row. Every PREDICTABLE failure is
     caught here so an abort means nothing was written: the catalog number
     must be verifiably new, the parent must exist, the extent type must be
@@ -1827,17 +1981,33 @@ def _preflight_create_row(row_num: int, row: Dict, client: ArchivesSpaceClient,
     is never permission to write."""
     issues = []
     catalog_number = (row.get(col.CATALOG) or '').strip()
+
+    def refuse(reason):
+        problems.append((row_num, row, reason))
+        if plan is not None:
+            plan[row_num] = {"action": "refuse", "catalog": catalog_number, "reason": reason}
+
     if not catalog_number:
-        problems.append((row_num, row, "Missing catalog number"))
+        if allow_existing:  # --skip-duplicates has always skipped these
+            if plan is not None:
+                plan[row_num] = {"action": "skip", "catalog": f"row {row_num}",
+                                 "reason": "Missing catalog number"}
+            return
+        refuse("Missing catalog number")
         return
     if not col.valid_catalog_number(catalog_number):
-        problems.append((row_num, row, f"Malformed catalog number {catalog_number!r} "
-                                       f"- must be JPC_AV_ followed by digits"))
+        refuse(f"Malformed catalog number {catalog_number!r} "
+               f"- must be JPC_AV_ followed by digits")
         return
     count, existing_uri = client.check_component_unique_id(catalog_number)
     if count is None:
         issues.append(f"Lookup failed for {catalog_number}")
     elif count == 1:
+        if allow_existing:
+            if plan is not None:
+                plan[row_num] = {"action": "skip", "catalog": catalog_number,
+                                 "reason": "already in ArchivesSpace"}
+            return
         issues.append(f"{catalog_number} already exists ({existing_uri})")
     elif count > 1:
         issues.append(f"{count} records found for {catalog_number} - clean up duplicates first")
@@ -1846,7 +2016,11 @@ def _preflight_create_row(row_num: int, row: Dict, client: ArchivesSpaceClient,
     if original_format and not client.validate_extent_type(original_format):
         issues.append(f"Invalid extent type: '{original_format}'")
 
+    dates, date_errors = create_date_objects(row)
+    issues.extend(date_errors)
+
     parent_ref_id = (row.get(col.PARENT_REFID) or '').strip()
+    lookup = None
     if not parent_ref_id:
         issues.append("Missing Parent RefID")
     else:
@@ -1868,12 +2042,25 @@ def _preflight_create_row(row_num: int, row: Dict, client: ArchivesSpaceClient,
                       f"- clean up duplicates first")
 
     if issues:
-        problems.append((row_num, row, "; ".join(issues)))
+        refuse("; ".join(issues))
+        return
+    if plan is not None:
+        plan[row_num] = {
+            "action": "create", "catalog": catalog_number,
+            "title": (row.get(col.TITLE) or '').strip() or catalog_number,
+            "dates": [(d["label"], d["begin"]) for d in dates],
+            "format": original_format,
+            "scope": (row.get(col.DESCRIPTION) or '').strip(),
+            "phystech": (row.get(col.PHYSTECH) or '').strip(),
+            "parent_path": record_path(client, lookup.uri, lookup.record,
+                                       path_cache if path_cache is not None else {}),
+            "container": "existing" if container else "new",
+        }
 
 
 def process_csv_file(filename: str, client: ArchivesSpaceClient,
                     dry_run: bool = False, duplicate_mode: str = 'create',
-                    state: Dict = None) -> Tuple[List[Dict], Dict]:
+                    state: Dict = None, confirm=None) -> Tuple[List[Dict], Dict]:
     """Process entire CSV file in create mode and return results.
 
     duplicate_mode 'create' (strict, the default): phase 1 preflights EVERY
@@ -1881,8 +2068,14 @@ def process_csv_file(filename: str, client: ArchivesSpaceClient,
     exists, extent type valid, container indicator unambiguous; if any row
     fails, the entire run aborts with no writes. (Runtime API failures
     during phase 2 can still leave a partial create - those are surfaced
-    in the report and the non-zero exit.) duplicate_mode 'skip' (--skip-duplicates): no
-    preflight - new rows are created, existing ones skipped, single pass.
+    in the report and the non-zero exit.) duplicate_mode 'skip' (--skip-duplicates): the
+    same checks sort every row into create / skip (already exists) / refused,
+    without stopping the run; only the creates are written.
+
+    Both modes print the plan before anything is written. `confirm`, when
+    given (real runs from main()), is called with a short summary and must
+    return True before any write - containers included; otherwise every row
+    is recorded unwritten and summary["cancelled"] is set.
 
     `state`, when provided, is populated with the LIVE results/summary
     objects up front, so a KeyboardInterrupt that escapes this function
@@ -1918,22 +2111,28 @@ def process_csv_file(filename: str, client: ArchivesSpaceClient,
 
     summary["total_rows"] = len(rows)
 
-    # --- Phase 1 (strict create only): verify every catalog number is new.
-    # No writes happen here, so an abort means NOTHING was written - fix the
-    # sheet and rerun safely. Mirror of --update-only's resolve phase.
+    # --- Phase 1: check every row and build the plan. No writes happen here,
+    # so an abort means NOTHING was written - fix the sheet and rerun safely.
+    # Mirror of --update-only's resolve phase. Strict create aborts on any
+    # problem; --skip-duplicates refuses just those rows.
+    print_status("info", f"Checking {len(rows)} row(s) before writing anything "
+                         f"(catalog number new, parent exists, format valid, "
+                         f"container unambiguous)...")
+    problems = []
+    plan = {}
+    parent_cache, path_cache = {}, {}
+    for row_num, row in enumerate(rows, 1):
+        try:
+            _preflight_create_row(row_num, row, client, problems, parent_cache, plan=plan,
+                                  allow_existing=(duplicate_mode == 'skip'),
+                                  path_cache=path_cache)
+        except Exception as e:
+            logging.error(f"Preflight failed for row {row_num}: {e}")
+            reason = f"Preflight error (malformed row or record): {e}"
+            problems.append((row_num, row, reason))
+            plan[row_num] = {"action": "refuse",
+                             "catalog": (row.get(col.CATALOG) or '').strip(), "reason": reason}
     if duplicate_mode == 'create':
-        print_status("info", f"Preflighting {len(rows)} row(s) before writing anything "
-                             f"(catalog number new, parent exists, format valid, "
-                             f"container unambiguous)...")
-        problems = []
-        parent_cache = {}
-        for row_num, row in enumerate(rows, 1):
-            try:
-                _preflight_create_row(row_num, row, client, problems, parent_cache)
-            except Exception as e:
-                logging.error(f"Preflight failed for row {row_num}: {e}")
-                problems.append((row_num, row, f"Preflight error (malformed row or record): {e}"))
-
         if problems:
             print_status("error", f"{len(problems)} row(s) failed preflight - "
                                   f"ABORTING, nothing was written:")
@@ -1969,8 +2168,34 @@ def process_csv_file(filename: str, client: ArchivesSpaceClient,
             summary["end_time"] = datetime.now().isoformat()
             return results, summary
 
-    # --- Phase 2: create the records. ---
+    counts = print_create_plan(rows, plan)
+    if not dry_run and confirm is not None and counts["create"]:
+        if not confirm([f"Create {counts['create']} record(s), with "
+                        f"{counts['new_containers']} new AV Case container(s)",
+                        f"Skip {counts['skip']}, refused {counts['refuse']}"]):
+            _cancel_all(rows, results, summary)
+            return results, summary
+    print_section("DRY RUN - nothing is written" if dry_run else "WRITING")
+    if counts["skip"] or counts["refuse"]:
+        print_status("skipped", f"{counts['skip']} skipped and {counts['refuse']} refused, "
+                                f"as listed in the PLAN - not written")
+
+    # --- Phase 2: carry out the plan. Skipped and refused rows are never
+    # written; creates re-check everything live as they go. ---
     for row_num, row in enumerate(rows, 1):
+        entry = plan.get(row_num, {})
+        if entry.get("action") in ("skip", "refuse"):
+            if entry["action"] == "skip":
+                result = make_row_result(
+                    row_num, row, "skipped",
+                    entry["reason"] if entry["reason"] == "Missing catalog number"
+                    else "Duplicate - skipped (use --update-only to change existing records)")
+            else:
+                result = make_row_result(row_num, row, "error", entry["reason"])
+            results.append(result)
+            # already shown row by row in the PLAN - counted, not repeated
+            record_row_outcome(result, summary, echo=False)
+            continue
         try:
             result = process_csv_row(row, row_num, client, dry_run, duplicate_mode)
         except DuplicateStop as stop:
@@ -2141,6 +2366,7 @@ def generate_reports(results: List[Dict], summary: Dict) -> bool:
             json.dump(report_data, jsonfile, indent=2)
         os.replace(tmp_path, JSON_REPORT)
         logging.info(f"JSON report saved: {JSON_REPORT}")
+        summary["report_file"] = JSON_REPORT
     except Exception as e:
         ok = False
         logging.error(f"Failed to write JSON report: {str(e)}")
@@ -2184,7 +2410,7 @@ def reconcile_summary(results: List[Dict], summary: Dict):
 
 def print_summary(summary: Dict, elapsed_time: str = None):
     """Print import summary to console."""
-    print_section("IMPORT SUMMARY")
+    print_section("SUMMARY")
     
     total = summary['total_rows']
     created = summary['created']
@@ -2222,7 +2448,12 @@ def print_summary(summary: Dict, elapsed_time: str = None):
     if elapsed_time:
         print(f"\n  Processing Time: {elapsed_time}")
     
-    print(f"\n  Reports: {OUTPUT_DIR}/")
+    if dry:
+        print(f"\n  No report files written (dry run)")
+    else:
+        print(f"\n  Reports: {OUTPUT_DIR}/")
+    if summary.get('report_file'):
+        print(f"  Report: {os.path.basename(summary['report_file'])}")
     if summary.get('records_file'):
         print(f"  Records (as stored in ASpace): {os.path.basename(summary['records_file'])} "
               f"(records: {summary.get('snapshots_captured', '?')} of "
@@ -2242,6 +2473,56 @@ def print_summary(summary: Dict, elapsed_time: str = None):
 # ==============================
 # MAIN EXECUTION
 # ==============================
+
+def outcome_unknown(result: Dict) -> bool:
+    """True for an error row whose write may or may not have landed - a lost
+    response, a timeout, or Ctrl-C mid-write. Such a row is never "not
+    created": it has to be checked in ArchivesSpace."""
+    message = result.get("message") or ""
+    return result.get("status") == "error" and (
+        "UNKNOWN" in message or "outcome unknown" in message
+        or "response was lost" in message)
+
+
+def print_next_step(summary: Dict, results: List[Dict] = None) -> None:
+    """After a real PRODUCTION create run that created records and saved its
+    report: the exact command that records the results in Airtable. A run
+    that did not carry out every row is labelled PARTIAL, with confirmed
+    creations, writes of unknown outcome, definite failures and rows never
+    reached counted separately - the write-back records only the confirmed
+    creations. Dry runs, update runs, sandbox runs (the write-back accepts
+    production reports only) and runs that created nothing get no
+    write-back suggestion."""
+    created = summary.get("created", 0)
+    if (summary.get("dry_run") or summary.get("duplicate_mode") == "update-only"
+            or summary.get("environment") != "production"
+            or not created or not summary.get("report_file")):
+        return
+    results = results or []
+    unknown = [r.get(col.CATALOG) or f"row {r.get('row_number')}"
+               for r in results if outcome_unknown(r)]
+    failed = sum(1 for r in results if r.get("status") == "error") - len(unknown)
+    not_reached = (max(summary.get("total_rows", 0) - len(results), 0)
+                   + sum(1 for r in results if r.get("status") == "aborted"))
+    script = os.path.relpath(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                          "airtable_writeback.py"))
+    print_section("NEXT STEP - record the results in Airtable")
+    if unknown or failed or not_reached or summary.get("interrupted"):
+        parts = [f"{created} created"]
+        if unknown:
+            parts.append(f"{len(unknown)} outcome unknown")
+        if failed:
+            parts.append(f"{failed} failed")
+        if not_reached:
+            parts.append(f"{not_reached} not reached")
+        print(f"  {Colors.YELLOW}{Colors.BOLD}PARTIAL run:{Colors.RESET} {', '.join(parts)}"
+              f"{' (interrupted)' if summary.get('interrupted') else ''}."
+              f" The write-back records only the {created} created.")
+        if unknown:
+            print(f"  Check these in ArchivesSpace before rerunning - they may exist: "
+                  f"{', '.join(unknown)}")
+    print(f"  python3 {_shlex.quote(script)} {_shlex.quote(summary['report_file'])} --run\n")
+
 
 def recover_partial_run(state: Dict, error: Exception):
     """After an exception escapes processing: the live results/summary the
@@ -2470,7 +2751,8 @@ def main():
     
     # Print header - the TARGET line is the audit trail of which catalog
     # this run touched; production gets the loud color.
-    print_header("ArchivesSpace CSV Import")
+    print_header("Update ArchivesSpace records" if args.update_only
+                 else "Create ArchivesSpace records")
     target = (f"{aspace_client.ACTIVE_ENV.upper()} ({aspace_client.ASPACE_URL}, "
               f"repo {aspace_client.REPO_ID}, resource {aspace_client.RESOURCE_ID})")
     target_color = Colors.RED if aspace_client.ACTIVE_ENV == 'production' else Colors.GREEN
@@ -2480,7 +2762,7 @@ def main():
     print(f"  File: {csv_file}")
     print(f"  Mode: {MODE_LABELS[duplicate_mode]}")
     if args.dry_run:
-        print(f"  {Colors.YELLOW}{Colors.BOLD}DRY RUN{Colors.RESET}")
+        print(f"  {Colors.YELLOW}{Colors.BOLD}DRY RUN - nothing is written{Colors.RESET}")
     
     # Start timing
     start_time = time.time()
@@ -2575,7 +2857,7 @@ def main():
         print_status("info", "Extent vocabulary loaded only if a row changes a format "
                              "(update-only)")
     
-    print_section("PROCESSING RECORDS")
+    print_section("CHECKING ROWS (nothing is written yet)")
     
     # `state` receives the LIVE results/summary objects before processing
     # starts, so a KeyboardInterrupt that escapes the processing functions
@@ -2585,10 +2867,11 @@ def main():
     try:
         if args.update_only:
             results, summary = process_csv_file_update_only(csv_source, client, args.dry_run,
-                                                            state=state)
+                                                            state=state, confirm=ask_to_write)
         else:
             results, summary = process_csv_file(csv_source, client, args.dry_run,
-                                                duplicate_mode, state=state)
+                                                duplicate_mode, state=state,
+                                                confirm=ask_to_write)
     except KeyboardInterrupt:
         results = state.get("results")
         summary = state.get("summary")
@@ -2611,12 +2894,23 @@ def main():
             client.logout()
             sys.exit(1)
 
+    if summary.get("cancelled"):
+        # Nothing was written anywhere, so there is nothing to report.
+        print_status("warning", "Cancelled - nothing written to ArchivesSpace")
+        client.logout()
+        sys.exit(1)
+
     if summary.get("fatal_error"):
         # Write the audit trail FIRST, without depending on the console
         # (the console may be what failed); then say what happened.
         reconcile_summary(results, summary)
         if not summary.get("end_time"):  # initialized to None, so setdefault would not do
             summary["end_time"] = datetime.now().isoformat()
+        if summary.get("dry_run"):
+            _safe_console("error", f"Fatal error during the dry run: {summary['fatal_error']} "
+                                   f"- nothing was written")
+            client.logout()
+            sys.exit(1)
         reports_ok = generate_reports(results, summary)
         _safe_console("error", f"Fatal error during processing: {summary['fatal_error']} - "
                                f"partial reports {'written' if reports_ok else 'could NOT be written'} "
@@ -2631,7 +2925,8 @@ def main():
             reconcile_summary(results, summary)
             if not summary.get("end_time"):
                 summary["end_time"] = datetime.now().isoformat()
-        reports_ok = generate_reports(results, summary)
+        # A dry run writes no report files: nothing happened to record.
+        reports_ok = True if summary.get("dry_run") else generate_reports(results, summary)
 
         # Calculate elapsed time
         elapsed_seconds = time.time() - start_time
@@ -2640,6 +2935,9 @@ def main():
         elapsed_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
         print_summary(summary, elapsed_str)
+
+        if reports_ok:
+            print_next_step(summary, results)
 
         if not reports_ok:
             # ArchivesSpace may have been modified but the audit trail wasn't

@@ -42,6 +42,11 @@ TRACKING_LINK_FIELD = "JPCA-AV_SOURCE"          # link to JPCA-AV_SOURCE
 CREATED_FIELD = "ASpace Item Record Created"    # single select, in ASpace_tracking
 CREATED_VALUE = "Yes"
 
+# The Airtable tables as the base shows them - with their markers, so they
+# are never mistaken for ArchivesSpace in the output
+IMPORT_LABEL = "<<< ASpace_import >>>"
+TRACKING_LABEL = "((( ASpace_tracking )))"
+
 PATCH_BATCH = 10  # Airtable's per-request record limit
 
 try:
@@ -69,7 +74,7 @@ def get_colored_help():
     C = Colors
     return f"""
 {C.BOLD}{C.CYAN}===============================================================================
-                        Airtable Import Write-back
+                   Record import results in Airtable
 ==============================================================================={C.RESET}
 
 {C.BOLD}DESCRIPTION{C.RESET}
@@ -189,7 +194,8 @@ def load_report(path, exclude=()):
                   and obj.get("component_id") == catalog):
             review.append((catalog, "no read-back snapshot of the created record"))
         else:
-            candidates.append({"catalog": catalog, "parent": parent, "uri": uri})
+            candidates.append({"catalog": catalog, "parent": parent, "uri": uri,
+                               "title": (r.get(col.TITLE) or "").strip()})
     return candidates, review, counts, excluded
 
 # ==============================
@@ -278,9 +284,9 @@ def build_plan(token, candidates):
     sources = read_table(token, ids["source_table"], [ids["source_primary"]],
                          ids["source_name"], as_text=True)
     imports = read_table(token, IMPORT_TABLE_ID, [ids["import_link"], ids["parent"]],
-                         "ASpace_import")
+                         IMPORT_LABEL)
     trackings = read_table(token, TRACKING_TABLE_ID, [ids["tracking_link"], ids["created"]],
-                           "ASpace_tracking")
+                           TRACKING_LABEL)
 
     by_catalog = {}
     for rec in sources:
@@ -310,15 +316,15 @@ def build_plan(token, candidates):
             entry["note"] = (f"{len(source_ids) or 'no'} {ids['source_name']} row(s) "
                              f"named {c['catalog']}")
             continue
-        imp, note = one(import_by_source.get(source_ids[0], []), "ASpace_import")
-        trk, note2 = one(tracking_by_source.get(source_ids[0], []), "ASpace_tracking")
+        imp, note = one(import_by_source.get(source_ids[0], []), IMPORT_LABEL)
+        trk, note2 = one(tracking_by_source.get(source_ids[0], []), TRACKING_LABEL)
         if note or note2:
             entry["note"] = "; ".join(n for n in (note, note2) if n)
             continue
         # a row linking this item AND others would change the others too
         shared = [f"{where} row links {len(links)} items"
-                  for where, rec, fid in (("ASpace_import", imp, ids["import_link"]),
-                                          ("ASpace_tracking", trk, ids["tracking_link"]))
+                  for where, rec, fid in ((IMPORT_LABEL, imp, ids["import_link"]),
+                                          (TRACKING_LABEL, trk, ids["tracking_link"]))
                   for links in [link_ids(rec.get("fields", {}).get(fid))]
                   if links != [source_ids[0]]]
         if shared:
@@ -330,8 +336,10 @@ def build_plan(token, candidates):
             entry["note"] = (f"Airtable already has parent {current}; the import used "
                              f"{c['parent']} - left alone")
             continue
+        created_now = select_name(trk.get("fields", {}).get(ids["created"]))
+        entry["current_parent"], entry["current_created"] = current, created_now
         entry["set_parent"] = not current
-        entry["set_created"] = select_name(trk.get("fields", {}).get(ids["created"])) != CREATED_VALUE
+        entry["set_created"] = created_now != CREATED_VALUE
     return plan, ids
 
 # ==============================
@@ -478,6 +486,25 @@ def summarize(plan, review):
     return counts, review + [(e["catalog"], e["note"]) for e in plan if e["note"]]
 
 
+def print_changes(plan):
+    """One line per row that will change, showing both transitions as they
+    actually are - a parent written into a blank cell vs one already there,
+    the flag changed to Yes vs already Yes - so the change can be checked
+    row by row before anything is written."""
+    pending = [e for e in plan if not e["note"] and (e["set_parent"] or e["set_created"])]
+    if not pending:
+        return
+    print(f"\n  {Colors.BOLD}Changes, row by row{Colors.RESET}  "
+          f"{Colors.DIM}({PARENT_FIELD} | {CREATED_FIELD} | title){Colors.RESET}")
+    for e in pending:
+        parent = (f"(blank) -> {e['parent']}" if e["set_parent"]
+                  else f"{e['parent']} (already set)")
+        created = (f"{e.get('current_created') or '(blank)'} -> {CREATED_VALUE}"
+                   if e["set_created"] else f"already {CREATED_VALUE}")
+        print(f"    {e['catalog']}  parent {parent}  |  created {created}  |  "
+              f"{e.get('title') or '(no title)'}")
+
+
 def confirm(report, plan, excluded, review_count):
     """Show what --run is about to write and ask for an explicit yes.
     Anything else - no, blank, closed input, Ctrl-C - writes nothing."""
@@ -488,8 +515,8 @@ def confirm(report, plan, excluded, review_count):
     print(f"    Report:   {report} (production import)")
     print(f"    Rows:     {len(pending)} to write, {review_count} for review, "
           f"{len(excluded)} excluded")
-    print(f"    Fields:   {PARENT_FIELD} in <<< ASpace_import >>> ({n_parent} row(s))")
-    print(f"              {CREATED_FIELD} = {CREATED_VALUE} in ((( ASpace_tracking ))) "
+    print(f"    Fields:   {PARENT_FIELD} in {IMPORT_LABEL} ({n_parent} row(s))")
+    print(f"              {CREATED_FIELD} = {CREATED_VALUE} in {TRACKING_LABEL} "
           f"({n_yes} row(s))")
     try:
         answer = input(f"\n  Type yes to write, anything else to cancel: ")
@@ -523,7 +550,7 @@ def main():
         Colors.disable()
     command = " ".join([os.path.basename(sys.executable)] + [shlex.quote(a) for a in sys.argv])
 
-    pull.print_header("Airtable Import Write-back")
+    pull.print_header("Record import results in Airtable")
     print(f"  Report: {args.report}")
     print(f"  Mode: {'WRITE (--run)' if args.run else 'preview - nothing is written'}")
 
@@ -567,6 +594,7 @@ def main():
             print_status("warning", f"{catalog}: {note}", indent=1)
 
     pending = [e for e in plan if not e["note"] and (e["set_parent"] or e["set_created"])]
+    print_changes(plan)
     if not args.run:
         if pending:
             # the exact command plus --run, so the exclusions carry over
