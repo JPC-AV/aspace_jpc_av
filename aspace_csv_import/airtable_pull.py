@@ -234,6 +234,16 @@ def fetch_view_columns(token, view_name):
     missing = [fid for fid in visible if fid not in fields]
     if missing:
         raise PullError(f"view lists field(s) the table schema does not: {', '.join(missing)}")
+    # The hold columns travel with every pull, even when the view hides
+    # them: whether an item is held must never depend on the view's layout.
+    by_name = {f.get("name"): fid for fid, f in fields.items()}
+    misspelled = col.hold_name_problem(list(by_name))
+    if misspelled:
+        raise PullError(misspelled + " - nothing written")
+    for name in (col.HOLD, col.HOLD_REASON):
+        fid = by_name.get(name)
+        if fid and fid not in visible:
+            visible = list(visible) + [fid]
     return view, [(fid, fields[fid].get("name"), fields[fid].get("type")) for fid in visible]
 
 

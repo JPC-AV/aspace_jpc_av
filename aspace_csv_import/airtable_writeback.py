@@ -231,7 +231,19 @@ def check_schema(token):
     if not source_id or source_id != (tracking_link.get("options") or {}).get("linkedTableId"):
         raise PullError(f"{IMPORT_LINK_FIELD} and {TRACKING_LINK_FIELD} do not link to the same table")
     source = tables.get(source_id) or {}
+    # The hold is optional: a base without the field simply has no holds.
+    import_fields = {f.get("name"): f for f in tables[IMPORT_TABLE_ID].get("fields", [])}
+    misspelled = col.hold_name_problem(list(import_fields))
+    if misspelled:
+        raise PullError(misspelled + " - nothing written")
+    hold = import_fields.get(col.HOLD)
+    if hold is not None and hold.get("type") != "checkbox":
+        raise PullError(f"{col.HOLD} is a {hold.get('type')} field, expected checkbox "
+                        f"- nothing written")
+    reason = import_fields.get(col.HOLD_REASON)
     return {
+        "hold": hold["id"] if hold else None,
+        "hold_reason": reason["id"] if reason else None,
         "parent": parent["id"], "import_link": import_link["id"],
         "tracking_link": tracking_link["id"], "created": created["id"],
         "source_table": source_id, "source_primary": source.get("primaryFieldId"),
@@ -283,7 +295,9 @@ def build_plan(token, candidates):
     print_status("info", "Reading Airtable (three tables - about a minute each)...")
     sources = read_table(token, ids["source_table"], [ids["source_primary"]],
                          ids["source_name"], as_text=True)
-    imports = read_table(token, IMPORT_TABLE_ID, [ids["import_link"], ids["parent"]],
+    imports = read_table(token, IMPORT_TABLE_ID,
+                         [f for f in (ids["import_link"], ids["parent"], ids["hold"],
+                                      ids["hold_reason"]) if f],
                          IMPORT_LABEL)
     trackings = read_table(token, TRACKING_TABLE_ID, [ids["tracking_link"], ids["created"]],
                            TRACKING_LABEL)
@@ -329,6 +343,11 @@ def build_plan(token, candidates):
                   if links != [source_ids[0]]]
         if shared:
             entry["note"] = "; ".join(shared) + " - left alone"
+            continue
+        if ids["hold"] and imp.get("fields", {}).get(ids["hold"]) is True:
+            # held NOW in Airtable - even after it was created
+            reason = (imp["fields"].get(ids["hold_reason"]) or "").strip() if ids["hold_reason"] else ""
+            entry["note"] = f"on hold in Airtable{': ' + reason if reason else ''} - left alone"
             continue
         entry["import_rec"], entry["tracking_rec"] = imp["id"], trk["id"]
         current = (imp.get("fields", {}).get(ids["parent"]) or "").strip()

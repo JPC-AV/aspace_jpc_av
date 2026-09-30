@@ -334,6 +334,10 @@ def validate_csv_before_import(filename: str, update_only: bool = False) -> Tupl
                 errors.append(f"Duplicate column header(s): {'; '.join(duplicates)} "
                               f"- remove the stale duplicate column(s) first")
                 return False, errors, warnings
+            hold_name = col.hold_name_problem(headers)
+            if hold_name:
+                errors.append(hold_name)
+                return False, errors, warnings
 
             if update_only:
                 if col.CATALOG not in headers:
@@ -393,7 +397,14 @@ def validate_csv_before_import(filename: str, update_only: bool = False) -> Tupl
                     errors.append(f"Row {row_num}: Duplicate CATALOG_NUMBER: {catalog_num}")
                 else:
                     catalog_numbers.add(catalog_num)
-                
+
+                # A held row is refused in the plan with its hold reason; its
+                # content (parent, dates, title) is not checked here, so one
+                # held row with a blank parent cannot stop a --skip-duplicates
+                # run before the plan exists. Structural checks above still apply.
+                if col.hold_problem(row):
+                    continue
+
                 # Check parent ref_id (create runs only - updates never use it)
                 if not update_only:
                     parent_ref = (row.get(col.PARENT_REFID) or '').strip()
@@ -1615,6 +1626,12 @@ def _preflight_update_only_row(row_num: int, row: Dict, client: ArchivesSpaceCli
         problems.append((row_num, row, f"Malformed catalog number {catalog_number!r} "
                                        f"- must be JPC_AV_ followed by digits"))
         return
+    held = col.hold_problem(row)
+    if held:
+        # A hold blocks changes as well as creation: the batch stops here,
+        # before any write, like any other problem row.
+        problems.append((row_num, row, held))
+        return
 
     # Extent type must be in the live controlled vocabulary - but only when
     # this row would actually CHANGE the extent. An exported row carries the
@@ -1998,6 +2015,12 @@ def _preflight_create_row(row_num: int, row: Dict, client: ArchivesSpaceClient,
     if not col.valid_catalog_number(catalog_number):
         refuse(f"Malformed catalog number {catalog_number!r} "
                f"- must be JPC_AV_ followed by digits")
+        return
+    held = col.hold_problem(row)
+    if held:
+        # Strict create stops the batch on this, as on any problem row;
+        # --skip-duplicates refuses just this row.
+        refuse(held)
         return
     count, existing_uri = client.check_component_unique_id(catalog_number)
     if count is None:

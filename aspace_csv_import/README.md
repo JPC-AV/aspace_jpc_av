@@ -149,8 +149,9 @@ Command-line arguments override creds.py settings.
 below to be present** - the "Value required?" column describes whether each
 *cell* may be left blank, not whether the column may be omitted. Only
 `--update-only` accepts a narrow sheet (`CATALOG_NUMBER` plus just the
-columns to change). The last two rows are read only by
-`aspace_csv_export.py --fill-parents`; the importer ignores them.
+columns to change). `EJS Episode` and `ASpace File Type` are read only by
+`aspace_csv_export.py --fill-parents`; the importer ignores them. The two
+hold columns are read by every tool (see Holds below).
 
 | Column | Description | Value required? | Example |
 |--------|-------------|----------|---------|
@@ -165,10 +166,23 @@ columns to change). The last two rows are read only by
 | ASpace PhysTech Note | Physical characteristics / playback notes | No | Slight ringing present... |
 | EJS Episode | Episode number, for `--fill-parents` | Recommended - when blank, the title must carry the episode | 4006, or 09 for Celebrity Showcase |
 | ASpace File Type | Which file record under the episode, for `--fill-parents` | For the fill | Edited, Promo, Raw |
+| ASpace Hold | Keeps the item out of processing: `checked` or blank (what an Airtable pull writes) - any other value is refused | No | checked |
+| ASpace Hold Reason | Why the item is held; shown wherever the hold stops it | No | Content does not match title |
 
 **Date range:** every date you set or change must fall within **1940–2020**, the span of the AV material - anything outside is rejected as a typo. **Two-digit years** (`11/2/93`) are therefore unambiguous: `40`–`99` are 19xx, `00`–`20` are 20xx, and `21`–`39` are rejected (impossible in either century). The same sheet parses identically in any year. Day-first dates are never accepted. One exception: `--update-only` preserves a stored date outside the range as long as the sheet leaves it unchanged (an exported legacy value round-trips; the export flags it for you), but refuses to *change* a date to an out-of-range value.
 
 *If no title is provided, the catalog number will be used. If no format is provided the record is created without an extent - every item should have one, but the importer does not insist.
+
+**Holds.** A row whose `ASpace Hold` is `checked` is never processed: the
+fill sends it to the review file; strict `--create-records` and
+`--update-only` stop the whole batch before writing anything (like any
+problem row); `--skip-duplicates` refuses just that row; the Airtable
+write-back leaves it alone (it reads the hold live from Airtable, so an item
+held after it was created is protected too); `--check` still lists it,
+marked. `airtable_pull.py` always includes both hold columns, even when the
+view hides them. Two limits: a CSV carries the hold **as of the pull** - tick
+the box before pulling, and pull again after ticking one - and a sheet
+without the `ASpace Hold` column is not guarded at all.
 
 **Other columns** are ignored, so an Airtable export can be used as it is. Two header problems are refused by `--fill-parents`: two or more columns with no header, and a header that is a near-miss of a column the fill reads or adds (`EJS Episode ` with a trailing space, `path` for `Path`). A near-miss would otherwise be ignored or duplicated.
 
@@ -624,7 +638,9 @@ environment is configured; use `--env sandbox` for a trial run.
 
 1. **Make the batch's view in Airtable** - a grid view in
    `<<< ASpace_import >>>` holding only items not yet in ArchivesSpace
-   (filter out rows whose `ASpace Item Record Created` is Yes), with the nine
+   (filter out rows whose `ASpace Item Record Created` is Yes, and rows with
+   `ASpace Hold` ticked - the tools refuse held rows anyway, but a strict
+   create stops the whole batch on one), with the nine
    import columns plus `ASpace File Type` and `EJS Episode` visible (see
    [CSV File Format](#csv-file-format)). Keep `EJS Episode` filled: without
    it the fill has to read the episode from each title, which then has to
@@ -767,6 +783,9 @@ aborts with no writes.
   - Dry runs write no files; `aspace_csv_export.py --check` sorts catalog
     numbers into four outcomes on screen
   - A firewall block at login is no longer reported as a bad password
+  - `ASpace Hold`: held rows go to review in the fill, stop strict create and
+    update-only before any write, are refused by `--skip-duplicates`, are left
+    alone by the write-back, and are marked by `--check`
 
 - **v3.0** (2026): Safety hardening + update-only mode
   - New `--update-only` mode: narrow CSVs (CATALOG_NUMBER + columns to

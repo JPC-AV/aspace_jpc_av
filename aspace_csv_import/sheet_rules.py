@@ -79,9 +79,50 @@ EJS_EPISODE = "EJS Episode"
 FILE_TYPE = "ASpace File Type"
 PARENT_NOTE = "Parent Note"
 
+# The hold: an Airtable checkbox (plus its reason) in <<< ASpace_import >>>
+# that keeps an item out of processing. The pull always carries both columns.
+HOLD = "ASpace Hold"
+HOLD_REASON = "ASpace Hold Reason"
+HOLD_TICKED = "checked"  # how Airtable's text form writes a ticked checkbox
+
 OPTIONAL_COLUMNS = [
     "EJS Season", EJS_EPISODE, FILE_TYPE, PARENT_NOTE, "Content TRT", "ORIGINAL_MEDIA_TYPE",
+    HOLD, HOLD_REASON,
 ] + EXPORT_AUDIT_COLUMNS
+
+
+def hold_name_problem(names):
+    """A refusal message when a column or Airtable field is a near-miss of
+    a hold column ("ASpace Hold " with a trailing space, "aspace hold"),
+    else None. A near-miss would be read as "no hold column" and silently
+    switch the protection off; a genuinely absent column is fine."""
+    for known in (HOLD, HOLD_REASON):
+        variants = [n for n in names
+                    if n != known and (n or "").strip().casefold() == known.casefold()]
+        if variants:
+            return (f"{variants[0]!r} is not spelled exactly {known!r} - rename it in "
+                    f"Airtable (a misspelled hold column would switch holds off)")
+    return None
+
+
+def hold_problem(row):
+    """Why a row may not be processed because of its hold, or None.
+
+    The ASpace Hold cell is either "checked" (held) or blank (not held) -
+    exactly what an Airtable pull writes. Any other value is refused as
+    unreadable rather than guessed at. A held row with no reason still
+    blocks. A sheet without the column is not guarded (returns None)."""
+    value = row.get(HOLD)
+    if value is None:
+        return None
+    value = value.strip()
+    if not value:
+        return None
+    if value.lower() == HOLD_TICKED:
+        reason = (row.get(HOLD_REASON) or "").strip()
+        return f"on hold: {reason}" if reason else "on hold (no reason given)"
+    return (f"{HOLD} value {value!r} not understood - it must be '{HOLD_TICKED}' "
+            f"or blank; fix it in Airtable and pull again")
 
 
 # The catalog-number contract, shared by every tool: JPC_AV_ followed by

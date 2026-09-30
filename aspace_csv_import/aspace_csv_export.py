@@ -72,9 +72,47 @@ from aspace_client import ASpaceClient
 
 # Reuse the importer's console helpers and note-reading logic so the export
 # shows values the same way an update run would compare them.
-from aspace_csv_import import (Colors, print_status, print_header,
+from aspace_csv_import import (Colors, print_status, print_header, print_section,
                                get_note_content, staff_link_for, RUN_COMMAND,
                                parse_date, render_options)
+
+
+_PROGRESS_OPEN = False  # a terminal progress line is waiting for its newline
+
+
+def close_progress():
+    """End an unfinished progress line, so whatever prints next - a warning,
+    an error, the Ctrl-C message - starts on a line of its own."""
+    global _PROGRESS_OPEN
+    if _PROGRESS_OPEN:
+        _PROGRESS_OPEN = False
+        print(flush=True)
+
+
+class _CloseProgressFirst(logging.Filter):
+    """On the console log handlers: close the progress line before any log
+    message is shown, so a warning is never glued to or hidden by it."""
+    def filter(self, record):
+        close_progress()
+        return True
+
+
+def progress(label, done, total):
+    """Progress on ONE line: in a terminal it updates in place and ends as a
+    single finished line; anywhere else (a log, a pipe) only the finished
+    count is printed. Keeps the screen for the results that matter. Callers
+    run the counted loop inside try/finally: close_progress()."""
+    global _PROGRESS_OPEN
+    finished = done >= total
+    if sys.stdout.isatty():
+        for handler in logging.getLogger().handlers:
+            if not any(isinstance(f, _CloseProgressFirst) for f in handler.filters):
+                handler.addFilter(_CloseProgressFirst())
+        print(f"\r{Colors.CYAN}[>]{Colors.RESET} {label} {done}/{total}"
+              f"{'' if finished else '...'}\033[K", end="\n" if finished else "", flush=True)
+        _PROGRESS_OPEN = not finished
+    elif finished:
+        print_status("info", f"{label} {done}/{total}")
 
 # Batch size for id_set fetches - one API call per BATCH records instead of
 # one call per record, which is the difference between minutes and an hour
@@ -322,6 +360,13 @@ def list_resource_records(client):
 def fetch_records(client, ids):
     """Fetch full records in id_set batches. Returns the records, or None if
     any batch fails - a partial export must never pose as a complete one."""
+    try:
+        return _fetch_batches(client, ids)
+    finally:
+        close_progress()
+
+
+def _fetch_batches(client, ids):
     records = []
     prefix = f"/repositories/{aspace_client.REPO_ID}/archival_objects/"
     for start in range(0, len(ids), BATCH):
@@ -347,7 +392,7 @@ def fetch_records(client, ids):
             logging.error(f"id_set batch mismatch: asked for {sorted(wanted)}, got {got}")
             return None
         records.extend(result)
-        print_status("info", f"Fetched {min(start + BATCH, len(ids))}/{len(ids)} records...")
+        progress("Fetched records", min(start + BATCH, len(ids)), len(ids))
     return records
 
 
@@ -443,35 +488,37 @@ def export_by_list(client, catalog_numbers):
     rows = []
     problems = []
     linked_cache = {}
-    for i, number in enumerate(catalog_numbers, 1):
-        if not col.valid_catalog_number(number):
-            problems.append(f"{number}: malformed catalog number (must be JPC_AV_ + digits) "
-                            f"- not looked up")
-            continue
-        lookup = client.find_archival_object(number)
-        if lookup.status == "found":
-            record = lookup.record
-            problem = record_shape_problem(record)
-            if problem:
-                problems.append(f"{number}: malformed record ({problem}) - retry later")
+    try:
+        for i, number in enumerate(catalog_numbers, 1):
+            if not col.valid_catalog_number(number):
+                problems.append(f"{number}: malformed catalog number (must be JPC_AV_ + digits) "
+                                f"- not looked up")
                 continue
-            placed, reason = place_record(
-                record, lambda uri: fetch_linked(client, uri, linked_cache))
-            if placed is None:
-                problems.append(f"{number}: its {reason}")
-                continue
-            # list order is kept - no tree sort, so no approximate-order note
-            refid, depth, path, _, _ = placed
-            row, _ = build_row(record, refid, depth, path)
-            rows.append(row)
-        elif lookup.status == "none":
-            problems.append(f"{number}: not found in the resource")
-        elif lookup.status == "multiple":
-            problems.append(f"{number}: {lookup.count} records share this number")
-        else:
-            problems.append(f"{number}: lookup failed - retry later")
-        if i % 25 == 0:
-            print_status("info", f"Looked up {i}/{len(catalog_numbers)}...")
+            lookup = client.find_archival_object(number)
+            if lookup.status == "found":
+                record = lookup.record
+                problem = record_shape_problem(record)
+                if problem:
+                    problems.append(f"{number}: malformed record ({problem}) - retry later")
+                    continue
+                placed, reason = place_record(
+                    record, lambda uri: fetch_linked(client, uri, linked_cache))
+                if placed is None:
+                    problems.append(f"{number}: its {reason}")
+                    continue
+                # list order is kept - no tree sort, so no approximate-order note
+                refid, depth, path, _, _ = placed
+                row, _ = build_row(record, refid, depth, path)
+                rows.append(row)
+            elif lookup.status == "none":
+                problems.append(f"{number}: not found in the resource")
+            elif lookup.status == "multiple":
+                problems.append(f"{number}: {lookup.count} records share this number")
+            else:
+                problems.append(f"{number}: lookup failed - retry later")
+            progress("Looked up", i, len(catalog_numbers))
+    finally:
+        close_progress()
     return rows, problems
 
 
@@ -484,8 +531,7 @@ def fetch_resource(client):
     ids = list_resource_records(client)
     if ids is None:
         return None, "could not enumerate the resource's records"
-    print_status("info", f"{len(ids)} record(s) in the resource - "
-                         f"fetching in batches of {BATCH}...")
+    print_status("info", f"Reading the whole AV resource ({len(ids)} records)...")
     records = fetch_records(client, ids)
     if records is None:
         return None, "a batch fetch failed - no partial export was written"
@@ -674,7 +720,7 @@ def read_fill_sheet(path):
             # like "EJS Episode " would otherwise be treated as an absent
             # column - its values silently ignored, the title winning.
             for known in (col.CATALOG, col.TITLE, col.PARENT_REFID, col.EJS_EPISODE,
-                          col.FILE_TYPE, col.PARENT_NOTE, "Path"):
+                          col.FILE_TYPE, col.PARENT_NOTE, "Path", col.HOLD, col.HOLD_REASON):
                 variants = [h for h in headers
                             if h != known and (h or "").strip().casefold() == known.casefold()]
                 if variants:
@@ -732,6 +778,13 @@ def fill_parents(rows, index, episodes):
     filled = kept = 0
     unresolved = []
     for row_num, row in enumerate(rows, 1):
+        held = col.hold_problem(row)
+        if held:
+            # A held item is never made ready, whatever its parent: it waits
+            # in the review file until the hold is lifted in Airtable.
+            row["Path"], row[col.PARENT_NOTE] = "", held
+            unresolved.append((row_num, row.get(col.CATALOG, ""), held))
+            continue
         existing = (row.get(col.PARENT_REFID) or "").strip()
         file_type = (row.get(col.FILE_TYPE) or "").strip()
         episode_cell, cell_note = episode_cell_rule(row.get(col.EJS_EPISODE))
@@ -1032,6 +1085,8 @@ def fix_in(note):
     found nothing, or too much, in ArchivesSpace, the cause may still be an
     Airtable typo (episode, file type) - so check Airtable first, and fix
     the ArchivesSpace hierarchy only if Airtable's value is right."""
+    if note.startswith("on hold") or col.HOLD in note:
+        return "Airtable (hold)"
     if ("in ArchivesSpace" in note or "records match" in note
             or "has no ref_id" in note):
         return "Airtable, then ArchivesSpace"
@@ -1049,6 +1104,69 @@ def split_filled(rows, filled, unresolved):
     for r in review:
         r[FIX_IN] = fix_in(r.get(col.PARENT_NOTE) or "")
     return ready, review, {"by lookup": filled, "supplied": len(ready) - filled}
+
+
+# Review reasons, in the order they are shown; each note falls in the first
+# group whose test matches it.
+REVIEW_GROUPS = [
+    ("On hold", lambda n: n.startswith("on hold") or col.HOLD in n),
+    ("EJS Episode is TBD", lambda n: "is TBD" in n),
+    ("More than one episode", lambda n: "more than one episode" in n
+                                        or "not a single episode" in n),
+    ("Raw - choose the parent by hand", lambda n: n.startswith("Raw")),
+    ("Airtable's parent differs from the lookup", lambda n: "different parent" in n),
+    ("Episode and title disagree", lambda n: "disagree" in n),
+    ("Missing in ArchivesSpace", lambda n: "not found in ArchivesSpace" in n
+                                           or "has no " in n),
+    ("Several matching records", lambda n: "records match" in n),
+    ("No episode given", lambda n: n.startswith("no ")),
+    ("Other", lambda n: True),
+]
+
+
+def print_fill_result(ready, review, counts, unresolved, ready_path, review_path):
+    """The fill's answer, set apart and easy to scan: the two counts first,
+    then the review rows grouped by reason. A group whose rows share one
+    note lists just their catalog numbers."""
+    C = Colors
+    print_section("RESULT")
+    print(f"  {C.GREEN}{C.BOLD}Parent-ready    {len(ready):>6}{C.RESET}")
+    print(f"  {'':<16}{counts['by lookup']:>6}   parent found by lookup")
+    print(f"  {'':<16}{counts['supplied']:>6}   parent kept as entered in Airtable")
+    print()
+    color = C.YELLOW if review else C.GREEN
+    print(f"  {color}{C.BOLD}Needs review    {len(review):>6}{C.RESET}")
+    if review:
+        _print_review_groups(unresolved)
+    print(f"\n  Saved ready CSV:  {os.path.abspath(ready_path)}")
+    print(f"  Saved review CSV: {os.path.abspath(review_path)}")
+    print()
+    if review:
+        print(f"  {C.DIM}Fix review rows where the {FIX_IN} column says, then pull again.{C.RESET}")
+    print(f"  {C.DIM}Parent-ready rows can still be refused at import (format, dates) - "
+          f"the import's dry run checks them.{C.RESET}\n")
+
+
+def _print_review_groups(unresolved):
+    """Every review row, grouped by reason in REVIEW_GROUPS order."""
+    C = Colors
+    groups = {label: [] for label, _ in REVIEW_GROUPS}
+    for _row_num, catalog, note in unresolved:
+        label = next(label for label, test in REVIEW_GROUPS if test(note))
+        groups[label].append((catalog or "(no catalog number)", note))
+    for label, rows in groups.items():
+        if not rows:
+            continue
+        print(f"\n    {C.BOLD}{label} ({len(rows)}){C.RESET}")
+        notes = {note for _, note in rows}
+        if len(notes) == 1 and len(rows) > 1:
+            print(f"      {C.DIM}{next(iter(notes))}{C.RESET}")
+            numbers = [catalog for catalog, _ in rows]
+            for i in range(0, len(numbers), 4):
+                print("      " + "   ".join(numbers[i:i + 4]))
+        else:
+            for catalog, note in rows:
+                print(f"      {catalog}   {note}")
 
 
 def run_fill_parents(sheet_path, ready_path, review_path):
@@ -1092,18 +1210,8 @@ def run_fill_parents(sheet_path, ready_path, review_path):
         print_status("error", f"Could not write {ready_path}: {e} - the pair is incomplete; "
                               f"delete {review_path} and run the fill again")
         return 1
-    print_status("success", f"Parent-ready: {len(ready)} row(s) -> {ready_path}")
-    print_status("info", f"{counts['by lookup']} filled by lookup, {counts['supplied']} "
-                         f"already in the sheet (a person's value, used as given)", indent=1)
-    if not review:
-        print_status("success", f"For review: 0 rows -> {review_path}")
-        return 0
-    print_status("warning", f"For review: {len(review)} row(s) -> {review_path} "
-                            f"(see the Parent Note and {FIX_IN} columns)")
-    for row_num, catalog, note in unresolved:
-        print_status("warning", f"row {row_num} {catalog or '(no catalog number)'}: {note}",
-                     indent=1)
-    return 2
+    print_fill_result(ready, review, counts, unresolved, ready_path, review_path)
+    return 2 if review else 0
 
 
 CHECK_OUTCOMES = ("found", "not found", "ambiguous", "could not check")
@@ -1122,50 +1230,77 @@ def check_numbers(client, numbers):
     """
     results = []
     linked_cache = {}
-    for i, number in enumerate(numbers, 1):
-        if not col.valid_catalog_number(number):
-            results.append((number, "could not check",
-                            "not of the form JPC_AV_ + digits - not looked up"))
-        else:
-            lookup = client.find_archival_object(number)
-            if lookup.status == "found":
-                title = (lookup.record.get("title") or "").strip() or "(no title)"
-                placed, _ = place_record(
-                    lookup.record, lambda uri: fetch_linked(client, uri, linked_cache))
-                path = placed[2] if placed else ""
-                results.append((number, "found", f"{title}" + (f"  ({path})" if path else "")))
-            elif lookup.status == "none":
-                results.append((number, "not found", ""))
-            elif lookup.status == "multiple":
-                results.append((number, "ambiguous",
-                                f"{lookup.count} records share this number - clean up first"))
-            else:
+    try:
+        for i, number in enumerate(numbers, 1):
+            if not col.valid_catalog_number(number):
                 results.append((number, "could not check",
-                                "lookup failed - retry; do not treat as new"))
-        if i % 25 == 0:
-            print_status("info", f"Checked {i}/{len(numbers)}...")
+                                "not of the form JPC_AV_ + digits - not looked up"))
+            else:
+                lookup = client.find_archival_object(number)
+                if lookup.status == "found":
+                    title = (lookup.record.get("title") or "").strip() or "(no title)"
+                    placed, _ = place_record(
+                        lookup.record, lambda uri: fetch_linked(client, uri, linked_cache))
+                    path = placed[2] if placed else ""
+                    results.append((number, "found", f"{title}" + (f"  ({path})" if path else "")))
+                elif lookup.status == "none":
+                    results.append((number, "not found", ""))
+                elif lookup.status == "multiple":
+                    results.append((number, "ambiguous",
+                                    f"{lookup.count} records share this number - clean up first"))
+                else:
+                    results.append((number, "could not check",
+                                    "lookup failed - retry; do not treat as new"))
+            progress("Checked", i, len(numbers))
+    finally:
+        close_progress()
     return results
 
 
-def print_check(results):
+def read_holds(path):
+    """{catalog number: hold note} for the list's rows that are held (or
+    whose hold value is unreadable), when the list is a CSV carrying the
+    ASpace Hold column; {} otherwise. Display only - the check never
+    refuses anything."""
+    try:
+        with col.open_csv(path) as f:
+            reader = csv.DictReader(f, strict=True)
+            misspelled = col.hold_name_problem(reader.fieldnames or [])
+            if misspelled:
+                print_status("warning", f"Holds not shown: {misspelled}")
+                return {}
+            if col.HOLD not in (reader.fieldnames or []):
+                return {}
+            return {(r.get(col.CATALOG) or "").strip(): col.hold_problem(r)
+                    for r in reader if col.hold_problem(r)}
+    except (OSError, UnicodeDecodeError, csv.Error):
+        return {}
+
+
+def print_check(results, holds=None):
     """The check's answer, grouped, on screen. Returns the exit code: 0 when
     every number got a definite answer, 2 when any is ambiguous or could
-    not be checked (those need a person or a rerun before anything else)."""
+    not be checked (those need a person or a rerun before anything else).
+    Held items (holds: number -> note) are shown in their group, marked."""
+    holds = holds or {}
+
+    def mark(number):
+        return f"  {Colors.YELLOW}[{holds[number]}]{Colors.RESET}" if number in holds else ""
     groups = {o: [(n, d) for n, out, d in results if out == o] for o in CHECK_OUTCOMES}
     found, new = groups["found"], groups["not found"]
     print()
     print_status("success", f"In ArchivesSpace: {len(found)}")
     for number, detail in found:
-        print(f"      {number}  {detail}")
+        print(f"      {number}  {detail}{mark(number)}")
     print()
     print(f"{Colors.YELLOW}{Colors.BOLD}[>] Not in ArchivesSpace (new): {len(new)}{Colors.RESET}")
     for number, _ in new:
-        print(f"      {number}")
+        print(f"      {number}{mark(number)}")
     for outcome, symbol in (("ambiguous", "warning"), ("could not check", "error")):
         if groups[outcome]:
             print_status(symbol, f"{outcome.capitalize()}: {len(groups[outcome])}")
             for number, detail in groups[outcome]:
-                print(f"      {number}  {detail}")
+                print(f"      {number}  {detail}{mark(number)}")
     print(f"\n  {Colors.DIM}\"In ArchivesSpace\" means a record with that number exists - "
           f"its metadata was not compared.{Colors.RESET}")
     return 2 if groups["ambiguous"] or groups["could not check"] else 0
@@ -1202,7 +1337,7 @@ def run_check(list_path, csv_path=None):
         results = check_numbers(client, numbers)
     finally:
         client.logout()
-    code = print_check(results)
+    code = print_check(results, read_holds(list_path))
     if csv_path:
         provenance = (f"{RUN_COMMAND} | target: {aspace_client.ACTIVE_ENV} | "
                       f"{datetime.now().strftime('%Y-%m-%d %H:%M')}")
