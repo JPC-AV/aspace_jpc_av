@@ -1,0 +1,33 @@
+# Installs the jpc- commands into the active Python environment.
+#
+#   conda activate JPC_AV
+#   cd ~/github/jpc/aspace_jpc_av
+#   python -m pip install -e .
+#
+# EDITABLE (-e) is required: the commands run the tools from this folder,
+# so `git pull` keeps them current. Reinstall only when a command is added
+# or renamed. Only jpc.py is packaged - never creds.py, sheets, reports or
+# logs (no package discovery in this multi-folder repo).
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jpc-av-tools"
+version = "3.4"
+description = "jpc- commands for the JPC AV ArchivesSpace workflow"
+requires-python = ">=3.8"
+dependencies = ["requests>=2.32.4"]
+
+[project.scripts]
+jpc = "jpc:main"
+jpc-pull = "jpc:pull"
+jpc-check = "jpc:check"
+jpc-fill = "jpc:fill"
+jpc-import = "jpc:import_"
+jpc-update = "jpc:update"
+jpc-writeback = "jpc:writeback"
+
+[tool.setuptools]
+py-modules = ["jpc"]

@@ -18,6 +18,8 @@ aspace_jpc_av/
 ├── README.md                     # This file
 ├── aspace_client.py              # Shared ArchivesSpace API client (used by both scripts)
 ├── console.py                    # Shared terminal display: -h screens, run headers, RESULT blocks
+├── jpc.py                        # The jpc- commands: one short command per workflow step
+├── pyproject.toml                # Installs the jpc- commands (python -m pip install -e .)
 ├── creds_template.py             # Credential template (see Setup below)
 ├── creds.py                      # Your local credentials (gitignored, you create this)
 ├── requirements.txt              # Python dependencies
@@ -49,6 +51,8 @@ More detailed descriptions of each file and usage in directory-specific README.m
 |------|------------------|-------------|
 | `aspace_client.py` | Backend | Shared API client: credentials loading, one keep-alive session, login/logout, retries, verified lookups, and scope-locked writes. Both main scripts build on it. |
 | `console.py` | Backend | Shared terminal display for every tool: the -h layout, argument-error screen, run header, RESULT block, saved-file lines and colors (`--no-color`). |
+| `jpc.py` | Run via the `jpc-` commands | The short commands for each workflow step (`jpc-pull`, `jpc-check`, `jpc-fill`, `jpc-import`, `jpc-update`, `jpc-writeback`). Each runs one tool with that step's fixed flags; `jpc` lists them. |
+| `pyproject.toml` | One-time setup | Installs the `jpc-` commands into the active environment. |
 | `creds_template.py` | Reference only | Template showing required credential format. Do not edit directly. |
 | `creds.py` | User creates/edits | Your local credentials file. You create this from the template. |
 | `requirements.txt` | One-time setup | Python package dependencies. Run `pip install -r requirements.txt` once. |
@@ -81,7 +85,22 @@ Setting `logs_dir` in `creds.py` moves them all under one parent, each tool in i
 pip install -r requirements.txt
 ```
 
-### 2. Configure credentials
+### 2. Install the `jpc-` commands
+
+Once per machine, with the JPC_AV environment active, from this folder:
+
+```bash
+python -m pip install -e .
+```
+
+This puts `jpc`, `jpc-pull`, `jpc-check`, `jpc-fill`, `jpc-import`,
+`jpc-update` and `jpc-writeback` into the environment: they exist whenever
+`(JPC_AV)` is active. The `-e` (editable) matters - the commands run the
+tools in this folder, so `git pull` keeps them current; reinstall only when a
+command is added or renamed. **"command not found" means the JPC_AV
+environment is not active, or this one-time install has not been done.**
+
+### 3. Configure credentials
 
 **Important:** The repository does not contain a `creds.py` file for security reasons. You must create one locally.
 
@@ -110,7 +129,8 @@ environments = {
 }
 ```
 
-How the scripts pick the target:
+How the scripts pick the target **when run directly** (the `jpc-` commands
+default to production instead - see [Commands](#commands)):
 
 - **One entry configured** — used automatically, nothing to type. If you only
   have sandbox access, production is unreachable from your machine.
@@ -123,6 +143,40 @@ How the scripts pick the target:
 and are treated as a single `production` environment.)
 
 Ask your ArchivesSpace administrator if you don't know these values.
+
+## Commands
+
+One short command per workflow step, runnable from any folder (see Setup).
+Each runs one tool with that step's fixed flags filled in; the tools keep all
+their own checks, PLANs and `yes` prompts. `jpc` lists them;
+`jpc-STEP --help` shows what a step accepts.
+
+| Command | Runs |
+|---------|------|
+| `jpc-pull --view NAME` | `airtable_pull.py NAME` |
+| `jpc-check --file FILE [--output PATH]` | `aspace_csv_export.py --check FILE --env production` |
+| `jpc-fill --file FILE` | `aspace_csv_export.py --fill-parents FILE --env production` |
+| `jpc-import --file FILE [--dry-run] [--skip-duplicates]` | `aspace_csv_import.py --create-records --file FILE --env production` |
+| `jpc-update --file FILE [--dry-run]` | `aspace_csv_import.py --update-only --file FILE --env production` |
+| `jpc-writeback --report REPORT.json [--run] [--exclude-catalog NUM]...` | `airtable_writeback.py REPORT.json` |
+
+- **Production by default** for the commands that talk to ArchivesSpace,
+  shown before anything runs; add `--env sandbox` for the sandbox. (The tools
+  themselves ask for `--env` every time.) Each command decides on its own, so
+  a sandbox trial needs `--env sandbox` on **every** step - and a sandbox
+  import never goes on to `jpc-writeback` (the write-back accepts production
+  reports only). The Airtable commands take no `--env`.
+- **Paths are read from the folder you are in.** Pasting the full path a
+  tool printed ("Saved pulled CSV: ...") works from anywhere.
+- **Only the flags listed**, in their long form: anything else - a short
+  form (`-f`, `-n`), an abbreviation, `--file=x`, a repeated flag, a
+  username or password, a flag for another step - is refused before anything
+  runs, and the message says what to use instead.
+- Each command prints the exact tool command it runs, then hands over: the
+  tool's prompts, Ctrl-C and exit code are its own. The tools' own NEXT STEP
+  lines keep printing the long commands, which always work too.
+- Export, MADS and directory processing have no `jpc-` command yet; run
+  those tools directly.
 
 ## Scripts
 
@@ -189,4 +243,4 @@ Typical usage order:
 
 ## Environments
 
-Every ArchivesSpace tool supports sandbox and production (`check_mads.py` talks only to the public MADS site and takes no environment). `creds.py` holds an `environments` dict with one entry per instance; with one configured it is selected automatically, with several every run must pass `--env NAME` (there is no default). The environment is chosen once per run, before anything connects.
+Every ArchivesSpace tool supports sandbox and production (`check_mads.py` talks only to the public MADS site and takes no environment). `creds.py` holds an `environments` dict with one entry per instance. When running the tools directly: with one configured it is selected automatically, with several every run must pass `--env NAME` (there is no default). The `jpc-` commands differ: they use production unless `--env sandbox` is given, and show the environment before anything runs (see [Commands](#commands)). The environment is chosen once per run, before anything connects.
