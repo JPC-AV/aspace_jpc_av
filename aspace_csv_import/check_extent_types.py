@@ -128,7 +128,7 @@ def check_csv_values(csv_file):
             if duplicates:
                 # Two 'Original Format' columns: DictReader keeps the last,
                 # so a bad value in the first would vanish and the check
-                # would go green. Same rule as the importer and csv_utils.
+                # would go green. Same rule as the importer.
                 print_status("error", f"Duplicate column header(s): {'; '.join(duplicates)} "
                                       f"- remove the stale duplicate column(s) first")
                 return None

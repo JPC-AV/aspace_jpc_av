@@ -70,7 +70,6 @@ This script imports item-level archival objects from CSV files into ArchivesSpac
    - `airtable_pull.py` - Save an Airtable view of `<<< ASpace_import >>>` as a CSV (read-only)
    - `airtable_writeback.py` - Record a production create run's results in Airtable
    - `check_mads.py` - MADS liveness checker (public URLs; never touches ArchivesSpace)
-   - `csv_utils.py` - CSV validation utilities
    - `check_extent_types.py` - Extent type checker
    - `sheet_rules.py` - The sheet contract: column names and the shared validation rules (imported by the others)
 
@@ -212,9 +211,8 @@ python aspace_csv_import.py --update-only -f your_file.csv         # Update exis
 python aspace_csv_import.py --create-records -f your_file.csv -u username -p 'password'
 
 # With several environments in creds.py, every command that contacts
-# ArchivesSpace (the importer, csv_utils.py --parents, check_extent_types.py,
-# aspace_csv_export.py) needs --env. csv_utils.py --validate is local, and
-# check_mads.py only talks to the public MADS site - neither needs --env.
+# ArchivesSpace (the importer, check_extent_types.py, aspace_csv_export.py)
+# needs --env. check_mads.py only talks to the public MADS site and does not.
 python aspace_csv_import.py --env sandbox --create-records -n -f your_file.csv
 ```
 
@@ -530,14 +528,6 @@ own console and receipt report only the fields that actually changed.
 
 ## Utility Scripts
 
-### csv_utils.py
-Validate CSV before import:
-```bash
-python csv_utils.py --validate your_file.csv
-python csv_utils.py --parents your_file.csv
-python csv_utils.py --validate your_file.csv --update-only   # narrow update CSV
-```
-
 ### check_extent_types.py
 Check valid extent types:
 ```bash
@@ -558,21 +548,52 @@ python aspace_csv_export.py --list numbers.txt              # exactly these cata
 python aspace_csv_export.py --level item --mads-live        # add a 'MADS live' column
 ```
 
-**Which catalog numbers are already in ArchivesSpace?** `--check` looks each
-number up, read-only, and prints the answer on screen - no file unless you
-add `-o PATH`:
+**Which catalog numbers are in ArchivesSpace - and does Airtable agree?**
+`--check` looks each number up, read-only, and prints the answer on screen -
+no file unless you add `-o PATH`:
 ```bash
 python aspace_csv_export.py --check __airtable_exports__/VIEW_NAME_<stamp>.csv --env production
 ```
-It reads only the `CATALOG_NUMBER` column (a plain list of numbers works
-too), so an Airtable pull can be checked as it is. Four groups:
-**In ArchivesSpace** (each with its title and where it sits), **Not in
-ArchivesSpace (new)**, **Ambiguous** (several records share the number -
-clean up first) and **Could not check** (the lookup failed or the number is
-malformed - never treat these as new). "In ArchivesSpace" means a record
-with that number exists; its metadata is not compared. Exit code 0 when
-every number got a definite answer, 2 when any is ambiguous or could not be
-checked.
+A plain list of numbers works too. Given an Airtable pull that carries
+`ASpace Parent RefID` and/or `((( ASpace Item Record Created )))`, it also
+compares them with ArchivesSpace. The opening lines say exactly what was
+compared, with what: *live ArchivesSpace compared with this Airtable
+snapshot* and the pull's time (read from the pull's first line; "unknown"
+for any other file - Airtable is not re-read). A column missing from the file
+is listed as *Not checked*, never treated as blank. The pull exports only the
+columns a view shows, so the view must show both `ASpace Parent RefID` and
+`((( ASpace Item Record Created )))`; to find "marked Yes but missing", it
+must also include the Yes rows.
+
+Every number lands on exactly one line, the first that applies:
+
+| Line | Meaning |
+|------|---------|
+| Could not check | the lookup failed, the number is malformed, the record itself is malformed, its parent could not be read while the parent column is being compared, or Item Record Created is unreadable on any of its rows (e.g. `Yes, No`) - never taken as absent. (Without a parent column, a record whose parent cannot be read still shows as In ArchivesSpace: it exists.) |
+| Ambiguous | several records share the number - clean up first |
+| Conflicting rows in the file | the number appears on rows that disagree (parent, Yes, hold or issue) |
+| Not an item record | the number is on a file, series... record, not an item |
+| Marked Yes, not found in ArchivesSpace | Airtable says the record was created; no record has the number |
+| In ArchivesSpace, parent differs | Airtable's parent is not the record's parent in ArchivesSpace (including a parent in Airtable for a top-level record) |
+| In ArchivesSpace, Airtable incomplete | the Airtable parent is blank while ArchivesSpace has one, or the item is not marked Yes. (A blank parent for a top-level record agrees.) |
+| In ArchivesSpace, compared fields agree | the compared columns match |
+| In ArchivesSpace | the record exists (nothing was compared) |
+| Not found by catalog number | no record has the number - not a verdict that it is new |
+
+Each line needing review lists every fact that applies (a parent that differs
+*and* a missing Yes both show). Holds (`[on hold: ...]`) and open issues on
+rows that are not held (`[issue: ...]`) are marked; a misspelled issue column
+only hides the issues. The check copies nothing and fixes nothing: it shows
+where Airtable and ArchivesSpace disagree today. With `-o`, the saved CSV
+carries the same facts, and `(not in file)` for a column the input lacked.
+Exit code 0 when every number got a definite answer and nothing needs review
+(numbers simply not found included), 2 when something needs review or could
+not be checked, 1 when the list cannot be read, the login fails, or the `-o`
+report cannot be saved (the check itself ran).
+
+*Changed in v3.3:* a catalog number on a non-item record is now its own
+line (it used to count as found), and "Not in ArchivesSpace (new)" is now
+"Not found by catalog number".
 Rows are written in tree order (a parent immediately followed by its
 children, siblings as the staff interface orders them), so `--level all`
 reads like the ArchivesSpace tree; `--list` keeps the order of the list. `Level` is the record's level, `Depth`
@@ -725,9 +746,8 @@ environment is configured; use `--env sandbox` for a trial run.
    Without `--run` it only previews. `--exclude-catalog NUM` leaves out a
    record deleted since the import.
 
-`csv_utils.py --validate` / `--parents` and `check_extent_types.py` remain
-available for troubleshooting a sheet; the dry run already runs the same
-checks.
+`check_extent_types.py` remains available for finding the valid format
+names; the dry run already checks every format.
 
 > **Rerunning after a run that created records:** wait a minute or two before
 > rerunning. The duplicate check uses ArchivesSpace's search index, which is
@@ -761,8 +781,8 @@ ref_ids needed.
    ```
    If Airtable changes after the pull, pull again and repeat the dry run.
 
-`csv_utils.py --validate --update-only` and `check_extent_types.py` remain
-available for troubleshooting. To remove a note, clear the cell in Airtable
+`check_extent_types.py` remains available for finding the valid format
+names. To remove a note, clear the cell in Airtable
 *and* remove the text in the staff interface (only that paragraph - a
 PhysTech note can also hold the Duration list); blank cells never clear
 anything.
@@ -792,6 +812,15 @@ aborts with no writes.
     open item, held or not; `ASpace Hold` alone still decides processing
   - The pull counts open issues on rows that are not held; the fill lists
     them without refusing the rows
+  - `--check` compares an Airtable pull's parent and Item Record Created
+    with ArchivesSpace, flags non-item records, and marks holds and issues;
+    "new" became "Not found by catalog number"
+  - `csv_utils.py` retired: the importer validates every sheet itself (dry
+    runs included). For creating records, `--fill-parents` finds blank
+    parents and the import preflight checks every parent before writing;
+    there is no longer a standalone report checking all of a sheet's parent
+    ref IDs, and a parent already filled in is checked at import, not by
+    the fill
 
 - **v3.2** (2026): One display across the tools
   - Every tool's `-h` screen uses the same banner, a title saying what it

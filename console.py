@@ -46,8 +46,8 @@ if not sys.stdout.isatty():
 
 
 # Status words and the symbol each draws. Tools use different words for
-# their own outcomes (the importer's "created", csv_utils' "found", the
-# extent checker's "valid"); one word never means two things.
+# their own outcomes (the importer's "created", the extent checker's
+# "valid"); one word never means two things.
 _STATUS = {
     "success":   ("GREEN", "[OK]"),
     "found":     ("GREEN", "[OK]"),

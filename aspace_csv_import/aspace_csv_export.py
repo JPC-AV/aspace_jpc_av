@@ -1192,143 +1192,360 @@ def run_fill_parents(sheet_path, ready_path, review_path):
     return 2 if review else 0
 
 
-CHECK_OUTCOMES = ("found", "not found", "ambiguous", "could not check")
+# ------------------------------------------------------------------
+# --check: which catalog numbers ArchivesSpace has - and, given an Airtable
+# pull, whether Airtable's tracking columns agree with it. Read-only.
+# ------------------------------------------------------------------
+
+# The Airtable columns --check compares, when the file has them.
+COMPARED_COLUMNS = (col.PARENT_REFID, col.CREATED_LOOKUP)
+
+# Every number lands on exactly ONE line, the first that applies in this
+# order; everything else that applies is kept in its Detail.
+CHECK_LINES = [
+    ("cannot", "Could not check", "unknown"),
+    ("ambiguous", "Ambiguous", "bad"),
+    ("conflict", "Conflicting rows in the file", "bad"),
+    ("not_item", "Not an item record", "bad"),
+    ("yes_missing", "Marked Yes, not found in ArchivesSpace", "bad"),
+    ("parent_differs", "In ArchivesSpace, parent differs", "bad"),
+    ("incomplete", "In ArchivesSpace, Airtable incomplete", "attention"),
+    ("agrees", "In ArchivesSpace, compared fields agree", "ok"),
+    ("found", "In ArchivesSpace", "ok"),
+    ("not_found", "Not found by catalog number", "neutral"),
+]
+CHECK_LABELS = {key: label for key, label, _ in CHECK_LINES}
+REVIEW_KEYS = {"cannot", "ambiguous", "conflict", "not_item", "yes_missing",
+               "parent_differs", "incomplete"}
+
+# An Airtable pull's first line: "# python3 .../airtable_pull.py VIEW |
+# airtable view: VIEW | 2026-09-30 01:51". Only that line dates the
+# snapshot; a fill, export or import report dates something else.
+PULL_PROVENANCE_RE = re.compile(
+    r"^#.*\bairtable_pull\.py\b.*\| airtable view: (?P<view>.*) \| "
+    r"(?P<when>\d{4}-\d{2}-\d{2} \d{2}:\d{2})\s*$")
+
+NOT_IN_FILE = "(not in file)"
 
 
-def check_numbers(client, numbers):
-    """Which catalog numbers already have a record in ArchivesSpace.
+def created_state(value):
+    """ASpace Item Record Created as a pull writes it: 'yes', 'no', 'blank',
+    or 'unreadable' (anything else - e.g. 'Yes, No' from a lookup that sees
+    two tracking rows). Unreadable is never taken for 'not Yes'."""
+    text = (value or "").strip()
+    if not text:
+        return "blank"
+    return {"yes": "yes", "no": "no"}.get(text.casefold(), "unreadable")
 
-    Returns [(number, outcome, detail)] in list order. outcome is one of
-    CHECK_OUTCOMES: "found" (exactly one record; detail = title and where it
-    sits), "not found" (verified absent - new), "ambiguous" (several records
-    share the number), "could not check" (the lookup failed, or the number
-    is malformed and was not looked up). Only "not found" means new: a
-    failed lookup is never evidence of absence. Read-only; metadata is not
-    compared.
-    """
-    results = []
+
+def read_check_input(path):
+    """The list to check, and what Airtable says about each number.
+
+    Returns (sheet, problem). sheet: numbers (order kept, each once), facts
+    ({number: [one dict per row]}), columns ({name: present}), warnings,
+    pulled ((view, when) from a pull's provenance line, or None) and plain
+    (True for a plain text list). The list itself is read by
+    read_catalog_list, so a check accepts exactly what --list does."""
+    numbers, problem = read_catalog_list(path)
+    if numbers is None:
+        return None, problem
+    sheet = {"numbers": numbers, "facts": {}, "warnings": [], "pulled": None,
+             "plain": True, "columns": {c: False for c in COMPARED_COLUMNS + (col.HOLD, col.ISSUE)}}
+    with col.open_csv(path) as f:
+        pos = f.tell()
+        headers = csv.DictReader(f, strict=True).fieldnames or []
+        if col.CATALOG not in headers:
+            return sheet, None
+        sheet["plain"] = False
+        f.seek(pos)
+        rows = list(csv.DictReader(f, strict=True))
+    with open(path, encoding="utf-8-sig") as raw:
+        match = PULL_PROVENANCE_RE.match(raw.readline().rstrip("\n"))
+    if match:
+        sheet["pulled"] = (match["view"], match["when"])
+    for name in sheet["columns"]:
+        variant = col.near_miss_name(headers, name)
+        if name in headers:
+            sheet["columns"][name] = True
+        elif variant is not None:
+            # this check only reports: a misspelled column costs just that
+            # column (the import-side tools refuse such a sheet outright)
+            sheet["warnings"].append(f"column {variant!r} is not spelled exactly {name!r} - "
+                                     f"{'not compared' if name in COMPARED_COLUMNS else 'not shown'}")
+    has = sheet["columns"]
+    for row in rows:
+        number = (row.get(col.CATALOG) or "").strip()
+        if not number:
+            continue
+        sheet["facts"].setdefault(number, []).append({
+            "parent": (row.get(col.PARENT_REFID) or "").strip() if has[col.PARENT_REFID] else None,
+            "created": (row.get(col.CREATED_LOOKUP) or "").strip() if has[col.CREATED_LOOKUP] else None,
+            "hold": col.hold_problem(row) if has[col.HOLD] else None,
+            "issue": (row.get(col.ISSUE) or "").strip() if has[col.ISSUE] else None,
+        })
+    return sheet, None
+
+
+def check_records(client, numbers):
+    """Look every number up (read-only), at any level: a record carrying the
+    number at another level is a conflict, not an absence. Returns
+    {number: {status, title, path, level, parent, parent_problem}}; status
+    is found / none / multiple / failed / malformed (the number) /
+    malformed_record. parent is the parent's ref_id, "" for a top-level
+    record, None when it could not be read. A failed lookup is never
+    evidence of absence."""
+    results = {}
     linked_cache = {}
     try:
         for i, number in enumerate(numbers, 1):
+            entry = {"status": None, "title": "", "path": "", "level": "",
+                     "parent": None, "parent_problem": None}
             if not col.valid_catalog_number(number):
-                results.append((number, "could not check",
-                                "not of the form JPC_AV_ + digits - not looked up"))
+                entry["status"] = "malformed"
             else:
                 lookup = client.find_archival_object(number)
                 if lookup.status == "found":
-                    title = (lookup.record.get("title") or "").strip() or "(no title)"
-                    placed, _ = place_record(
-                        lookup.record, lambda uri: fetch_linked(client, uri, linked_cache))
-                    path = placed[2] if placed else ""
-                    results.append((number, "found", f"{title}" + (f"  ({path})" if path else "")))
+                    record = lookup.record
+                    shape = record_shape_problem(record)
+                    if shape:
+                        entry.update(status="malformed_record",
+                                     title=f"the record is malformed ({shape}) - check it in ArchivesSpace")
+                        results[number] = entry
+                        progress("Checked", i, len(numbers))
+                        continue
+                    entry.update(status="found", level=record.get("level") or "",
+                                 title=(record.get("title") or "").strip() or "(no title)")
+                    try:
+                        placed, reason = place_record(
+                            record, lambda uri: fetch_linked(client, uri, linked_cache))
+                    except (AttributeError, KeyError, TypeError, ValueError) as e:
+                        # a malformed ancestor: this number cannot be placed;
+                        # the others are still checked
+                        placed, reason = None, f"malformed ancestor ({type(e).__name__}: {e})"
+                    if placed:
+                        entry["parent"], entry["path"] = placed[0], placed[2]
+                    else:
+                        entry["parent_problem"] = reason
                 elif lookup.status == "none":
-                    results.append((number, "not found", ""))
+                    entry["status"] = "none"
                 elif lookup.status == "multiple":
-                    results.append((number, "ambiguous",
-                                    f"{lookup.count} records share this number - clean up first"))
+                    entry.update(status="multiple", title=f"{lookup.count} records share this number")
                 else:
-                    results.append((number, "could not check",
-                                    "lookup failed - retry; do not treat as new"))
+                    entry["status"] = "failed"
+            results[number] = entry
             progress("Checked", i, len(numbers))
     finally:
         close_progress()
     return results
 
 
-def read_holds(path):
-    """{catalog number: hold note} for the list's rows that are held (or
-    whose hold value is unreadable), when the list is a CSV carrying the
-    ASpace Hold column; {} otherwise. Display only - the check never
-    refuses anything."""
-    try:
-        with col.open_csv(path) as f:
-            reader = csv.DictReader(f, strict=True)
-            misspelled = col.hold_name_problem(reader.fieldnames or [])
-            if misspelled:
-                print_status("warning", f"Holds not shown: {misspelled}")
-                return {}
-            if col.HOLD not in (reader.fieldnames or []):
-                return {}
-            return {(r.get(col.CATALOG) or "").strip(): col.hold_problem(r)
-                    for r in reader if col.hold_problem(r)}
-    except (OSError, UnicodeDecodeError, csv.Error):
-        return {}
+def classify(number, found, rows, columns):
+    """One number's line (a CHECK_LINES key) and every fact behind it."""
+    facts, status = [], found["status"]
+    if status == "found":
+        facts.append(found["title"] + (f"  ({found['path']})" if found["path"] else ""))
+    elif status == "none":
+        facts.append("no record with this catalog number")
+    elif status == "multiple":
+        facts.append(f"{found['title']} - clean up first")
+    elif status == "failed":
+        facts.append("lookup failed - retry; do not treat as absent")
+    elif status == "malformed_record":
+        facts.append(found["title"])
+    else:
+        facts.append("not of the form JPC_AV_ + digits - not looked up")
+
+    distinct = [dict(t) for t in {tuple(sorted(r.items())) for r in rows}]
+    conflict = len(distinct) > 1
+    if conflict:
+        for field in ("parent", "created", "hold", "issue"):
+            values = sorted({repr(r[field]) for r in rows})
+            if len(values) > 1:
+                facts.append(f"rows disagree on {field}: {' / '.join(values)}")
+    airtable = rows[0] if rows and not conflict else {}
+    parent_col, created_col = columns[col.PARENT_REFID], columns[col.CREATED_LOOKUP]
+    created = created_state(airtable.get("created")) if created_col and airtable else None
+    at_parent = airtable.get("parent") if parent_col and airtable else None
+
+    bad_status = sorted({r["created"] for r in rows
+                         if created_col and created_state(r["created"]) == "unreadable"})
+    unreadable = bool(bad_status)
+    if unreadable:
+        facts.append(f"Item Record Created unreadable: {' / '.join(map(repr, bad_status))}")
+    parent_unread = status == "found" and parent_col and found["parent_problem"]
+    if parent_unread:
+        facts.append(f"ArchivesSpace parent could not be read: {found['parent_problem']}")
+    not_item = status == "found" and found["level"] != "item"
+    if not_item:
+        facts.append(f"the record is at level {found['level'] or '(none)'!r}, not an item")
+    # the ArchivesSpace parent is known when it was read: a ref_id, or ""
+    # for a top-level record (no parent) - only None means unknown
+    known = status == "found" and parent_col and airtable and found["parent"] is not None
+    as_parent = found["parent"] or "none (top level)"
+    differs = bool(known and at_parent and at_parent != found["parent"])
+    if differs:
+        facts.append(f"parent differs: Airtable {at_parent}, ArchivesSpace {as_parent}")
+    blank_parent = bool(known and not at_parent and found["parent"])
+    if blank_parent:
+        facts.append(f"Airtable parent blank (ArchivesSpace: {as_parent})")
+    not_yes = status == "found" and created in ("no", "blank")
+    if not_yes:
+        facts.append(f"not marked Yes (Item Record Created: {airtable['created'] or 'blank'})")
+    yes_missing = status == "none" and created == "yes"
+    if yes_missing:
+        facts.append("Airtable says the record was created")
+
+    if status in ("failed", "malformed", "malformed_record") or unreadable or parent_unread:
+        key = "cannot"
+    elif status == "multiple":
+        key = "ambiguous"
+    elif conflict:
+        key = "conflict"
+    elif not_item:
+        key = "not_item"
+    elif yes_missing:
+        key = "yes_missing"
+    elif differs:
+        key = "parent_differs"
+    elif blank_parent or not_yes:
+        key = "incomplete"
+    elif status == "found":
+        key = "agrees" if (parent_col or created_col) and airtable else "found"
+    else:
+        key = "not_found"
+    return key, facts
 
 
-def print_check(results, holds=None):
-    """The check's answer, grouped, on screen. Returns the exit code: 0 when
-    every number got a definite answer, 2 when any is ambiguous or could
-    not be checked (those need a person or a rerun before anything else).
-    Held items (holds: number -> note) are shown in their group, marked."""
-    holds = holds or {}
-
-    def mark(number):
-        return f"  {Colors.YELLOW}[{holds[number]}]{Colors.RESET}" if number in holds else ""
-    groups = {o: [(n, d) for n, out, d in results if out == o] for o in CHECK_OUTCOMES}
-    found, new = groups["found"], groups["not found"]
-    print_section("RESULT")
-    print_status("success", f"In ArchivesSpace: {len(found)}")
-    for number, detail in found:
-        print(f"      {number}  {detail}{mark(number)}")
-    print()
-    print(f"{Colors.YELLOW}{Colors.BOLD}[>] Not in ArchivesSpace (new): {len(new)}{Colors.RESET}")
-    for number, _ in new:
-        print(f"      {number}{mark(number)}")
-    for outcome, symbol in (("ambiguous", "warning"), ("could not check", "error")):
-        if groups[outcome]:
-            print_status(symbol, f"{outcome.capitalize()}: {len(groups[outcome])}")
-            for number, detail in groups[outcome]:
-                print(f"      {number}  {detail}{mark(number)}")
-    print(f"\n  {Colors.DIM}\"In ArchivesSpace\" means a record with that number exists - "
-          f"its metadata was not compared.{Colors.RESET}")
-    return 2 if groups["ambiguous"] or groups["could not check"] else 0
+def check_markers(rows):
+    """The hold and open-issue notes to show beside a number."""
+    holds = sorted({r["hold"] for r in rows if r.get("hold")})
+    issues = sorted({r["issue"] for r in rows if r.get("issue") and not r.get("hold")})
+    return holds + [f"issue: {i}" for i in issues]
 
 
-def write_check_csv(results, path, provenance=None):
-    """The check's answer as a small CSV, only when -o asks for one."""
+def print_check_result(outcomes):
+    """RESULT (every number on one line), then each line's numbers - review
+    lines first. Returns the exit code: 2 if anything needs review or could
+    not be checked, else 0 (numbers not found are a definite answer)."""
+    counts = {key: sum(1 for o in outcomes if o["key"] == key) for key, _, _ in CHECK_LINES}
+    print_result([("Numbers checked", len(outcomes), "neutral", True)]
+                 + [(label, counts[key], tone) for key, label, tone in CHECK_LINES])
+    for key, label, tone in CHECK_LINES:
+        group = [o for o in outcomes if o["key"] == key]
+        if not group:
+            continue
+        color = {"ok": Colors.GREEN, "bad": Colors.RED, "neutral": ""}.get(tone, Colors.YELLOW)
+        print(f"\n  {color}{Colors.BOLD}{label} ({len(group)}){Colors.RESET}")
+        for o in group:
+            # the first fact on the number's line; for a line that needs
+            # review, every further fact on a line of its own beneath it
+            first = "" if key == "not_found" else o["facts"][0]
+            marks = [f"{Colors.YELLOW}[{m}]{Colors.RESET}" for m in o["marks"]]
+            print("      " + "  ".join(part for part in [o["number"], first] + marks if part))
+            if key in REVIEW_KEYS:
+                for fact in o["facts"][1:]:
+                    print(f"{'':20}{fact}")
+    print(f"\n  {Colors.DIM}\"In ArchivesSpace\" means a record with that catalog number exists; "
+          f"only the listed Airtable columns were compared, no other metadata.{Colors.RESET}")
+    return 2 if any(o["key"] in REVIEW_KEYS for o in outcomes) else 0
+
+
+def write_check_csv(outcomes, sheet, path, provenance=None):
+    """The check's answer as a CSV (only when -o asks for one), as complete
+    as the screen. A column absent from the input says so - it is not the
+    same as an empty cell."""
+    has = sheet["columns"]
+
+    def cell(o, field, name):
+        if not has[name]:
+            return NOT_IN_FILE
+        values = sorted({r[field] or "" for r in o["rows"]})
+        return " / ".join(values)
+
     tmp_path = path + ".tmp"
     with open(tmp_path, "w", newline="", encoding="utf-8") as f:
         if provenance:
             f.write(f"# {provenance}\n")
         writer = csv.writer(f)
-        writer.writerow([col.CATALOG, "In ArchivesSpace", "Detail"])
-        for number, outcome, detail in results:
-            writer.writerow([number, outcome, detail])
+        writer.writerow([col.CATALOG, "Outcome", "ArchivesSpace parent", "Airtable parent",
+                         col.CREATED_LOOKUP, col.HOLD, col.ISSUE, "Detail"])
+        for o in outcomes:
+            writer.writerow([o["number"], CHECK_LABELS[o["key"]], o["found"]["parent"] or "",
+                             cell(o, "parent", col.PARENT_REFID),
+                             cell(o, "created", col.CREATED_LOOKUP),
+                             cell(o, "hold", col.HOLD), cell(o, "issue", col.ISSUE),
+                             "; ".join(o["facts"])])
     os.replace(tmp_path, path)
 
 
-def run_check(list_path, csv_path=None):
-    """--check end to end. Returns the exit code (see print_check); 1 when
-    the list cannot be read or login fails (nothing checked)."""
-    numbers, problem = read_catalog_list(list_path)  # before any network work
-    if numbers is None:
+def run_check(list_path, csv_path=None, source=None):
+    """--check end to end. Returns the exit code: 0 or 2 (see
+    print_check_result); 1 when the list cannot be read or login fails
+    (nothing checked), or when the -o report cannot be saved (checked, but
+    not saved)."""
+    sheet, problem = read_check_input(list_path)  # before any network work
+    has = sheet["columns"] if sheet else {}
+    compared = [c for c in COMPARED_COLUMNS if has.get(c)]
+    if sheet is None:
+        mode = None
+    elif sheet["plain"]:
+        mode = "live ArchivesSpace only (a plain list - Airtable not compared)"
+    elif not compared:
+        mode = "live ArchivesSpace only (no Airtable tracking columns in the file)"
+    elif sheet["pulled"]:
+        mode = (f"live ArchivesSpace compared with this Airtable snapshot "
+                f"(view '{sheet['pulled'][0]}', pulled {sheet['pulled'][1]})")
+    else:
+        mode = "live ArchivesSpace compared with this file's Airtable columns (pulled: unknown)"
+    missing = [c for c in COMPARED_COLUMNS if not has.get(c)]
+    print_run_header("Check catalog numbers in ArchivesSpace (read-only)", target=source,
+                     input=os.path.abspath(list_path), mode=mode,
+                     extra=[("Compared", ", ".join(compared)),
+                            ("Not checked", compared and missing
+                             and f"{', '.join(missing)} (not in the file)")])
+    if sheet is None:
         print_status("error", problem)
         return 1
+    for warning in sheet["warnings"]:
+        print_status("warning", warning)
     client = ASpaceClient()
     print_status("info", f"Connecting to {aspace_client.ASPACE_URL}...")
     if not client.login():
         print_status("error", f"Could not log in: {client.login_problem}")
         return 1
     print_status("success", "Authenticated")
-    print_status("info", f"Checking {len(numbers)} catalog number(s)...")
+    print_status("info", f"Checking {len(sheet['numbers'])} catalog number(s)...")
     try:
-        results = check_numbers(client, numbers)
+        found = check_records(client, sheet["numbers"])
     finally:
         client.logout()
-    code = print_check(results, read_holds(list_path))
+    outcomes = []
+    for number in sheet["numbers"]:
+        rows = sheet["facts"].get(number, [])
+        key, facts = classify(number, found[number], rows, has)
+        outcomes.append({"number": number, "key": key, "facts": facts, "rows": rows,
+                         "found": found[number], "marks": check_markers(rows)})
+    code = print_check_result(outcomes)
     if csv_path:
         provenance = (f"{RUN_COMMAND} | target: {aspace_client.ACTIVE_ENV} | "
                       f"{datetime.now().strftime('%Y-%m-%d %H:%M')}")
-        write_check_csv(results, csv_path, provenance)
+        try:
+            write_check_csv(outcomes, sheet, csv_path, provenance)
+        except OSError as e:
+            print_saved([], failed=[("check CSV", csv_path)])
+            print_status("error", f"The check itself completed (above), but its report could "
+                                  f"not be saved: {e}")
+            print()
+            return 1
         print_saved([("check CSV", csv_path)])
     print()
     return code
 
 
 CHECK_OPTIONS = [
-    ("--check FILE", "", "Which of these catalog numbers are already in ArchivesSpace (text list or any CSV"),
-    ("", "", "with CATALOG_NUMBER, e.g. an Airtable pull). Prints: in ArchivesSpace / new / ambiguous /"),
-    ("", "", "could not check. Writes no file unless -o is given. Metadata is not compared."),
+    ("--check FILE", "", "Which of these catalog numbers ArchivesSpace has (text list or any CSV with"),
+    ("", "", "CATALOG_NUMBER). Given an Airtable pull, also compares its ASpace Parent RefID and"),
+    ("", "", "Item Record Created with ArchivesSpace. Screen only unless -o is given."),
 ]
 SELECT_OPTIONS = [
     ("--level LEVEL", "", "Only records at this level: item (default), file, subseries, series... or all"),
@@ -1380,11 +1597,13 @@ def get_colored_help():
     {C.DIM}The reports folder can be changed by setting logs_dir in creds.py{C.RESET}"""),
         ("EXIT", f"""    {C.GREEN}0{C.RESET}  done
     {C.YELLOW}2{C.RESET}  written but incomplete: rows for review (--fill-parents, expected), listed numbers
-       not found, or MADS checks failed; --check: some numbers are ambiguous or could
-       not be checked (new numbers alone are exit 0); also a bad argument or a creds.py
+       not found, or MADS checks failed; --check: something needs review (Airtable
+       disagrees or is incomplete, not an item, ambiguous) or could not be checked -
+       numbers simply not found are exit 0; also a bad argument or a creds.py
        problem - then nothing is written
     {C.RED}1{C.RESET}  failed - nothing written (a fill whose ready file fails after its review file
-       was written says so, and names the review file to delete)"""),
+       was written says so, and names the review file to delete); --check -o: the
+       check ran but its report could not be saved"""),
     ])
 
 
@@ -1481,11 +1700,7 @@ def main():
                          mode="read ArchivesSpace, save ready and review CSVs beside the input")
         sys.exit(run_fill_parents(args.fill_file, *fill_paths))
     if args.check_file:
-        print_run_header("Check catalog numbers in ArchivesSpace (read-only)", target=source,
-                         input=args.check_file,
-                         mode="check only" + (" - the answer is also saved as a CSV"
-                                              if args.output else " - nothing is saved"))
-        sys.exit(run_check(args.check_file, out_path if args.output else None))
+        sys.exit(run_check(args.check_file, out_path if args.output else None, source))
     selection = (args.list_file if args.list_file else
                  f"level {args.level}" + (f", children of {args.parent}" if args.parent else ""))
     print_run_header("Export ArchivesSpace records to CSV (read-only)", target=source,

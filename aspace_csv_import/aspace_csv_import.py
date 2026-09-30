@@ -361,8 +361,8 @@ def validate_csv_before_import(filename: str, update_only: bool = False) -> Tupl
                         warnings.append(f"Row {row_num}: Empty TITLE (will use CATALOG_NUMBER)")
 
             if row_count == 0:
-                # Same rule as csv_utils: a header-only sheet is an empty
-                # export or a wrong filter, never a successful zero-row run.
+                # A header-only sheet is an empty export or a wrong filter,
+                # never a successful zero-row run.
                 errors.append("CSV has no data rows (header only) - an empty "
                               "export or a wrong filter?")
     
@@ -2809,7 +2809,6 @@ def main():
             print(f"         {Colors.DIM}... and {len(val_errors) - 10} more errors{Colors.RESET}")
         print()
         print(f"  {Colors.YELLOW}Fix these errors before importing.{Colors.RESET}")
-        print(f"  {Colors.DIM}Use: python3 csv_utils.py --validate {csv_file}{Colors.RESET}")
         sys.exit(1)
     
     print_status("success", "CSV validation passed")

@@ -15,8 +15,8 @@ sheet:
     creating exactly the directory an output lands in (resolve_output_path)
 
 Deliberately pure: standard library only, no network, no knowledge of
-ArchivesSpace - the offline validator and the public-only MADS checker
-depend on this module and nothing heavier. Talking to ArchivesSpace safely
+ArchivesSpace - so the Airtable pull and the public-only MADS checker can
+use the rules without loading the importer. Talking to ArchivesSpace safely
 is aspace_client.py's job.
 """
 
@@ -63,10 +63,9 @@ MUTABLE_COLUMNS = [
     PHYSTECH,
 ]
 
-# Columns we recognize in the export but don't require or import.
-# Columns aspace_csv_export.py adds beyond the import-shaped ones. Listed
-# here so the validators recognize an exported CSV fed back in (no
-# "unexpected column" noise) - the exporter asserts it stays in sync.
+# Columns aspace_csv_export.py adds beyond the import-shaped ones (the
+# importer ignores them). The exporter asserts this list and its own column
+# list stay in sync.
 EXPORT_AUDIT_COLUMNS = [
     "ASpace Ref ID", "Warnings", "MADS live", "Level", "Depth", "Path",
     "ASpace URI", "ASpace Staff Link", "MADS URL",
@@ -88,10 +87,18 @@ HOLD = "ASpace Hold"
 ISSUE = "ASpace Issue"
 HOLD_TICKED = "checked"  # how Airtable's text form writes a ticked checkbox
 
-OPTIONAL_COLUMNS = [
-    "EJS Season", EJS_EPISODE, FILE_TYPE, PARENT_NOTE, "Content TRT", "ORIGINAL_MEDIA_TYPE",
-    HOLD, ISSUE,
-] + EXPORT_AUDIT_COLUMNS
+# The lookup copy of ((( ASpace_tracking )))'s "ASpace Item Record Created"
+# as it appears in <<< ASpace_import >>> (and so in a pull): Yes once the
+# item's record exists in ArchivesSpace. Only --check reads it.
+CREATED_LOOKUP = "((( ASpace Item Record Created )))"
+
+
+def near_miss_name(names, known):
+    """The first name that differs from `known` only by case or surrounding
+    whitespace ("ASpace Hold ", "aspace issue"), else None. Such a name
+    looks right to a person but is a different column to every tool."""
+    return next((n for n in names
+                 if n != known and (n or "").strip().casefold() == known.casefold()), None)
 
 
 def hold_name_problem(names):
@@ -101,10 +108,9 @@ def hold_name_problem(names):
     silently switch the hold off or drop the issue text; a genuinely absent
     column is fine."""
     for known in (HOLD, ISSUE):
-        variants = [n for n in names
-                    if n != known and (n or "").strip().casefold() == known.casefold()]
-        if variants:
-            return (f"{variants[0]!r} is not spelled exactly {known!r} - rename it in "
+        variant = near_miss_name(names, known)
+        if variant is not None:
+            return (f"{variant!r} is not spelled exactly {known!r} - rename it in "
                     f"Airtable (a misspelled hold or issue column would be ignored)")
     return None
 
