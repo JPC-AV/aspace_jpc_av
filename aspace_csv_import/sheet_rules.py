@@ -79,29 +79,33 @@ EJS_EPISODE = "EJS Episode"
 FILE_TYPE = "ASpace File Type"
 PARENT_NOTE = "Parent Note"
 
-# The hold: an Airtable checkbox (plus its reason) in <<< ASpace_import >>>
-# that keeps an item out of processing. The pull always carries both columns.
+# Two Airtable fields in <<< ASpace_import >>>, carried by every pull:
+#   ASpace Hold  - a checkbox; it ALONE decides whether an item is kept out
+#                  of processing (held with no issue text still blocks)
+#   ASpace Issue - text: what needs attention, held or not. Shown by the
+#                  tools; never a reason to refuse a row by itself.
 HOLD = "ASpace Hold"
-HOLD_REASON = "ASpace Hold Reason"
+ISSUE = "ASpace Issue"
 HOLD_TICKED = "checked"  # how Airtable's text form writes a ticked checkbox
 
 OPTIONAL_COLUMNS = [
     "EJS Season", EJS_EPISODE, FILE_TYPE, PARENT_NOTE, "Content TRT", "ORIGINAL_MEDIA_TYPE",
-    HOLD, HOLD_REASON,
+    HOLD, ISSUE,
 ] + EXPORT_AUDIT_COLUMNS
 
 
 def hold_name_problem(names):
     """A refusal message when a column or Airtable field is a near-miss of
-    a hold column ("ASpace Hold " with a trailing space, "aspace hold"),
-    else None. A near-miss would be read as "no hold column" and silently
-    switch the protection off; a genuinely absent column is fine."""
-    for known in (HOLD, HOLD_REASON):
+    the hold or issue column ("ASpace Hold " with a trailing space, "aspace
+    issue"), else None. A near-miss would be read as "no such column" and
+    silently switch the hold off or drop the issue text; a genuinely absent
+    column is fine."""
+    for known in (HOLD, ISSUE):
         variants = [n for n in names
                     if n != known and (n or "").strip().casefold() == known.casefold()]
         if variants:
             return (f"{variants[0]!r} is not spelled exactly {known!r} - rename it in "
-                    f"Airtable (a misspelled hold column would switch holds off)")
+                    f"Airtable (a misspelled hold or issue column would be ignored)")
     return None
 
 
@@ -110,8 +114,8 @@ def hold_problem(row):
 
     The ASpace Hold cell is either "checked" (held) or blank (not held) -
     exactly what an Airtable pull writes. Any other value is refused as
-    unreadable rather than guessed at. A held row with no reason still
-    blocks. A sheet without the column is not guarded (returns None)."""
+    unreadable rather than guessed at. A held row with no ASpace Issue text
+    still blocks. A sheet without the column is not guarded (returns None)."""
     value = row.get(HOLD)
     if value is None:
         return None
@@ -119,10 +123,20 @@ def hold_problem(row):
     if not value:
         return None
     if value.lower() == HOLD_TICKED:
-        reason = (row.get(HOLD_REASON) or "").strip()
+        reason = (row.get(ISSUE) or "").strip()
         return f"on hold: {reason}" if reason else "on hold (no reason given)"
     return (f"{HOLD} value {value!r} not understood - it must be '{HOLD_TICKED}' "
             f"or blank; fix it in Airtable and pull again")
+
+
+def open_issue(row):
+    """The ASpace Issue text of a row that is NOT held, else None - shown to
+    the operator as something to look at, never a reason to refuse the row
+    (a held row's issue is already its hold reason)."""
+    if hold_problem(row):
+        return None
+    text = (row.get(ISSUE) or "").strip()
+    return text or None
 
 
 # The catalog-number contract, shared by every tool: JPC_AV_ followed by

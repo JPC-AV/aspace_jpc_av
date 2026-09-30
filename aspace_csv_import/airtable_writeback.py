@@ -239,10 +239,10 @@ def check_schema(token):
     if hold is not None and hold.get("type") != "checkbox":
         raise PullError(f"{col.HOLD} is a {hold.get('type')} field, expected checkbox "
                         f"- nothing written")
-    reason = import_fields.get(col.HOLD_REASON)
+    issue = import_fields.get(col.ISSUE)
     return {
         "hold": hold["id"] if hold else None,
-        "hold_reason": reason["id"] if reason else None,
+        "issue": issue["id"] if issue else None,
         "parent": parent["id"], "import_link": import_link["id"],
         "tracking_link": tracking_link["id"], "created": created["id"],
         "source_table": source_id, "source_primary": source.get("primaryFieldId"),
@@ -302,7 +302,7 @@ def build_plan(token, candidates):
                          ids["source_name"], as_text=True)
     imports = read_table(token, IMPORT_TABLE_ID,
                          [f for f in (ids["import_link"], ids["parent"], ids["hold"],
-                                      ids["hold_reason"]) if f],
+                                      ids["issue"]) if f],
                          IMPORT_LABEL)
     trackings = read_table(token, TRACKING_TABLE_ID, [ids["tracking_link"], ids["created"]],
                            TRACKING_LABEL)
@@ -351,7 +351,7 @@ def build_plan(token, candidates):
             continue
         if ids["hold"] and imp.get("fields", {}).get(ids["hold"]) is True:
             # held NOW in Airtable - even after it was created
-            reason = (imp["fields"].get(ids["hold_reason"]) or "").strip() if ids["hold_reason"] else ""
+            reason = (imp["fields"].get(ids["issue"]) or "").strip() if ids["issue"] else ""
             entry["note"] = f"on hold in Airtable{': ' + reason if reason else ''} - left alone"
             continue
         entry["import_rec"], entry["tracking_rec"] = imp["id"], trk["id"]

@@ -167,7 +167,7 @@ hold columns are read by every tool (see Holds below).
 | EJS Episode | Episode number, for `--fill-parents` | Recommended - when blank, the title must carry the episode | 4006, or 09 for Celebrity Showcase |
 | ASpace File Type | Which file record under the episode, for `--fill-parents` | For the fill | Edited, Promo, Raw |
 | ASpace Hold | Keeps the item out of processing: `checked` or blank (what an Airtable pull writes) - any other value is refused | No | checked |
-| ASpace Hold Reason | Why the item is held; shown wherever the hold stops it | No | Content does not match title |
+| ASpace Issue | What needs attention, held or not. On a held row it is the hold's reason, shown wherever the hold stops it; on a row that is not held it is only shown (by the pull and the fill), never a reason to refuse the row | No | No date in ArchivesSpace |
 
 **Date range:** every date you set or change must fall within **1940–2020**, the span of the AV material - anything outside is rejected as a typo. **Two-digit years** (`11/2/93`) are therefore unambiguous: `40`–`99` are 19xx, `00`–`20` are 20xx, and `21`–`39` are rejected (impossible in either century). The same sheet parses identically in any year. Day-first dates are never accepted. One exception: `--update-only` preserves a stored date outside the range as long as the sheet leaves it unchanged (an exported legacy value round-trips; the export flags it for you), but refuses to *change* a date to an out-of-range value.
 
@@ -179,10 +179,18 @@ fill sends it to the review file; strict `--create-records` and
 problem row); `--skip-duplicates` refuses just that row; the Airtable
 write-back leaves it alone (it reads the hold live from Airtable, so an item
 held after it was created is protected too); `--check` still lists it,
-marked. `airtable_pull.py` always includes both hold columns, even when the
-view hides them. Two limits: a CSV carries the hold **as of the pull** - tick
-the box before pulling, and pull again after ticking one - and a sheet
-without the `ASpace Hold` column is not guarded at all.
+marked. `airtable_pull.py` always includes `ASpace Hold` and `ASpace Issue`,
+even when the view hides them. Two limits: a CSV carries the hold **as of the
+pull** - tick the box before pulling, and pull again after ticking one - and
+a sheet without the `ASpace Hold` column is not guarded at all.
+
+**Issues.** `ASpace Issue` records what needs attention on an item, whether
+it is held or not; only the `ASpace Hold` box decides whether it is
+processed. A held row with a blank issue still blocks. On a row that is not
+held, the issue is shown - the pull counts *Open issue (not held)* and the
+fill lists each one under *Open issues* - and the row is processed as usual.
+Clear the text when the issue is resolved. A shared Airtable view (`ASpace
+Hold` ticked, or `ASpace Issue` not empty) is the team's list of open items.
 
 **Other columns** are ignored, so an Airtable export can be used as it is. Two header problems are refused by `--fill-parents`: two or more columns with no header, and a header that is a near-miss of a column the fill reads or adds (`EJS Episode ` with a trailing space, `path` for `Path`). A near-miss would otherwise be ignored or duplicated.
 
@@ -778,6 +786,12 @@ aborts with no writes.
 | "Invalid extent type" | Check Original Format matches ASpace dropdown exactly |
 
 ## Version History
+
+- **v3.3** (2026): `ASpace Issue`
+  - The hold's reason field is renamed `ASpace Issue` and now records any
+    open item, held or not; `ASpace Hold` alone still decides processing
+  - The pull counts open issues on rows that are not held; the fill lists
+    them without refusing the rows
 
 - **v3.2** (2026): One display across the tools
   - Every tool's `-h` screen uses the same banner, a title saying what it

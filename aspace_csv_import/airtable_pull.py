@@ -84,7 +84,7 @@ def get_colored_help():
     return help_screen(TITLE, [
         ("DESCRIPTION", f"""    Saves one view of the <<< ASpace_import >>> table as a CSV, the same as
     Airtable's Download CSV: the view's visible columns in its order, with its
-    filters and sort, plus {col.HOLD} and {col.HOLD_REASON} even if the view hides
+    filters and sort, plus {col.HOLD} and {col.ISSUE} even if the view hides
     them. Read-only toward Airtable.
 
     The view must be a grid view, and the name must match exactly
@@ -202,7 +202,7 @@ def fetch_view_columns(token, view_name):
     misspelled = col.hold_name_problem(list(by_name))
     if misspelled:
         raise PullError(misspelled + " - nothing written")
-    for name in (col.HOLD, col.HOLD_REASON):
+    for name in (col.HOLD, col.ISSUE):
         fid = by_name.get(name)
         if fid and fid not in visible:
             visible = list(visible) + [fid]
@@ -346,11 +346,16 @@ def main():
 
     names = {fid: name for fid, name, _ in columns}
     hold_fid = next((fid for fid, name in names.items() if name == col.HOLD), None)
+    issue_fid = next((fid for fid, name in names.items() if name == col.ISSUE), None)
     held = sum(1 for r in records
                if hold_fid and cell_text(r.get("fields", {}).get(hold_fid)).strip())
+    issues = sum(1 for r in records
+                 if issue_fid and cell_text(r.get("fields", {}).get(issue_fid)).strip()
+                 and not (hold_fid and cell_text(r.get("fields", {}).get(hold_fid)).strip()))
     print_result([("Rows", len(records), "ok", True),
                   ("Columns", len(columns), "neutral", True),
-                  ("On hold", held, "attention")])
+                  ("On hold", held, "attention"),
+                  ("Open issue (not held)", issues, "attention")])
     shown = set(names.values())
     missing = [c for c in col.REQUIRED_COLUMNS if c not in shown]
     if col.CATALOG not in shown:

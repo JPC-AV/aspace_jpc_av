@@ -684,7 +684,7 @@ def read_fill_sheet(path):
             # like "EJS Episode " would otherwise be treated as an absent
             # column - its values silently ignored, the title winning.
             for known in (col.CATALOG, col.TITLE, col.PARENT_REFID, col.EJS_EPISODE,
-                          col.FILE_TYPE, col.PARENT_NOTE, "Path", col.HOLD, col.HOLD_REASON):
+                          col.FILE_TYPE, col.PARENT_NOTE, "Path", col.HOLD, col.ISSUE):
                 variants = [h for h in headers
                             if h != known and (h or "").strip().casefold() == known.casefold()]
                 if variants:
@@ -1088,10 +1088,19 @@ REVIEW_GROUPS = [
 ]
 
 
-def print_fill_result(ready, review, counts, unresolved, ready_path, review_path):
+def open_issues(rows):
+    """[(catalog number, ASpace Issue text)] for rows that are not held but
+    carry an issue - listed for the operator, never refused."""
+    return [((row.get(col.CATALOG) or "").strip(), col.open_issue(row))
+            for row in rows if col.open_issue(row)]
+
+
+def print_fill_result(ready, review, counts, unresolved, ready_path, review_path,
+                      issues=()):
     """The fill's answer, set apart and easy to scan: the two counts first,
-    then the review rows grouped by reason. A group whose rows share one
-    note lists just their catalog numbers."""
+    then the review rows grouped by reason (a group whose rows share one
+    note lists just their catalog numbers), then the open issues on rows
+    that are not held - shown, not refused."""
     C = Colors
     print_section("RESULT")
     print(f"  {C.GREEN}{C.BOLD}Parent-ready    {len(ready):>6}{C.RESET}")
@@ -1102,6 +1111,11 @@ def print_fill_result(ready, review, counts, unresolved, ready_path, review_path
     print(f"  {color}{C.BOLD}Needs review    {len(review):>6}{C.RESET}")
     if review:
         _print_review_groups(unresolved)
+    if issues:
+        print(f"\n  {C.YELLOW}{C.BOLD}Open issues     {len(issues):>6}{C.RESET}   "
+              f"{C.DIM}{col.ISSUE} text on rows not held - still processed{C.RESET}")
+        for catalog, text in issues:
+            print(f"      {catalog or '(no catalog number)'}   {text}")
     print_saved([("ready CSV", ready_path), ("review CSV", review_path)])
     print()
     if review:
@@ -1173,7 +1187,8 @@ def run_fill_parents(sheet_path, ready_path, review_path):
         print_status("error", f"Could not write {ready_path}: {e} - the pair is incomplete; "
                               f"delete {review_path} and run the fill again")
         return 1
-    print_fill_result(ready, review, counts, unresolved, ready_path, review_path)
+    print_fill_result(ready, review, counts, unresolved, ready_path, review_path,
+                      open_issues(rows))
     return 2 if review else 0
 
 
