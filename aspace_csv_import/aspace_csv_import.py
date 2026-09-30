@@ -15,73 +15,18 @@ import argparse
 
 import sheet_rules as col  # single source of truth for CSV header names
 
+# The repo root holds what the tool folders share: aspace_client.py,
+# console.py and creds.py.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from console import (Colors, print_status, print_header,  # shared display helpers
+                     print_section, render_options, print_run_header, print_result,
+                     print_saved, help_screen, styled_parser)
+from console import print_next_step as show_next_step
+
 # ==============================
 # TERMINAL COLORS
 # ==============================
 
-class Colors:
-    """ANSI color codes for terminal output."""
-    HEADER = '\033[95m'
-    BLUE = '\033[94m'
-    CYAN = '\033[96m'
-    GREEN = '\033[92m'
-    YELLOW = '\033[93m'
-    RED = '\033[91m'
-    BOLD = '\033[1m'
-    DIM = '\033[2m'
-    RESET = '\033[0m'
-    
-    @classmethod
-    def disable(cls):
-        """Disable colors (for non-TTY output)."""
-        cls.HEADER = ''
-        cls.BLUE = ''
-        cls.CYAN = ''
-        cls.GREEN = ''
-        cls.YELLOW = ''
-        cls.RED = ''
-        cls.BOLD = ''
-        cls.DIM = ''
-        cls.RESET = ''
-
-# Disable colors if not a TTY
-if not sys.stdout.isatty():
-    Colors.disable()
-
-
-def print_status(status: str, message: str, indent: int = 0):
-    """Print a colorized status message."""
-    indent_str = "  " * indent
-    if status == "success":
-        symbol = f"{Colors.GREEN}[OK]{Colors.RESET}"
-    elif status == "created":
-        symbol = f"{Colors.GREEN}[+]{Colors.RESET}"
-    elif status == "updated":
-        symbol = f"{Colors.BLUE}[~]{Colors.RESET}"
-    elif status == "unchanged":
-        symbol = f"{Colors.DIM}[=]{Colors.RESET}"
-    elif status == "skipped":
-        symbol = f"{Colors.YELLOW}[-]{Colors.RESET}"
-    elif status == "error":
-        symbol = f"{Colors.RED}[X]{Colors.RESET}"
-    elif status == "warning":
-        symbol = f"{Colors.YELLOW}[!]{Colors.RESET}"
-    elif status == "info":
-        symbol = f"{Colors.CYAN}[>]{Colors.RESET}"
-    else:
-        symbol = "   "
-    print(f"{indent_str}{symbol} {message}")
-
-def print_header(text: str):
-    """Print a header line."""
-    print(f"\n{Colors.BOLD}{Colors.CYAN}{text}{Colors.RESET}")
-    print(f"{Colors.DIM}{'-' * 60}{Colors.RESET}")
-
-def print_section(text: str):
-    """Print a section divider."""
-    print(f"\n{Colors.DIM}{'-' * 60}{Colors.RESET}")
-    print(f"{Colors.BOLD}{text}{Colors.RESET}")
-    print(f"{Colors.DIM}{'-' * 60}{Colors.RESET}")
 
 # ==============================
 # HELP MENU
@@ -113,27 +58,14 @@ MODE_OPTIONS = [
 ]
 
 
-def render_options(options, indent="    "):
-    """Render an option list as aligned, colorized lines."""
-    C = Colors
-    lines = []
-    for flag, note, desc in options:
-        note_txt = f"{C.YELLOW}{note}{C.RESET}  " if note else ""
-        pad = " " * max(1, 33 - len(flag))
-        lines.append(f"{indent}{C.CYAN}{flag}{C.RESET}{pad}{note_txt}{desc}")
-    return "\n".join(lines)
+HELP_TITLE = "Create or update ArchivesSpace records"
 
 
 def get_colored_help():
-    """Generate a colored and formatted help message for the command line."""
-    C = Colors  # Shorthand
-    
-    help_text = "\n" + f"""{C.BOLD}{C.CYAN}===============================================================================
-              ArchivesSpace CSV Import Script                                 
-==============================================================================={C.RESET}
-
-{C.BOLD}DESCRIPTION{C.RESET}
-    Imports item-level archival objects from CSV into ArchivesSpace:
+    """The -h screen, in the shared layout."""
+    C = Colors
+    return help_screen(HELP_TITLE, [
+        ("DESCRIPTION", f"""    Creates item-level archival objects from a CSV, or updates existing ones:
     {C.GREEN}1.{C.RESET} Creates archival objects with metadata (titles, dates, extents, notes)
     {C.GREEN}2.{C.RESET} Links to parent objects via ref_id
     {C.GREEN}3.{C.RESET} Links each item to its AV Case top container (reused if one exists, else created)
@@ -141,40 +73,38 @@ def get_colored_help():
     Every run checks all rows first and prints the PLAN (what will be created,
     skipped, refused or changed - titles, dates, parents, notes in full). A real
     run then asks you to type {C.BOLD}yes{C.RESET}; anything else writes nothing. After a real
-    create run it prints the exact command that records the results in Airtable.
-
-{C.BOLD}USAGE{C.RESET}
-    {C.GREEN}${C.RESET} python3 aspace_csv_import.py (--create-records | --update-only) -f FILE [options]
-
-{C.BOLD}OPTIONS{C.RESET}
-{render_options(CLI_OPTIONS)}
-
-{C.BOLD}MODE{C.RESET} {C.DIM}(required - every run states its intent){C.RESET}
-{render_options(MODE_OPTIONS)}
-
-{C.BOLD}EXAMPLES{C.RESET}
-    {C.GREEN}${C.RESET} python3 aspace_csv_import.py --create-records -f data.csv --dry-run
-    {C.GREEN}${C.RESET} python3 aspace_csv_import.py --create-records -f data.csv
-    {C.GREEN}${C.RESET} python3 aspace_csv_import.py --update-only -f data.csv
-
-{C.BOLD}CSV COLUMNS{C.RESET} {C.DIM}(all required for --create-records; --update-only accepts a subset){C.RESET}
-    {", ".join(col.REQUIRED_COLUMNS[:5])},
+    create run it prints the exact command that records the results in Airtable."""),
+        ("USAGE", f"    {C.GREEN}${C.RESET} python3 aspace_csv_import.py (--create-records | --update-only) -f FILE [options]"),
+        ("OPTIONS", render_options(CLI_OPTIONS)),
+        ("MODE", "required - every run states its intent", render_options(MODE_OPTIONS)),
+        ("CSV COLUMNS", "all required for --create-records; --update-only accepts a subset",
+         f"""    {", ".join(col.REQUIRED_COLUMNS[:5])},
     {", ".join(col.REQUIRED_COLUMNS[5:])}
     {C.DIM}Other columns are ignored. A blank ASpace Parent RefID column can be filled first:{C.RESET}
-    {C.GREEN}${C.RESET} python3 aspace_csv_export.py --fill-parents FILE --env production   # writes FILE_ready.csv + FILE_review.csv
-
-{C.BOLD}OUTPUT{C.RESET}
-    Reports saved to: {C.CYAN}{OUTPUT_DIR}/{C.RESET}
-    {C.DIM}Can be changed by setting logs_dir in creds.py{C.RESET}
-"""
-    return help_text
+    {C.GREEN}${C.RESET} python3 aspace_csv_export.py --fill-parents FILE --env production   # writes FILE_ready.csv + FILE_review.csv"""),
+        ("EXAMPLES", f"""    {C.GREEN}${C.RESET} python3 aspace_csv_import.py --create-records -f data.csv --dry-run
+    {C.GREEN}${C.RESET} python3 aspace_csv_import.py --create-records -f data.csv
+    {C.GREEN}${C.RESET} python3 aspace_csv_import.py --update-only -f data.csv"""),
+        ("OUTPUT", f"""    {C.CYAN}{OUTPUT_DIR}/{C.RESET}
+    import_report_<time>.json + .csv   what happened to each row (the receipt)
+    import_records_<time>.json         the records as ArchivesSpace stored them
+    csv_import_<time>.log              the run's log
+    {C.DIM}A dry run saves no files. The folder can be changed with logs_dir in creds.py{C.RESET}"""),
+        ("EXIT", f"""    {C.GREEN}0{C.RESET}    every row done
+    {C.RED}1{C.RESET}    stopped. Before the yes (a bad CSV, a login problem, cancelled at the
+         prompt) nothing was written to ArchivesSpace. A fatal error after writing
+         began saves a partial report - check it in ArchivesSpace before rerunning
+    {C.YELLOW}2{C.RESET}    some rows failed, were refused or held, or a problem row stopped the
+         batch (see the report); also a bad argument
+    {C.RED}3{C.RESET}    records may have been written but the reports could not be saved
+    {C.YELLOW}130{C.RESET}  interrupted (Ctrl-C) - the report covers the rows reached"""),
+        ("NEXT STEP", f"""    After a real create run: the write-back command it prints
+    {C.GREEN}${C.RESET} python3 airtable_writeback.py REPORT.json --run"""),
+    ])
 
 # ==============================
 # CONFIGURATION
 # ==============================
-
-# Add parent directory to path for shared creds.py import
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 # ArchivesSpace API Configuration - creds loading, environment selection,
 # and all HTTP/lookup/write safety live in the shared client (aspace_client.py
@@ -2304,6 +2234,9 @@ def generate_reports(results: List[Dict], summary: Dict) -> bool:
     could not be saved, exiting zero would misreport the run.
     """
     ok = True
+    # What happened to each file: "saved" or "failed" (absent = not needed).
+    # Shown on screen only - never part of the receipt itself.
+    files = summary["_files"] = {}
     # Enriched copies for the reports: add the browsable staff_link derived
     # from each row's API uri. The originals stay untouched. The read-back
     # records ride on the row results but belong in their own file - the
@@ -2375,13 +2308,15 @@ def generate_reports(results: List[Dict], summary: Dict) -> bool:
             writer.writerows(report_rows)
         os.replace(tmp_path, CSV_REPORT)
         logging.info(f"CSV report saved: {CSV_REPORT}")
+        files["receipt CSV"] = ("saved", CSV_REPORT)
     except Exception as e:
         ok = False
+        files["receipt CSV"] = ("failed", CSV_REPORT)
         logging.error(f"Failed to write CSV report: {str(e)}")
 
     try:
         report_data = {
-            "summary": summary,
+            "summary": {k: v for k, v in summary.items() if not k.startswith("_")},
             "results": report_rows
         }
         tmp_path = JSON_REPORT + '.tmp'
@@ -2390,8 +2325,10 @@ def generate_reports(results: List[Dict], summary: Dict) -> bool:
         os.replace(tmp_path, JSON_REPORT)
         logging.info(f"JSON report saved: {JSON_REPORT}")
         summary["report_file"] = JSON_REPORT
+        files["import report"] = ("saved", JSON_REPORT)
     except Exception as e:
         ok = False
+        files["import report"] = ("failed", JSON_REPORT)
         logging.error(f"Failed to write JSON report: {str(e)}")
     # The receipts (CSV + JSON) are the audit trail and are written first;
     # the records file (snapshots as stored) comes after.
@@ -2410,8 +2347,10 @@ def generate_reports(results: List[Dict], summary: Dict) -> bool:
                            "records": records}, f, indent=2)
             os.replace(tmp_path, RECORDS_REPORT)
             logging.info(f"Records file saved: {RECORDS_REPORT} ({len(records)} record(s))")
+            files["records file"] = ("saved", RECORDS_REPORT)
         except Exception as e:
             ok = False
+            files["records file"] = ("failed", RECORDS_REPORT)
             logging.error(f"Failed to write records file: {str(e)}")
     return ok
 
@@ -2431,67 +2370,64 @@ def reconcile_summary(results: List[Dict], summary: Dict):
         if key in summary:
             summary[key] += 1
 
-def print_summary(summary: Dict, elapsed_time: str = None):
-    """Print import summary to console."""
-    print_section("SUMMARY")
-    
-    total = summary['total_rows']
-    created = summary['created']
-    updated = summary.get('updated', 0)
-    unchanged = summary.get('unchanged', 0)
-    failed = summary['failed']
-    skipped = summary['skipped']
-    
-    print(f"  Total Rows:    {total}")
-
-    # A dry run writes nothing: say what WOULD happen, never "Created".
+def print_summary(summary: Dict, elapsed_time: str = None,
+                  results: List[Dict] = None):
+    """The RESULT block, then the files saved. Every category that happened
+    is shown; held rows, writes of unknown outcome and rows never written
+    are counted apart from definite failures. `results` is the run's row
+    list - an empty list is a run stopped before its first row, None means
+    no row list was given (nothing to count unreached rows against)."""
     dry = summary.get('dry_run', False)
-    if created > 0:
-        label = "Would create:" if dry else "Created:"
-        print(f"  {Colors.GREEN}{label}{Colors.RESET}{' ' * (15 - len(label))}{created}")
-    if updated > 0:
-        label = "Would update:" if dry else "Updated:"
-        print(f"  {Colors.BLUE}{label}{Colors.RESET}{' ' * (15 - len(label))}{updated}")
-    if unchanged > 0:
-        print(f"  {Colors.DIM}Unchanged:{Colors.RESET}     {unchanged}")
-    if skipped > 0:
-        print(f"  {Colors.YELLOW}Skipped:{Colors.RESET}       {skipped}")
-    if failed > 0:
-        print(f"  {Colors.RED}Failed:{Colors.RESET}        {failed}")
+    rows_known = results is not None
+    results = results or []
+    unknown = sum(1 for r in results if outcome_unknown(r))
+    held = sum(1 for r in results if held_row(r))
+    failed = max(summary.get('failed', 0) - unknown - held, 0)
+    not_reached = (max(summary.get('total_rows', 0) - len(results), 0)
+                   if rows_known and summary.get('interrupted') else 0)
     aborted = summary.get('aborted', 0)
-    if aborted > 0:
-        print(f"  {Colors.YELLOW}Aborted:{Colors.RESET}       {aborted}  "
-              f"{Colors.DIM}(these rows may be fine - unwritten because the failed rows stopped the run){Colors.RESET}")
-    
-    print(f"\n  Mode: {MODE_LABELS.get(summary.get('duplicate_mode'), summary.get('duplicate_mode'))}")
-    
-    if summary.get('dry_run', False):
-        print(f"\n  {Colors.YELLOW}{Colors.BOLD}DRY RUN - No records were modified{Colors.RESET}")
-    
-    if elapsed_time:
-        print(f"\n  Processing Time: {elapsed_time}")
-    
+    print_result([
+        ("Rows in the CSV", summary.get('total_rows', 0), "neutral", True),
+        ("Would create" if dry else "Created", summary.get('created', 0), "ok"),
+        ("Would update" if dry else "Updated", summary.get('updated', 0), "ok"),
+        ("Unchanged", summary.get('unchanged', 0), "neutral"),
+        ("Skipped", summary.get('skipped', 0), "attention"),
+        ("On hold", held, "attention"),
+        ("Failed or refused", failed, "bad"),
+        ("Outcome unknown", unknown, "unknown"),
+        ("Not written (the run stopped)", aborted, "attention"),
+        ("Not reached (interrupted)", not_reached, "attention"),
+    ], title="RESULT - dry run" if dry else "RESULT")
+    if aborted:
+        print(f"\n  {Colors.DIM}Not written: these rows may be fine - the failed rows "
+              f"stopped the run before they were written{Colors.RESET}")
     if dry:
-        print(f"\n  No report files written (dry run)")
-    else:
-        print(f"\n  Reports: {OUTPUT_DIR}/")
-    if summary.get('report_file'):
-        print(f"  Report: {os.path.basename(summary['report_file'])}")
-    if summary.get('records_file'):
-        print(f"  Records (as stored in ASpace): {os.path.basename(summary['records_file'])} "
-              f"(records: {summary.get('snapshots_captured', '?')} of "
-              f"{summary.get('snapshots_expected', '?')}, containers: "
-              f"{summary.get('containers_captured', '?')} of "
-              f"{summary.get('containers_expected', '?')} captured)")
-    if summary.get('snapshots_missing') or summary.get('containers_missing'):
+        print(f"\n  {Colors.YELLOW}{Colors.BOLD}DRY RUN - nothing written to ArchivesSpace, "
+              f"no files saved{Colors.RESET}")
+    if elapsed_time:
+        print(f"\n  {Colors.DIM}Time: {elapsed_time}{Colors.RESET}")
+
+    if not dry:
+        files = summary.get('_files', {})
+        order = ("import report", "receipt CSV", "records file")
+        print_saved([(role, files[role][1]) for role in order
+                     if files.get(role, ("",))[0] == "saved"]
+                    + [("log", LOG_FILE if os.path.exists(LOG_FILE) else None)],
+                    failed=[(role, files[role][1]) for role in order
+                            if files.get(role, ("",))[0] == "failed"])
+    records_failed = summary.get('_files', {}).get('records file', ("",))[0] == "failed"
+    if (summary.get('snapshots_missing') or summary.get('containers_missing')) and not records_failed:
         gaps = []
         if summary.get('snapshots_missing'):
             gaps.append(f"record read-back failed for {', '.join(map(str, summary['snapshots_missing']))}")
         if summary.get('containers_missing'):
             gaps.append(f"container read-back failed for {', '.join(map(str, summary['containers_missing']))}")
-        print(f"  {Colors.YELLOW}Records file incomplete:{Colors.RESET} {'; '.join(gaps)} "
+        print(f"\n  {Colors.YELLOW}Records file incomplete{Colors.RESET} "
+              f"(records: {summary.get('snapshots_captured', '?')} of "
+              f"{summary.get('snapshots_expected', '?')}, containers: "
+              f"{summary.get('containers_captured', '?')} of "
+              f"{summary.get('containers_expected', '?')} captured): {'; '.join(gaps)} "
               f"- the writes succeeded; those snapshots are missing")
-    print(f"{Colors.DIM}{'-' * 60}{Colors.RESET}\n")
 
 # ==============================
 # MAIN EXECUTION
@@ -2505,6 +2441,58 @@ def outcome_unknown(result: Dict) -> bool:
     return result.get("status") == "error" and (
         "UNKNOWN" in message or "outcome unknown" in message
         or "response was lost" in message)
+
+
+REPORT_FILES = ("import report", "receipt CSV", "records file")
+
+
+def report_file_lines(summary: Dict) -> List[Tuple[str, str]]:
+    """(status, message) for each report file the run tried to save:
+    Saved or NOT saved, with its full path. Files the run did not need are
+    left out."""
+    files = summary.get("_files", {})
+    lines = []
+    for role in REPORT_FILES:
+        if role in files:
+            state, path = files[role]
+            lines.append(("success", f"Saved {role}: {os.path.abspath(path)}") if state == "saved"
+                         else ("error", f"NOT saved {role}: {os.path.abspath(path)}"))
+    return lines
+
+
+def report_failure_messages(summary: Dict, partial: bool = False) -> List[str]:
+    """What the failed report saves mean, file by file. The import report
+    (JSON) and the receipt CSV each list every row's outcome, so one alone
+    is a full record; the write-back reads the JSON and the records file.
+    `partial`: the run stopped early (a fatal error or Ctrl-C), so any
+    saved receipt covers only the rows reached."""
+    files = summary.get("_files", {})
+    failed = {role for role, (state, _) in files.items() if state == "failed"}
+    messages = []
+    if {"import report", "receipt CSV"} <= failed:
+        messages.append("No receipts were saved - records may have been written with no "
+                        "record of which (see log)")
+    elif "import report" in failed:
+        messages.append(f"The import report (JSON) could not be saved - the receipt CSV lists "
+                        f"every {'reached ' if partial else ''}row's outcome, but the Airtable "
+                        f"write-back needs the JSON report (see log)")
+    elif "receipt CSV" in failed:
+        messages.append(f"The receipt CSV could not be saved - the import report (JSON) lists "
+                        f"every {'reached ' if partial else ''}row's outcome (see log)")
+    if "records file" in failed:
+        messages.append("The records file could not be saved - the Airtable write-back will "
+                        "send every created row to review (see log)")
+    if partial and not {"import report", "receipt CSV"} <= failed:
+        messages.append("The saved receipts cover only the rows reached before the run "
+                        "stopped - check those records in ArchivesSpace before rerunning")
+    return messages
+
+
+def held_row(result: Dict) -> bool:
+    """True for a row refused because it is on hold in Airtable - counted
+    apart from failures: the hold did its job."""
+    return (result.get("status") == "error"
+            and (result.get("message") or "").startswith("on hold"))
 
 
 def print_next_step(summary: Dict, results: List[Dict] = None) -> None:
@@ -2524,27 +2512,32 @@ def print_next_step(summary: Dict, results: List[Dict] = None) -> None:
     results = results or []
     unknown = [r.get(col.CATALOG) or f"row {r.get('row_number')}"
                for r in results if outcome_unknown(r)]
-    failed = sum(1 for r in results if r.get("status") == "error") - len(unknown)
+    held = sum(1 for r in results if held_row(r))
+    failed = sum(1 for r in results if r.get("status") == "error") - len(unknown) - held
     not_reached = (max(summary.get("total_rows", 0) - len(results), 0)
                    + sum(1 for r in results if r.get("status") == "aborted"))
     script = os.path.relpath(os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                           "airtable_writeback.py"))
-    print_section("NEXT STEP - record the results in Airtable")
-    if unknown or failed or not_reached or summary.get("interrupted"):
+    lines = []
+    if unknown or failed or held or not_reached or summary.get("interrupted"):
         parts = [f"{created} created"]
         if unknown:
             parts.append(f"{len(unknown)} outcome unknown")
+        if held:
+            parts.append(f"{held} on hold")
         if failed:
             parts.append(f"{failed} failed")
         if not_reached:
             parts.append(f"{not_reached} not reached")
-        print(f"  {Colors.YELLOW}{Colors.BOLD}PARTIAL run:{Colors.RESET} {', '.join(parts)}"
-              f"{' (interrupted)' if summary.get('interrupted') else ''}."
-              f" The write-back records only the {created} created.")
+        lines.append(f"{Colors.YELLOW}{Colors.BOLD}PARTIAL run:{Colors.RESET} {', '.join(parts)}"
+                     f"{' (interrupted)' if summary.get('interrupted') else ''}."
+                     f" The write-back records only the {created} created.")
         if unknown:
-            print(f"  Check these in ArchivesSpace before rerunning - they may exist: "
-                  f"{', '.join(unknown)}")
-    print(f"  python3 {_shlex.quote(script)} {_shlex.quote(summary['report_file'])} --run\n")
+            lines.append(f"Check these in ArchivesSpace before rerunning - they may exist: "
+                         f"{', '.join(unknown)}")
+        lines.append("")
+    lines.append(f"python3 {_shlex.quote(script)} {_shlex.quote(summary['report_file'])} --run")
+    show_next_step(lines, title="NEXT STEP - record the results in Airtable")
 
 
 def recover_partial_run(state: Dict, error: Exception):
@@ -2573,37 +2566,9 @@ def _safe_console(status: str, message: str) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     """The importer's command-line parser (module-level so tests can drive it)."""
-    # Custom ArgumentParser for cleaner usage and colored errors
-    class CustomArgumentParser(argparse.ArgumentParser):
-        def format_usage(self):
-            C = Colors
-            usage = f"\nusage: {self.prog} (--create-records | --update-only) -f FILE [options]\n"
-            help_hint = f"       {C.DIM}Use -h or --help for detailed information{C.RESET}\n"
-            options = ("\n" + render_options(CLI_OPTIONS, indent="  ") + "\n"
-                       + render_options(MODE_OPTIONS, indent="  ") + "\n")
-            return usage + help_hint + options
-        
-        def format_help(self):
-            return "\n" + super().format_help()
-        
-        def error(self, message):
-            self.print_usage(sys.stderr)
-            self.exit(2, f"\n{Colors.RED}error: {message}{Colors.RESET}\n")
-    
-    parser = CustomArgumentParser(
-        description=get_colored_help(),
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        add_help=False,
-        usage=argparse.SUPPRESS
-    )
-    
-    parser.add_argument(
-        '-h', '--help',
-        action='help',
-        default=argparse.SUPPRESS,
-        help=argparse.SUPPRESS
-    )
-    
+    parser = styled_parser(["(--create-records | --update-only) -f FILE [options]"],
+                           get_colored_help, [CLI_OPTIONS, MODE_OPTIONS])
+
     parser.add_argument(
         '-n', '--dry-run',
         action='store_true',
@@ -2774,18 +2739,15 @@ def main():
     
     # Print header - the TARGET line is the audit trail of which catalog
     # this run touched; production gets the loud color.
-    print_header("Update ArchivesSpace records" if args.update_only
-                 else "Create ArchivesSpace records")
     target = (f"{aspace_client.ACTIVE_ENV.upper()} ({aspace_client.ASPACE_URL}, "
               f"repo {aspace_client.REPO_ID}, resource {aspace_client.RESOURCE_ID})")
-    target_color = Colors.RED if aspace_client.ACTIVE_ENV == 'production' else Colors.GREEN
-    print(f"  Target: {target_color}{Colors.BOLD}{target}{Colors.RESET}")
+    print_run_header(
+        "Update ArchivesSpace records" if args.update_only else "Create ArchivesSpace records",
+        target=target, input=os.path.abspath(csv_file), mode=MODE_LABELS[duplicate_mode],
+        extra=[("Dry run", args.dry_run and f"{Colors.YELLOW}{Colors.BOLD}nothing is written to "
+                                            f"ArchivesSpace, no files are saved{Colors.RESET}")])
     logging.info(f"Target environment: {target}")
     logging.info(f"Command: {RUN_COMMAND}")
-    print(f"  File: {csv_file}")
-    print(f"  Mode: {MODE_LABELS[duplicate_mode]}")
-    if args.dry_run:
-        print(f"  {Colors.YELLOW}{Colors.BOLD}DRY RUN - nothing is written{Colors.RESET}")
     
     # Start timing
     start_time = time.time()
@@ -2935,9 +2897,16 @@ def main():
             client.logout()
             sys.exit(1)
         reports_ok = generate_reports(results, summary)
-        _safe_console("error", f"Fatal error during processing: {summary['fatal_error']} - "
-                               f"partial reports {'written' if reports_ok else 'could NOT be written'} "
+        _safe_console("error", f"Fatal error during processing: {summary['fatal_error']} "
                                f"({len(results)} row(s) recorded)")
+        for status, message in report_file_lines(summary):
+            _safe_console(status, message)
+        if reports_ok:
+            _safe_console("warning", "Partial report saved - check the records it lists in "
+                                     "ArchivesSpace before rerunning")
+        else:
+            for message in report_failure_messages(summary, partial=True):
+                _safe_console("error", message)
         client.logout()
         sys.exit(3 if not reports_ok else 1)
 
@@ -2957,7 +2926,7 @@ def main():
         minutes, seconds = divmod(remainder, 60)
         elapsed_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
-        print_summary(summary, elapsed_str)
+        print_summary(summary, elapsed_str, results)
 
         if reports_ok:
             print_next_step(summary, results)
@@ -2965,8 +2934,9 @@ def main():
         if not reports_ok:
             # ArchivesSpace may have been modified but the audit trail wasn't
             # saved - that is a failed run, not a successful one.
-            print_status("error", "Report files could not be written (see log) - "
-                                  "records above may have been modified without an audit trail")
+            for message in report_failure_messages(summary,
+                                                   partial=bool(summary.get('interrupted'))):
+                print_status("error", message)
             client.logout()
             sys.exit(3)
 
@@ -3001,7 +2971,6 @@ def main():
     
     # Logout
     client.logout()
-    print_status("success", "Logged out")
 
 if __name__ == "__main__":
     main()

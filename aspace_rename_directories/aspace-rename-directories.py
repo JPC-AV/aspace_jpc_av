@@ -2,6 +2,8 @@
 ASpace phystech (Physical Characteristics and Technical Requirements) note, and
 renames directories to include the record's ref_id."""
 
+import contextlib  # capturing a screen block so the log file gets it too
+import io  # in-memory buffer for that capture
 import os  # Library for interacting with the operating system (e.g., files, directories)
 import stat  # S_ISREG for the manifest scan
 import sys  # Library for system-specific parameters and functions
@@ -13,7 +15,8 @@ import time  # Library for timing operations
 from datetime import datetime  # Library for date/time formatting
 from pathlib import Path  # Library for working with file paths
 
-# Add parent directory to path for the shared client and creds.py import
+# The repo root holds what the tool folders share: aspace_client.py,
+# console.py and creds.py.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 # All ArchivesSpace API safety (HTTP, retries, verified lookups, scope-locked
@@ -21,23 +24,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 # (aspace_client.py at the repo root). Constants are read THROUGH the module
 # (aspace_client.X): the environment is selected in main() after argument
 # parsing, so an import-time snapshot would capture the pre-selection None.
-# Imported BEFORE colorama: the client carries the friendly missing-package
-# exit (and its own guard for requests).
 import aspace_client
 from aspace_client import ASpaceClient
-
-try:
-    from colorama import Fore, Style, init  # colored terminal output
-except ModuleNotFoundError:
-    aspace_client.missing_package_exit("colorama")
-
-if not aspace_client.ENVIRONMENTS:
-    # Say what is actually wrong: a broken environments declaration gets
-    # its precise message, a missing file gets the format hint.
-    print(f"{Fore.RED}Error: {aspace_client.CONFIG_ERROR or 'creds.py not found or missing required fields'}{Style.RESET_ALL}")
-    if not aspace_client.CONFIG_ERROR:
-        print("See creds_template.py in repo root for format (an `environments` dict).")
-    sys.exit(1)
+from console import (Colors, print_status, print_run_header, print_result,  # shared display
+                     print_saved, print_section, render_options, help_screen,
+                     styled_parser)
 
 # Import optional logs_dir (may not exist in older creds.py files)
 try:
@@ -45,50 +36,26 @@ try:
 except ImportError:
     logs_dir = ""
 
-# Initialize Colorama for cross-platform compatibility of colored terminal output
-init(autoreset=True)
-
 # Output Configuration - a custom logs_dir gets a per-script subfolder so the
 # import/export/rename tools sharing one creds setting don't interleave files.
+# Nothing is created when the script loads: setup_logging() makes the folder
+# and the log file once the arguments have been checked, so -h or a mistyped
+# flag leaves no file behind.
 DEFAULT_OUTPUT_DIR = os.path.expanduser("~/aspace_rename_reports")
 OUTPUT_DIR = os.path.join(logs_dir, "rename_reports") if logs_dir else DEFAULT_OUTPUT_DIR
-os.makedirs(OUTPUT_DIR, exist_ok=True)
 LOG_FILE = f"{OUTPUT_DIR}/rename_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+LOG_FORMAT = "%(asctime)s [%(levelname)s] %(message)s"
 
-# Configure the logging system to display messages with different log levels
-logging.basicConfig(
-    level=logging.INFO,  # Set the logging level to INFO (logs INFO, WARNING, ERROR)
-    format="%(asctime)s [%(levelname)s] %(message)s",  # Specify the format of log messages
-    handlers=[
-        logging.StreamHandler(),  # Console output
-        logging.FileHandler(LOG_FILE)  # File output
-    ]
-)
+# The log file only: screen blocks drawn with the shared helpers (the run
+# header, RESULT) are written here as plain lines, so the file keeps them
+# without the screen showing them twice.
+FILE_LOG = logging.getLogger("rename.file")
+FILE_LOG.propagate = False
 
-# Define a custom logging formatter to add colors to log messages
-class ColoredFormatter(logging.Formatter):
-    """
-    Custom logging formatter that adds color-coded output based on the log level.
-    """
-    # Define color mappings for each log level using Colorama constants
-    COLORS = {
-        "INFO": Fore.GREEN,  # Green for informational messages
-        "WARNING": Fore.YELLOW,  # Yellow for warnings
-        "ERROR": Fore.RED,  # Red for error messages
-    }
+# A log call passes extra=OK for a confirmed success; the screen marks it
+# [OK]. Every other INFO line is [>].
+OK = {"status": "ok"}
 
-    def format(self, record):
-        """
-        Override the format method to add colors to log messages.
-        Args:
-            record (LogRecord): A single log event to format.
-        Returns:
-            str: The formatted log message with color.
-        """
-        # Get the color for the current log level
-        level_color = self.COLORS.get(record.levelname, "")  # Default to no color
-        formatted_message = super().format(record)  # Format the message
-        return f"{level_color}{formatted_message}{Style.RESET_ALL}"  # Add color
 
 class PlainFormatter(logging.Formatter):
     """Strips ANSI escape codes - the on-disk log is the audit trail of what
@@ -100,79 +67,138 @@ class PlainFormatter(logging.Formatter):
         return self.ANSI_RE.sub("", super().format(record))
 
 
-# Colors on the console; plain text in the log file.
-for handler in logging.getLogger().handlers:
-    if isinstance(handler, logging.FileHandler):
-        handler.setFormatter(PlainFormatter("%(asctime)s [%(levelname)s] %(message)s"))
-    else:
-        handler.setFormatter(ColoredFormatter("%(asctime)s [%(levelname)s] %(message)s"))
+_SCREEN_MARKS = {
+    "ok": ("GREEN", "[OK]"),
+    "DEBUG": ("DIM", "[.]"),
+    "INFO": ("CYAN", "[>]"),
+    "WARNING": ("YELLOW", "[!]"),
+    "ERROR": ("RED", "[X]"),
+    "CRITICAL": ("RED", "[X]"),
+}
+_IN_FOLDER = False  # screen lines are indented under the folder being processed
 
 
-def log_spacing():
-    """
-    Add spacing between log messages for better readability.
-    """
-    print("\n" + "=" * 79 + "\n")  # Print a line of '=' characters
+class ScreenFormatter(logging.Formatter):
+    """The screen's view of a log message: the shared status marks, no
+    timestamp, indented under the current folder. A traceback stays in the
+    log file; the screen says where to find it."""
+
+    def format(self, record):
+        key = "ok" if getattr(record, "status", None) == "ok" else record.levelname
+        color, mark = _SCREEN_MARKS.get(key, ("", "   "))
+        text = record.getMessage()
+        if record.exc_info:
+            text += " (details in the log)"
+        indent = "  " if _IN_FOLDER else ""
+        if record.levelname == "DEBUG":
+            return f"{indent}{Colors.DIM}{mark} {text}{Colors.RESET}"
+        return f"{indent}{getattr(Colors, color)}{mark}{Colors.RESET} {text}"
+
+
+def setup_logging(verbose=False):
+    """Create the reports folder and this run's log file, and send every
+    message to both: the screen (marks, no timestamps) and the file (every
+    message, timestamped, plain - including the shared client's messages,
+    which log through the same root logger)."""
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    file_handler = logging.FileHandler(LOG_FILE)
+    file_handler.setFormatter(PlainFormatter(LOG_FORMAT))
+    screen = logging.StreamHandler(sys.stdout)
+    screen.setFormatter(ScreenFormatter())
+    root = logging.getLogger()
+    # Any handler already here is Python's default stderr one, installed by
+    # an earlier module-level logging call; left in place it would print
+    # every message a second time.
+    for handler in root.handlers[:]:
+        root.removeHandler(handler)
+    root.setLevel(logging.DEBUG if verbose else logging.INFO)
+    root.addHandler(screen)
+    root.addHandler(file_handler)
+    FILE_LOG.setLevel(logging.INFO)
+    FILE_LOG.addHandler(file_handler)
+    return file_handler, screen
+
+
+def show(draw, *args, **kwargs):
+    """Draw a screen block with a shared helper, and write the same lines,
+    plain, into the log file once (the shared helpers only print)."""
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        draw(*args, **kwargs)
+    text = buf.getvalue()
+    sys.stdout.write(text)
+    sys.stdout.flush()
+    for line in PlainFormatter.ANSI_RE.sub("", text).splitlines():
+        if line.strip() and set(line.strip()) - set("-="):
+            FILE_LOG.info(line.rstrip())
+
+
+def folder_heading(name):
+    """Start a folder's block: its name on the screen, a marker in the log."""
+    global _IN_FOLDER
+    _IN_FOLDER = False
+    print(f"\n{Colors.BOLD}{name}{Colors.RESET}", flush=True)
+    FILE_LOG.info(f"Processing directory: {name}")
+    _IN_FOLDER = True
+
+
+# ==============================
+# HELP MENU
+# ==============================
+
+# One source of truth for the option lists - rendered into both the -h
+# screen and the short list shown on argument errors.
+TARGET_OPTIONS = [
+    ("-d, --directory PATH", "(pick one)", "A folder holding JPC_AV_<digits> subfolders"),
+    ("--single PATH [PATH ...]", "(pick one)", "These JPC_AV_<digits> folders themselves"),
+]
+OPTIONS = [
+    ("-n, --dry-run", "", "Preview: reads ArchivesSpace, writes and renames nothing"),
+    ("--no-update", "", "Rename only - leave ArchivesSpace records untouched"),
+    ("--no-rename", "", "Update ArchivesSpace only - rename nothing"),
+    ("--rename-media, --rename-mkv", "", "Also rename the media file to include the ref ID (.mkv only)"),
+    ("--mp4", "", "Optical-disc .mp4 transfers instead of .mkv (see MEDIA FORMAT)"),
+    ("--env NAME", "", "Target environment from creds.py (required when several are configured)"),
+    ("-v, --verbose", "", "Show debug detail too"),
+    ("--no-color", "", "Disable colored output"),
+]
+
+HELP_TITLE = "Update ArchivesSpace and rename AV folders"
+
 
 def get_colored_help():
-    """
-    Generate a colored and formatted help message for the command line.
-    Returns:
-        str: Formatted help text with ANSI color codes.
-    """
-    # Color definitions
-    BOLD = Style.BRIGHT
-    CYAN = Fore.CYAN
-    GREEN = Fore.GREEN
-    YELLOW = Fore.YELLOW
-    WHITE = Fore.WHITE
-    MAGENTA = Fore.MAGENTA
-    RESET = Style.RESET_ALL
-    DIM = Style.DIM
-    
-    help_text = "\n" + f"""{BOLD}{CYAN}╔══════════════════════════════════════════════════════════════════════════════╗
-║          ArchivesSpace Directory Processing Script                           ║
-╚══════════════════════════════════════════════════════════════════════════════╝{RESET}
+    """The -h screen, in the shared layout."""
+    C = Colors
+    return help_screen(HELP_TITLE, [
+        ("DESCRIPTION", f"""    For each JPC_AV_<digits> folder of digitized media:
+    {C.GREEN}1.{C.RESET} Reads the media runtime (mediainfo) into the Duration of the record's
+       Physical Characteristics and Technical Requirements note
+    {C.GREEN}2.{C.RESET} Fills a blank extent physical_details with "{PHYSICAL_DETAILS_DEFAULT}"
+       {C.DIM}(existing values kept; single-extent records only){C.RESET}
+    {C.GREEN}3.{C.RESET} Renames the folder to JPC_AV_<digits>_refid_<ref_id>
 
-{BOLD}{WHITE}DESCRIPTION{RESET}
-    Processes JPC_AV_* directories to:
-    {GREEN}1.{RESET} Extract media runtime → {YELLOW}phystech note{RESET} (Physical Characteristics) in ArchivesSpace
-    {GREEN}2.{RESET} Fill blank extent physical_details → {YELLOW}SD video, color, sound{RESET} {DIM}(existing values kept; single-extent records only){RESET}
-    {GREEN}3.{RESET} Rename directories to include {YELLOW}ref_id{RESET}
+    The record is updated before anything is renamed, and nothing is renamed
+    when the update fails. Every message goes to a timestamped log file."""),
+        ("USAGE", f"""    {C.GREEN}${C.RESET} python3 aspace-rename-directories.py -d PATH [options]
+    {C.GREEN}${C.RESET} python3 aspace-rename-directories.py --single PATH [PATH ...] [options]"""),
+        ("OPTIONS", render_options(TARGET_OPTIONS) + "\n" + render_options(OPTIONS)),
+        ("MEDIA FORMAT", "one per run", f"""    .mkv {C.DIM}(default){C.RESET}  JPC_AV_00001/JPC_AV_00001.mkv
+    --mp4           JPC_AV_14180/access_JPC_AV_14180/JPC_AV_14180.mp4
+                    {C.DIM}only the top folder is renamed; --rename-media is refused{C.RESET}"""),
+        ("EXAMPLES", f"""    {C.GREEN}${C.RESET} python3 aspace-rename-directories.py -d /path/to/videos --dry-run
+    {C.GREEN}${C.RESET} python3 aspace-rename-directories.py -d /path/to/videos
+    {C.GREEN}${C.RESET} python3 aspace-rename-directories.py --single /path/to/JPC_AV_00001 /path/to/JPC_AV_00002
+    {C.GREEN}${C.RESET} python3 aspace-rename-directories.py -d /path/to/videos --rename-media
+    {C.GREEN}${C.RESET} python3 aspace-rename-directories.py -d /path/to/discs --mp4"""),
+        ("OUTPUT", f"""    Folders:  JPC_AV_00001/  ->  JPC_AV_00001_refid_<ref_id>/
+    Log:      {C.CYAN}{OUTPUT_DIR}/{C.RESET}rename_<time>.log
+              {C.DIM}every message, timestamped - dry runs too; logs_dir in creds.py moves it{C.RESET}"""),
+        ("EXIT", f"""    {C.GREEN}0{C.RESET}  every folder done or already up to date (or none found)
+    {C.RED}1{C.RESET}  some folders failed, are partly done or have an unknown outcome;
+       or a creds.py or login problem
+    {C.YELLOW}2{C.RESET}  a bad argument or combination - nothing was done"""),
+    ])
 
-{BOLD}{WHITE}USAGE{RESET}
-    {GREEN}${RESET} python3 aspace-rename-directories.py -d PATH [options]
-
-{BOLD}{WHITE}OPTIONS{RESET}
-    {CYAN}-d, --directory PATH{RESET}  {YELLOW}(required){RESET}  Target directory with JPC_AV_* subdirs
-    {CYAN}-n, --dry-run{RESET}                    Preview changes without executing
-    {CYAN}-v, --verbose{RESET}                    Enable debug-level logging
-    {CYAN}--single PATH [PATH ...]{RESET}         Process specific directories directly (not subdirs)
-    {CYAN}--mp4{RESET}                            Process optical-disc .mp4 transfers instead of .mkv
-    {CYAN}--no-rename{RESET}                      Update ASpace only, skip directory renames
-    {CYAN}--no-update{RESET}                      Rename only, skip ASpace record updates
-    {CYAN}--rename-media{RESET}                   Also rename the media file to include ref_id
-                                     {DIM}(.mkv only; --rename-mkv is an alias){RESET}
-    {CYAN}--env NAME{RESET}                       Target environment from creds.py
-                                     {DIM}(required when several are configured){RESET}
-
-{BOLD}{WHITE}EXAMPLES{RESET}
-    {GREEN}${RESET} python3 aspace-rename-directories.py -d /path/to/videos
-    {GREEN}${RESET} python3 aspace-rename-directories.py -d /path/to/videos --dry-run
-    {GREEN}${RESET} python3 aspace-rename-directories.py --single /path/to/JPC_AV_00001
-    {GREEN}${RESET} python3 aspace-rename-directories.py --single /path/to/JPC_AV_00001 /path/to/JPC_AV_00002
-    {GREEN}${RESET} python3 aspace-rename-directories.py -d /path/to/videos --rename-media
-    {GREEN}${RESET} python3 aspace-rename-directories.py -d /path/to/discs --mp4
-
-{BOLD}{WHITE}INPUT/OUTPUT{RESET}
-    {DIM}Input:{RESET}  {MAGENTA}JPC_AV_00001/{RESET} containing {MAGENTA}JPC_AV_00001.mkv{RESET}
-            {DIM}(--mp4:{RESET} {MAGENTA}JPC_AV_14180/access_JPC_AV_14180/JPC_AV_14180.mp4{RESET}{DIM}){RESET}
-    {DIM}Output:{RESET} {GREEN}JPC_AV_00001_refid_<ref_id>/{RESET}
-
-{BOLD}{WHITE}TARGET{RESET}
-    Selected from the environments in {CYAN}creds.py{RESET}; every run logs a Target line.
-"""
-    return help_text
 
 def get_video_duration(file_path):
     """
@@ -517,9 +543,32 @@ def set_extent_physical_details(data):
         logging.info(f"Keeping existing physical_details: '{current}' (not overwritten)")
     return data, 0
 
+def new_outcome(name):
+    """What happened to one target, recorded as it happens (never read back
+    from log text): the requested steps confirmed done and kept ("update",
+    "media", "rename"), the problem that stopped it, whether any step's
+    result is uncertain, and any manual fix needed first."""
+    return {"name": name, "done": [], "problem": None, "uncertain": False,
+            "manual": None, "unchanged": False}
+
+
+def outcome_category(outcome, dry_run):
+    """Each target lands in exactly one category, in this order:
+    unknown  - some step's result is uncertain
+    partly   - some requested changes were made and kept, others were not
+    failed   - it did not finish, and nothing it changed was kept
+    current  - every requested step needed no change
+    done     - every requested step succeeded"""
+    if outcome["uncertain"]:
+        return "unknown"
+    if outcome["problem"]:
+        return "partly" if outcome["done"] and not dry_run else "failed"
+    return "done" if outcome["done"] else "current"
+
+
 def rename_and_update_directories(client, target_dir, dry_run=False, no_rename=False,
                                    no_update=False, verbose=False, rename_mkv=False,
-                                   single=False, media_format="mkv"):
+                                   single=False, media_format="mkv", report=None):
     """
     Process directories to:
     - Extract video metadata.
@@ -537,11 +586,23 @@ def rename_and_update_directories(client, target_dir, dry_run=False, no_rename=F
             ref_id (refused at the CLI for formats whose layout forbids it).
         media_format (str): Key into MEDIA_FORMATS - selects the extension,
             where the media lives, and whether physical_details is filled.
+        report (dict): Filled as the run goes, for the RESULT screen:
+            "selected" (targets named or found), "requested" (the steps
+            asked for) and "outcomes" (one per target, see new_outcome).
+    Returns:
+        int: the number of targets that did not finish (failed, partly done
+        or of unknown outcome) - nonzero means the run must exit nonzero.
     """
+    global _IN_FOLDER
+    report = report if report is not None else {}
+    outcomes = report.setdefault("outcomes", [])
+    report["selected"] = 0
+    report["requested"] = ([] if no_update else ["update"]) + \
+        ([] if no_rename else (["media"] if rename_mkv else []) + ["rename"])
     fmt = MEDIA_FORMATS[media_format]
     # Handle --single mode (target_dir may be None)
     if single:
-        logging.info(f"Processing {len(single)} specified director{'y' if len(single) == 1 else 'ies'}")
+        FILE_LOG.info(f"Processing {len(single)} specified director{'y' if len(single) == 1 else 'ies'}")
         working_dir = None  # Not used in --single mode
     else:
         # Validate target directory
@@ -549,22 +610,35 @@ def rename_and_update_directories(client, target_dir, dry_run=False, no_rename=F
             logging.error(f"Target directory does not exist: {target_dir}")
             return 1  # pre-loop setup failure
         working_dir = os.path.abspath(target_dir)
-        logging.info(f"Working directory: {working_dir}")
-    
+        FILE_LOG.info(f"Working directory: {working_dir}")
+
     # Log active options
     if no_rename:
-        logging.info(f"{Fore.CYAN}--no-rename:{Style.RESET_ALL} Directories will NOT be renamed")
+        FILE_LOG.info("--no-rename: Directories will NOT be renamed")
     if no_update:
-        logging.info(f"{Fore.CYAN}--no-update:{Style.RESET_ALL} ASpace records will NOT be updated")
+        FILE_LOG.info("--no-update: ASpace records will NOT be updated")
     if rename_mkv:
-        logging.info(f"{Fore.CYAN}--rename-mkv:{Style.RESET_ALL} .mkv files will also be renamed")
-    
-    log_spacing()
+        FILE_LOG.info("--rename-mkv: .mkv files will also be renamed")
+
+    # Every target that stops is counted once, here, with its outcome.
+    counters = {"failed": 0}
+
+    def fail(outcome, message, uncertain=False, manual=None, log=True):
+        if log:
+            logging.error(message)
+        outcome["problem"] = message
+        outcome["uncertain"] = outcome["uncertain"] or uncertain
+        outcome["manual"] = manual or outcome["manual"]
+        counters["failed"] += 1
 
     # Find directories to process. In --single mode the operator named each
     # target explicitly, so a rejected target is a FAILURE (counted, non-zero
     # exit) - not a silent skip that can leave an all-invalid run exiting 0.
-    invalid_single_count = 0
+    def refuse(name, message):
+        outcome = new_outcome(name)
+        outcomes.append(outcome)
+        fail(outcome, message)
+
     if single:
         # --single mode: process only the specified directories (not their
         # subdirs). Targets are (parent_path, name) TUPLES, never keyed by
@@ -578,8 +652,7 @@ def rename_and_update_directories(client, target_dir, dry_run=False, no_rename=F
         for path in single:
             stripped = path.rstrip('/')
             if not stripped:
-                logging.error(f"Invalid --single target: {path!r}")
-                invalid_single_count += 1
+                refuse(path, f"Invalid --single target: {path!r}")
                 continue
             path = os.path.abspath(stripped)
             directory_name = os.path.basename(path)
@@ -591,25 +664,21 @@ def rename_and_update_directories(client, target_dir, dry_run=False, no_rename=F
             seen_paths.add(path)
 
             if "_refid_" in directory_name:
-                logging.error(f"Directory already has refid: {directory_name}")
-                invalid_single_count += 1
+                refuse(path, f"Directory already has refid: {directory_name}")
                 continue
             if not JPC_AV_DIR_RE.fullmatch(directory_name):
-                logging.error(f"Directory name must be JPC_AV_<digits> (e.g. JPC_AV_00001): {directory_name}")
-                invalid_single_count += 1
+                refuse(path, f"Directory name must be JPC_AV_<digits> (e.g. JPC_AV_00001): {directory_name}")
                 continue
             if os.path.islink(path):
                 # Renaming a symlink stamps the LINK while the real directory
                 # keeps its old name around a refid-stamped file - the exact
                 # half-renamed state later runs can't recover. Refuse; run on
                 # the real directory instead.
-                logging.error(f"Target is a symlink, refusing (process the real "
-                              f"directory instead): {path}")
-                invalid_single_count += 1
+                refuse(path, f"Target is a symlink, refusing (process the real "
+                             f"directory instead): {path}")
                 continue
             if not os.path.isdir(path):
-                logging.error(f"Directory not found: {path}")
-                invalid_single_count += 1
+                refuse(path, f"Directory not found: {path}")
                 continue
 
             targets.append((parent_dir, directory_name))
@@ -625,11 +694,11 @@ def rename_and_update_directories(client, target_dir, dry_run=False, no_rename=F
         if colliding:
             for parent_dir, name in targets:
                 if name in colliding:
-                    logging.error(f"Conflicting --single targets: {name_counts[name]} directories "
-                                  f"named {name} were selected, but they all resolve to the same "
-                                  f"ArchivesSpace record ({os.path.join(parent_dir, name)}). "
-                                  f"Process only one of them.")
-                    invalid_single_count += 1
+                    refuse(os.path.join(parent_dir, name),
+                           f"Conflicting --single targets: {name_counts[name]} directories "
+                           f"named {name} were selected, but they all resolve to the same "
+                           f"ArchivesSpace record ({os.path.join(parent_dir, name)}). "
+                           f"Process only one of them.")
             targets = [t for t in targets if t[1] not in colliding]
     else:
         # Normal mode: find all JPC_AV_<digits> subdirectories (already-renamed
@@ -644,9 +713,8 @@ def rename_and_update_directories(client, target_dir, dry_run=False, no_rename=F
             # islink BEFORE isdir: isdir() follows links, so a DANGLING
             # symlink would otherwise be silently skipped instead of refused.
             if os.path.islink(full):
-                logging.error(f"Entry is a symlink, refusing (process the real "
-                              f"directory instead): {full}")
-                invalid_single_count += 1
+                refuse(full, f"Entry is a symlink, refusing (process the real "
+                             f"directory instead): {full}")
                 continue
             if not os.path.isdir(full):
                 continue
@@ -654,38 +722,30 @@ def rename_and_update_directories(client, target_dir, dry_run=False, no_rename=F
 
     # Sort by directory name (then parent, for same-name targets)
     targets.sort(key=lambda t: (t[1], t[0]))
+    report["selected"] = len(targets) + len(outcomes)
 
     if not targets:
-        if invalid_single_count:
-            logging.error(f"All {invalid_single_count} requested target(s) were invalid.")
-            return invalid_single_count
+        if outcomes:
+            logging.error(f"All {len(outcomes)} requested target(s) were invalid.")
+            return counters["failed"]
         logging.warning("No matching directories found to process.")
         return 0  # nothing to do is not a failure
 
-    logging.info(f"Found {len(targets)} directories to process:")
+    logging.info(f"Found {len(targets)} director{'y' if len(targets) == 1 else 'ies'} to process")
     for parent_path, directory in targets:
-        logging.info(f"  - {os.path.join(parent_path, directory) if single else directory}")
-    log_spacing()
-
-    # Honest tallies so the summary and exit code reflect what actually happened.
-    # Rejected --single targets are pre-counted as failures.
-    counters = {"selected": len(targets) + invalid_single_count,
-                "processed": 0, "updated": 0,
-                "unchanged": 0, "dir_renamed": 0, "mkv_renamed": 0,
-                "failed": invalid_single_count}
+        FILE_LOG.info(f"  - {os.path.join(parent_path, directory) if single else directory}")
 
     # Process each directory
     for parent_path, directory in targets:
         dir_path = os.path.join(parent_path, directory)
-        counters["processed"] += 1
+        outcome = new_outcome(directory)
+        outcomes.append(outcome)
+        folder_heading(directory)
         try:
-            logging.info(f"Processing directory: {directory}")
-
             # Step 1: Resolve the ArchivesSpace record (needed for both rename and update)
             refid, archival_object_id, problem = get_refid(client, directory)
             if problem:
-                logging.error(f"Could not resolve {directory}: {problem}. Skipping.")
-                counters["failed"] += 1
+                fail(outcome, f"Could not resolve {directory}: {problem}. Skipping.")
                 continue
 
             logging.info(f"RefID: {refid}, Archival Object ID: {archival_object_id}")
@@ -701,8 +761,7 @@ def rename_and_update_directories(client, target_dir, dry_run=False, no_rename=F
                     dir_path, extensions=fmt["extensions"],
                     media_subdir=fmt["media_subdir"])
                 if media_problem:
-                    logging.error(f"{directory}: {media_problem}. Skipping.")
-                    counters["failed"] += 1
+                    fail(outcome, f"{directory}: {media_problem}. Skipping.")
                     continue
 
             # Step 3: Precompute rename targets and collision-check BEFORE any write,
@@ -714,24 +773,21 @@ def rename_and_update_directories(client, target_dir, dry_run=False, no_rename=F
                 # lexists, not exists: a DANGLING symlink at the target would
                 # pass exists() and then be silently replaced by os.rename.
                 if os.path.lexists(dir_target):
-                    logging.error(f"Target directory already exists, refusing to overwrite: "
+                    fail(outcome, f"Target directory already exists, refusing to overwrite: "
                                   f"{os.path.basename(dir_target)}. Skipping.")
-                    counters["failed"] += 1
                     continue
                 if rename_mkv and mkv_filename:
                     base, ext = os.path.splitext(mkv_filename)
                     mkv_target_name = f"{base}_refid_{refid}{ext}"
                     if os.path.lexists(os.path.join(dir_path, mkv_target_name)):
-                        logging.error(f"Target .mkv already exists, refusing to overwrite: "
+                        fail(outcome, f"Target .mkv already exists, refusing to overwrite: "
                                       f"{mkv_target_name}. Skipping.")
-                        counters["failed"] += 1
                         continue
                     try:
                         manifests = checksum_manifests_naming(dir_path, mkv_filename)
                     except OSError as e:
-                        logging.error(f"Refusing --rename-media for {directory}: could not "
+                        fail(outcome, f"Refusing --rename-media for {directory}: could not "
                                       f"inspect checksum manifests ({e}). Skipping.")
-                        counters["failed"] += 1
                         continue
                     if manifests:
                         # A checksum manifest lists the media by NAME; renaming
@@ -740,12 +796,11 @@ def rename_and_update_directories(client, target_dir, dry_run=False, no_rename=F
                         # manifests is not implemented (no workflow uses
                         # --rename-media with manifests yet) - refuse, and
                         # say what would have to happen.
-                        logging.error(f"Refusing --rename-media for {directory}: "
+                        fail(outcome, f"Refusing --rename-media for {directory}: "
                                       f"{', '.join(manifests)} reference {mkv_filename} by name "
                                       f"and would be orphaned by the rename. Drop --rename-media "
                                       f"for this folder, or regenerate the manifest after renaming "
                                       f"by hand. Skipping.")
-                        counters["failed"] += 1
                         continue
 
             # Step 4: Extract runtime (only when updating the record). A failed/unparseable
@@ -758,9 +813,8 @@ def rename_and_update_directories(client, target_dir, dry_run=False, no_rename=F
                     logging.debug(f"Full MKV path: {mkv_path}")
                 video_duration = get_video_duration(mkv_path)
                 if video_duration is None:
-                    logging.error(f"Could not extract a valid runtime from {mkv_filename}. "
+                    fail(outcome, f"Could not extract a valid runtime from {mkv_filename}. "
                                   f"Skipping directory (no update, no rename).")
-                    counters["failed"] += 1
                     continue
                 logging.info(f"Extracted runtime: {video_duration} for file: {mkv_filename}")
 
@@ -772,8 +826,7 @@ def rename_and_update_directories(client, target_dir, dry_run=False, no_rename=F
             if not no_update:
                 archival_object_data = fetch_archival_object(client, archival_object_id)
                 if not archival_object_data:
-                    logging.error(f"Failed to fetch archival object for ID: {archival_object_id}. Skipping.")
-                    counters["failed"] += 1
+                    fail(outcome, f"Failed to fetch archival object for ID: {archival_object_id}. Skipping.")
                     continue
                 # The lookup verified ONE record; this second fetch must be that
                 # same record - same uri, resource, catalog number, item level
@@ -783,8 +836,7 @@ def rename_and_update_directories(client, target_dir, dry_run=False, no_rename=F
                 problem = record_identity_problem(archival_object_data, archival_object_id,
                                                   directory, refid)
                 if problem:
-                    logging.error(f"Refusing to update {directory}: re-fetched record {problem}")
-                    counters["failed"] += 1
+                    fail(outcome, f"Refusing to update {directory}: re-fetched record {problem}")
                     continue
 
                 # Change detection: only write when something actually
@@ -799,35 +851,35 @@ def rename_and_update_directories(client, target_dir, dry_run=False, no_rename=F
                     updated_data, filled_details = archival_object_data, 0
                 if needs_duration:
                     updated_data = modify_phystech_note(updated_data, video_duration)
+                changes = []
+                if needs_duration:
+                    changes.append(f"Duration -> {video_duration}")
+                if filled_details:
+                    changes.append(f"physical_details -> '{PHYSICAL_DETAILS_DEFAULT}' "
+                                   f"on {filled_details} blank extent(s)")
 
                 if not needs_duration and filled_details == 0:
                     logging.info(f"Record already up to date for {directory} "
                                  f"(Duration and physical_details unchanged) - nothing written")
-                    counters["unchanged"] += 1
+                    outcome["unchanged"] = True
                 elif dry_run:
-                    changes = []
-                    if needs_duration:
-                        changes.append(f"Duration -> {video_duration}")
-                    if filled_details:
-                        changes.append(f"physical_details -> '{PHYSICAL_DETAILS_DEFAULT}' "
-                                       f"on {filled_details} blank extent(s)")
-                    logging.info(f"{Fore.YELLOW}[DRY RUN]{Style.RESET_ALL} Would update "
-                                 f"ASpace record: {'; '.join(changes)}")
-                    counters["updated"] += 1
+                    logging.info(f"Would update ArchivesSpace record: {'; '.join(changes)}")
+                    outcome["done"].append("update")
                 else:
                     # None is the failure signal; a 200 with an empty body is
                     # still a success (the shared client already treats it so).
                     if update_archival_object(client, archival_object_id, updated_data) is None:
                         if client.last_failure_definitive:
-                            logging.error(f"ArchivesSpace rejected the update for "
+                            fail(outcome, f"ArchivesSpace rejected the update for "
                                           f"{archival_object_id}. Skipping (nothing renamed).")
                         else:
-                            logging.error(f"Update outcome UNKNOWN for {archival_object_id} "
+                            fail(outcome, f"Update outcome UNKNOWN for {archival_object_id} "
                                           f"(timeout/lost response) - the write may have "
-                                          f"committed; verify in ArchivesSpace. Nothing renamed.")
-                        counters["failed"] += 1
+                                          f"committed; verify in ArchivesSpace. Nothing renamed.",
+                                 uncertain=True)
                         continue
-                    counters["updated"] += 1
+                    logging.info(f"ArchivesSpace record updated: {'; '.join(changes)}", extra=OK)
+                    outcome["done"].append("update")
 
             # Step 6: Rename the media file FIRST (if --rename-mkv), then the
             # directory. This order fails loudly if interrupted: a refid-
@@ -841,27 +893,30 @@ def rename_and_update_directories(client, target_dir, dry_run=False, no_rename=F
                 old_mkv_path = os.path.join(dir_path, mkv_filename)
                 new_mkv_path = os.path.join(dir_path, mkv_target_name)
                 if dry_run:
-                    logging.info(f"{Fore.YELLOW}[DRY RUN]{Style.RESET_ALL} Would rename .mkv: {mkv_filename} → {mkv_target_name}")
-                    counters["mkv_renamed"] += 1
+                    logging.info(f"Would rename media file: {mkv_filename} → {mkv_target_name}")
+                    outcome["done"].append("media")
                 else:
                     try:
                         rename_no_overwrite(old_mkv_path, new_mkv_path)
                     except FileExistsError as e:
                         # a file appeared at the target since the pre-check:
                         # refused before anything moved
-                        logging.error(f"Media rename failed for {directory}: {e} - nothing changed")
-                        counters["failed"] += 1
+                        fail(outcome, f"Media rename failed for {directory}: {e} - "
+                                      f"the media file was not renamed")
+                        continue
+                    except RenameUncertain as e:
+                        fail(outcome, f"Media rename failed for {directory}: {e}", uncertain=True)
+                        continue
+                    except PlaceholderLeft as e:
+                        fail(outcome, f"Media rename failed for {directory}: {e}", manual=str(e))
                         continue
                     except OSError as e:
-                        # the rename itself failed; the primitive's message
-                        # says whether the folder is known-unchanged or
-                        # needs a look (a rename can land and still report
-                        # an error on a network filesystem)
-                        logging.error(f"Media rename failed for {directory}: {e}")
-                        counters["failed"] += 1
+                        # the rename itself failed and the folder is known
+                        # unchanged (the uncertain cases raise the types above)
+                        fail(outcome, f"Media rename failed for {directory}: {e}")
                         continue
-                    logging.info(f".mkv file renamed to: {mkv_target_name}")
-                    counters["mkv_renamed"] += 1
+                    logging.info(f".mkv file renamed to: {mkv_target_name}", extra=OK)
+                    outcome["done"].append("media")
                     mkv_renamed_now = True
 
             # Step 7: Rename the directory (unless --no-rename). Target collision
@@ -869,48 +924,110 @@ def rename_and_update_directories(client, target_dir, dry_run=False, no_rename=F
             # renamed, roll the file back so the directory is left untouched.
             if not no_rename:
                 if dry_run:
-                    logging.info(f"{Fore.YELLOW}[DRY RUN]{Style.RESET_ALL} Would rename directory: {directory} → {os.path.basename(dir_target)}")
-                    counters["dir_renamed"] += 1
+                    logging.info(f"Would rename directory: {directory} → {os.path.basename(dir_target)}")
+                    outcome["done"].append("rename")
                 else:
                     try:
                         rename_no_overwrite(dir_path, dir_target)
                     except OSError as e:
-                        logging.error(f"Directory rename failed for {directory}: {e}")
+                        message = f"Directory rename failed for {directory}: {e}"
+                        logging.error(message)
+                        uncertain = isinstance(e, RenameUncertain)
+                        manual = str(e) if isinstance(e, PlaceholderLeft) else None
                         if mkv_renamed_now:
                             try:
                                 rename_no_overwrite(new_mkv_path, old_mkv_path)
-                                counters["mkv_renamed"] -= 1
+                                outcome["done"].remove("media")
                                 logging.info(f"Rolled back media file rename: {mkv_target_name} → {mkv_filename}")
+                            except RenameUncertain as e2:
+                                # the rollback may have landed: the media rename
+                                # is no longer a confirmed change, and "rename it
+                                # back" could be wrong - both names must be checked
+                                outcome["done"].remove("media")
+                                manual = (f"MANUAL CHECK NEEDED: the rollback of the media file "
+                                          f"rename may or may not have completed ({e2}). Check "
+                                          f"which of {new_mkv_path} / {old_mkv_path} exists "
+                                          f"before rerunning.")
+                                logging.error(manual)
+                                uncertain = True
                             except OSError as e2:
-                                logging.error(f"MANUAL FIX NEEDED: could not roll back media file "
-                                              f"rename ({new_mkv_path}): {e2}. Rename it back to "
-                                              f"{mkv_filename} before rerunning.")
-                        counters["failed"] += 1
+                                manual = (f"MANUAL FIX NEEDED: could not roll back media file "
+                                          f"rename ({new_mkv_path}): {e2}. Rename it back to "
+                                          f"{mkv_filename} before rerunning.")
+                                logging.error(manual)
+                        fail(outcome, message, uncertain=uncertain, manual=manual, log=False)
                         continue
-                    logging.info(f"Directory renamed to: {os.path.basename(dir_target)}")
-                    counters["dir_renamed"] += 1
+                    logging.info(f"Directory renamed to: {os.path.basename(dir_target)}", extra=OK)
+                    outcome["done"].append("rename")
 
         except Exception as e:
             logging.error(f"An error occurred while processing directory {directory}: {e}",
                           exc_info=True)
-            counters["failed"] += 1
-
-        log_spacing()  # Add spacing between directories
-
-    # Summary
-    logging.info(f"{Fore.GREEN}Processing complete!{Style.RESET_ALL}")
-    logging.info(f"  Selected:     {counters['selected']}")
-    logging.info(f"  Processed:    {counters['processed']}")
-    logging.info(f"  Updated:      {counters['updated']}")
-    logging.info(f"  Unchanged:    {counters['unchanged']}")
-    logging.info(f"  Dirs renamed: {counters['dir_renamed']}")
-    logging.info(f"  MKVs renamed: {counters['mkv_renamed']}")
-    failed_color = Fore.RED if counters["failed"] else Fore.GREEN
-    logging.info(f"{failed_color}  Failed:       {counters['failed']}{Style.RESET_ALL}")
-    if dry_run:
-        logging.info(f"{Fore.YELLOW}This was a DRY RUN - no actual changes were made{Style.RESET_ALL}")
+            fail(outcome, f"An error occurred while processing directory {directory}: {e}",
+                 log=False)
+        finally:
+            _IN_FOLDER = False
 
     return counters["failed"]
+
+
+def print_rename_result(report, dry_run, elapsed=None, stopped=False):
+    """FOLDERS (each target once, in one category), CHANGES MADE (confirmed,
+    kept changes), the targets that need a person, then the log's path."""
+    outcomes = report.get("outcomes", [])
+    groups = {}
+    for outcome in outcomes:
+        groups.setdefault(outcome_category(outcome, dry_run), []).append(outcome)
+    count = lambda key: len(groups.get(key, []))
+    not_reached = max(report.get("selected", 0) - len(outcomes), 0) if stopped else 0
+    print_result([
+        ("Targets selected", report.get("selected", 0), "neutral", True),
+        ("Would be done" if dry_run else "Done", count("done"), "ok"),
+        ("Already up to date", count("current"), "neutral"),
+        ("Partly done", count("partly"), "attention"),
+        ("Failed", count("failed"), "bad"),
+        ("Outcome unknown", count("unknown"), "unknown"),
+        ("Not reached (the run stopped)", not_reached, "attention"),
+    ], title="FOLDERS - dry run" if dry_run else "FOLDERS")
+
+    requested = report.get("requested", [])
+    made = lambda step: sum(1 for o in outcomes if step in o["done"])
+    labels = {"update": ("ArchivesSpace records updated", "Would update ArchivesSpace records"),
+              "media": ("Media files renamed", "Would rename media files"),
+              "rename": ("Folders renamed", "Would rename folders")}
+    rows = [(labels[step][dry_run], made(step), "ok", True) for step in requested]
+    if "update" in requested:
+        rows.append(("Records already correct (not rewritten)",
+                     sum(1 for o in outcomes if o["unchanged"]), "neutral"))
+    print_result(rows, title="WOULD CHANGE" if dry_run else "CHANGES MADE")
+
+    attention = [o for key in ("partly", "unknown", "failed") for o in groups.get(key, [])]
+    if attention:
+        words = {"partly": "partly done", "unknown": "outcome unknown", "failed": "failed"}
+        steps = {"update": "ArchivesSpace updated", "media": "media file renamed",
+                 "rename": "folder renamed"}
+        print_section("NEEDS ATTENTION")
+        for outcome in attention:
+            key = outcome_category(outcome, dry_run)
+            color = {"partly": Colors.YELLOW, "unknown": Colors.YELLOW}.get(key, Colors.RED)
+            print(f"  {Colors.BOLD}{outcome['name']}{Colors.RESET}  {color}{words[key]}{Colors.RESET}")
+            if outcome["done"]:
+                print(f"      done: {', '.join(steps[s] for s in outcome['done'])}")
+            print(f"      {outcome['problem']}")
+            if outcome["manual"] and outcome["manual"] != outcome["problem"]:
+                print(f"      {Colors.RED}{Colors.BOLD}{outcome['manual']}{Colors.RESET}")
+        if any(outcome_category(o, dry_run) in ("partly", "unknown") for o in attention):
+            print(f"\n  {Colors.BOLD}Inspect the named paths and resolve the reported problem "
+                  f"before rerunning.{Colors.RESET}")
+    if stopped:
+        print(f"\n  {Colors.RED}{Colors.BOLD}The run stopped on an unexpected error - targets "
+              f"after the last one shown were not processed (details in the log){Colors.RESET}")
+    if dry_run:
+        print(f"\n  {Colors.YELLOW}{Colors.BOLD}DRY RUN - nothing written to ArchivesSpace, "
+              f"nothing renamed{Colors.RESET}")
+    if elapsed:
+        print(f"\n  {Colors.DIM}Time: {elapsed}{Colors.RESET}")
+
 
 CHECKSUM_MANIFEST_EXTENSIONS = (".md5", ".sha1", ".sha256", ".sha512")
 
@@ -944,6 +1061,16 @@ def checksum_manifests_naming(dir_path, media_filename):
     return sorted(found)
 
 
+class RenameUncertain(OSError):
+    """The rename reported an error, but it may have landed anyway, or the
+    target changed under it - the paths must be inspected."""
+
+
+class PlaceholderLeft(OSError):
+    """Not renamed, but the empty placeholder this run created could not be
+    removed - it must be deleted by hand before a rerun."""
+
+
 def rename_no_overwrite(src, dst):
     """Rename src to dst, refusing atomically if dst exists.
 
@@ -973,7 +1100,7 @@ def rename_no_overwrite(src, dst):
         os.rename(src, dst)                 # replaces our own placeholder only
     except OSError as e:
         if not os.path.lexists(src):
-            raise OSError(f"{e}; but {src} is gone, so the rename may have "
+            raise RenameUncertain(f"{e}; but {src} is gone, so the rename may have "
                           f"completed anyway - {dst} was left in place; "
                           f"check it before rerunning") from e
         try:
@@ -984,13 +1111,13 @@ def rename_no_overwrite(src, dst):
         except OSError:
             still_placeholder = False
         if not still_placeholder:
-            raise OSError(f"{e}; {dst} no longer looks like the empty placeholder "
+            raise RenameUncertain(f"{e}; {dst} no longer looks like the empty placeholder "
                           f"this run created, so it was left in place - check it "
                           f"before rerunning") from e
         try:
             (os.rmdir if is_dir else os.unlink)(dst)
         except OSError as e2:
-            raise OSError(f"{e}; and the empty placeholder left at {dst} could "
+            raise PlaceholderLeft(f"{e}; and the empty placeholder left at {dst} could "
                           f"not be removed ({e2}) - delete it by hand before "
                           f"rerunning") from e
         raise
@@ -1045,10 +1172,99 @@ def update_archival_object(client, object_id, updated_data):
         (including a scope-lock refusal - nothing is sent in that case).
     """
     uri = f"/repositories/{aspace_client.REPO_ID}/archival_objects/{object_id}"
-    result = client.update_record(uri, updated_data)
-    if result is not None:
-        logging.info("Archival object updated successfully!")
-    return result
+    return client.update_record(uri, updated_data)
+
+def build_parser():
+    """The command-line parser (module-level so tests can check it against -h)."""
+    parser = styled_parser(["-d PATH [options]", "--single PATH [PATH ...] [options]"],
+                           get_colored_help, [TARGET_OPTIONS, OPTIONS])
+    # -d and --single are genuinely mutually exclusive targets - allowing both
+    # used to silently ignore the -d directory in favor of --single.
+    target_group = parser.add_mutually_exclusive_group()
+    target_group.add_argument('-d', '--directory', type=str, required=False, metavar='PATH',
+                              help=argparse.SUPPRESS)
+    target_group.add_argument('--single', nargs='+', metavar='PATH', help=argparse.SUPPRESS)
+    parser.add_argument('-n', '--dry-run', action='store_true', help=argparse.SUPPRESS)
+    parser.add_argument('-v', '--verbose', action='store_true', help=argparse.SUPPRESS)
+    parser.add_argument('--no-rename', action='store_true', help=argparse.SUPPRESS)
+    parser.add_argument('--no-update', action='store_true', help=argparse.SUPPRESS)
+    parser.add_argument('--rename-media', '--rename-mkv',  # --rename-mkv kept as an alias
+                        dest='rename_mkv', action='store_true', help=argparse.SUPPRESS)
+    # Format flags: ONE format per run (mutually exclusive group so future
+    # formats - --wav, --mp3 - can't be combined either).
+    format_group = parser.add_mutually_exclusive_group()
+    format_group.add_argument('--mp4', action='store_true', help=argparse.SUPPRESS)
+    parser.add_argument('--env', metavar='NAME', help=argparse.SUPPRESS)
+    parser.add_argument('--no-color', action='store_true', help=argparse.SUPPRESS)
+
+    # The easy mistake: a folder path typed without -d. argparse only says
+    # "unrecognized arguments"; say what to type instead. The leftovers are
+    # kept as a list (argparse's message joins them with spaces, which
+    # would make two paths look like one path with a space in it).
+    plain_parse, plain_error = parser.parse_known_args, parser.error
+    leftovers = []
+
+    def parse_known_args(args=None, namespace=None):
+        namespace, extras = plain_parse(args, namespace)
+        leftovers[:] = extras
+        return namespace, extras
+
+    def error(message):
+        paths = [a for a in leftovers if not a.startswith("-")]
+        if message.startswith("unrecognized arguments: ") and paths:
+            import shlex as _shlex
+            if len(paths) == 1:
+                message += (f"\n       a folder path needs -d in front of it: "
+                            f"-d {_shlex.quote(paths[0])}  (or --single for JPC_AV_ folders "
+                            f"named one by one)")
+            else:
+                message += ("\n       folder paths need -d in front (one folder holding JPC_AV_ "
+                            "subfolders) or --single (the JPC_AV_ folders themselves)")
+        plain_error(message)
+    parser.parse_known_args, parser.error = parse_known_args, error
+    return parser
+
+
+def run_title_and_mode(args):
+    """The run's heading and Mode line, built from the steps it will take."""
+    steps = []
+    if not args.no_update:
+        steps.append("update ArchivesSpace records")
+    if not args.no_rename:
+        steps.append("rename folders")
+        if args.rename_mkv:
+            steps.append("rename media files")
+    if args.no_update:
+        title = "Rename AV folders" + (" and media files" if args.rename_mkv else "")
+    elif args.no_rename:
+        title = "Update ArchivesSpace records"
+    else:
+        title = HELP_TITLE
+    return title, " + ".join(steps)
+
+
+MEDIA_LABELS = {
+    "mkv": ".mkv  (JPC_AV_00001/JPC_AV_00001.mkv)",
+    "mp4": ".mp4 optical disc  (JPC_AV_14180/access_JPC_AV_14180/JPC_AV_14180.mp4) - top folder renamed only",
+}
+
+
+def print_rename_header(title, target, args, mode, media_format):
+    """The opening lines: Target, Input (the -d folder, or each --single
+    path), Mode (the steps), Media, and Dry run."""
+    if args.single:
+        paths = [os.path.abspath(p.rstrip('/') or p) for p in args.single]
+        source = f"{len(paths)} folder{'' if len(paths) == 1 else 's'} (--single)"
+    else:
+        paths, source = [], os.path.abspath(args.directory)
+    print_run_header(title, target=target, input=source, mode=mode,
+                     extra=[("Media", MEDIA_LABELS[media_format]),
+                            ("Dry run", args.dry_run and
+                             f"{Colors.YELLOW}{Colors.BOLD}nothing is written to ArchivesSpace, "
+                             f"nothing is renamed (the log is still saved){Colors.RESET}")])
+    for path in paths:
+        print(f"             {path}")
+
 
 def main():
     """
@@ -1057,106 +1273,20 @@ def main():
     2. Process directories to extract video metadata, update ASpace records, and rename directories.
     3. Log out from ArchivesSpace.
     """
-    # Custom ArgumentParser for cleaner usage and colored errors
-    class CustomArgumentParser(argparse.ArgumentParser):
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, **kwargs)
-        
-        def format_usage(self):
-            usage = f"\nusage: {self.prog} [-d PATH | --single PATH [PATH ...]] [options]\n"
-            help_hint = f"       {Style.DIM}Use -h or --help for detailed information{Style.RESET_ALL}\n"
-            options = f"""
-  {Fore.CYAN}-d, --directory PATH{Style.RESET_ALL}  Target directory {Fore.YELLOW}(required unless --single){Style.RESET_ALL}
-  {Fore.CYAN}-n, --dry-run{Style.RESET_ALL}         Preview changes without executing
-  {Fore.CYAN}-v, --verbose{Style.RESET_ALL}         Enable debug-level logging
-  {Fore.CYAN}--single PATH [PATH ...]{Style.RESET_ALL}  Process specific directories directly
-  {Fore.CYAN}--no-rename{Style.RESET_ALL}           Update ASpace only, skip directory renames
-  {Fore.CYAN}--no-update{Style.RESET_ALL}           Rename only, skip ASpace record updates
-  {Fore.CYAN}--mp4{Style.RESET_ALL}                 Process optical-disc .mp4 transfers
-  {Fore.CYAN}--rename-media{Style.RESET_ALL}        Also rename the media file (.mkv only)
-  {Fore.CYAN}--env NAME{Style.RESET_ALL}            Target environment from creds.py
-"""
-            return usage + help_hint + options
-        
-        def format_help(self):
-            # Add leading newline before help output
-            return "\n" + super().format_help()
-        
-        def error(self, message):
-            self.print_usage(sys.stderr)
-            self.exit(2, f"\n{Fore.RED}error: {message}{Style.RESET_ALL}\n")
-    
-    # Parse command-line arguments (enables --help / -h)
-    parser = CustomArgumentParser(
-        description=get_colored_help(),
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        add_help=False,  # We'll add custom help
-        usage=argparse.SUPPRESS  # Hide default usage line in -h output
-    )
-    parser.add_argument(
-        '-h', '--help',
-        action='help',
-        default=argparse.SUPPRESS,
-        help=argparse.SUPPRESS
-    )
-    # -d and --single are genuinely mutually exclusive targets - allowing both
-    # used to silently ignore the -d directory in favor of --single.
-    target_group = parser.add_mutually_exclusive_group()
-    target_group.add_argument(
-        '-d', '--directory',
-        type=str,
-        required=False,
-        metavar='PATH',
-        help=argparse.SUPPRESS
-    )
-    parser.add_argument(
-        '-n', '--dry-run',
-        action='store_true',
-        help=argparse.SUPPRESS
-    )
-    parser.add_argument(
-        '-v', '--verbose',
-        action='store_true',
-        help=argparse.SUPPRESS
-    )
-    parser.add_argument(
-        '--no-rename',
-        action='store_true',
-        help=argparse.SUPPRESS
-    )
-    parser.add_argument(
-        '--no-update',
-        action='store_true',
-        help=argparse.SUPPRESS
-    )
-    parser.add_argument(
-        '--rename-media', '--rename-mkv',  # --rename-mkv kept as an alias
-        dest='rename_mkv',
-        action='store_true',
-        help=argparse.SUPPRESS
-    )
-    # Format flags: ONE format per run (mutually exclusive group so future
-    # formats - --wav, --mp3 - can't be combined either).
-    format_group = parser.add_mutually_exclusive_group()
-    format_group.add_argument(
-        '--mp4',
-        action='store_true',
-        help=argparse.SUPPRESS
-    )
-    target_group.add_argument(
-        '--single',
-        nargs='+',
-        metavar='PATH',
-        help=argparse.SUPPRESS
-    )
-    parser.add_argument(
-        '--env',
-        metavar='NAME',
-        help=argparse.SUPPRESS
-    )
-
+    parser = build_parser()
     args = parser.parse_args()
+    if args.no_color:
+        Colors.disable()
     media_format = 'mp4' if args.mp4 else 'mkv'
+
+    # creds.py: say what is actually wrong - a broken environments
+    # declaration gets its precise message, a missing file the format hint.
+    if not aspace_client.ENVIRONMENTS:
+        print_status("error", aspace_client.CONFIG_ERROR
+                     or "creds.py not found or missing required fields")
+        if not aspace_client.CONFIG_ERROR:
+            print("    See creds_template.py in the repo root for the format (an `environments` dict).")
+        sys.exit(1)
 
     # Environment selection. Auto-selected at import when creds.py declares
     # exactly one environment; with several configured there is NO default -
@@ -1199,54 +1329,54 @@ def main():
     if args.no_update and args.no_rename:
         parser.error("--no-update and --no-rename together leave nothing to do "
                      "(records untouched, nothing renamed)")
-    
-    # Set logging level based on verbose flag
+
+    # The arguments are sound: only now is anything created on disk.
+    setup_logging(args.verbose)
     if args.verbose:
-        logging.getLogger().setLevel(logging.DEBUG)
         logging.debug("Verbose mode enabled")
-    
-    # Handle dry-run mode announcement
-    if args.dry_run:
-        logging.info(f"{Fore.YELLOW}DRY RUN MODE - No changes will be made{Style.RESET_ALL}")
-        log_spacing()
-    
+
     # Start timing
     start_time = time.time()
-    
-    # Log script start
+
+    # The command and the Target line are the audit trail of which catalog
+    # this run touched (production is shown loud on the screen; the log
+    # file gets it plain).
     import shlex as _shlex
     run_command = " ".join([os.path.basename(sys.executable)]
                            + [_shlex.quote(a) for a in sys.argv])
-    logging.info("=" * 60)
-    logging.info("ArchivesSpace Directory Processing Script Started")
-    logging.info(f"Command: {run_command}")
-    # The Target line is the audit trail of which catalog this run touched;
-    # production gets the loud color on the console (stripped in the file log).
+    FILE_LOG.info("ArchivesSpace Directory Processing Script Started")
+    FILE_LOG.info(f"Command: {run_command}")
     target = (f"{aspace_client.ACTIVE_ENV.upper()} ({aspace_client.ASPACE_URL}, "
               f"repo {aspace_client.REPO_ID}, resource {aspace_client.RESOURCE_ID})")
-    target_color = Fore.RED if aspace_client.ACTIVE_ENV == 'production' else Fore.GREEN
-    logging.info(f"Target: {target_color}{Style.BRIGHT}{target}{Style.RESET_ALL}")
-    logging.info(f"Timestamp: {datetime.now()}")
-    logging.info(f"Dry Run: {args.dry_run}")
-    logging.info(f"Media format: {media_format} ({'/'.join(MEDIA_FORMATS[media_format]['extensions'])})")
-    logging.info("=" * 60)
+    title, mode = run_title_and_mode(args)
+    show(print_rename_header, title, target, args, mode, media_format)
+    print()
+
+    # A -d folder that does not exist ends the run here, before logging in:
+    # nothing was selected, so there is no result to show - the error and
+    # the log's path.
+    if args.directory and not os.path.isdir(args.directory):
+        logging.error(f"Target directory does not exist: {args.directory}")
+        show(print_saved, [("log", LOG_FILE)])
+        print()
+        sys.exit(1)
 
     # Step 1: Authenticate with ArchivesSpace
     # (Always needed - even --no-update requires ASpace lookup for ref_id)
     client = ASpaceClient()
     if not client.login():
         logging.error(f"Could not log in: {client.login_problem}. Exiting the script.")
+        show(print_saved, [("log", LOG_FILE)])
+        print()
         sys.exit(1)  # pre-loop failure - nothing was processed
-
-    # Log successful login
-    log_spacing()  # Add spacing for log readability
 
     # Default to a failure if processing raises before returning a count, so an
     # unexpected crash can never look like a clean run.
     failed_count = 1
+    stopped = False
+    report = {}
     try:
         # Step 2: Process directories and perform updates
-        logging.info("Starting to process directories...")
         failed_count = rename_and_update_directories(
             client=client,
             target_dir=args.directory,
@@ -1256,28 +1386,31 @@ def main():
             verbose=args.verbose,
             rename_mkv=args.rename_mkv,
             single=args.single,
-            media_format=media_format
+            media_format=media_format,
+            report=report,
         )
-
     except Exception as e:
-        # Catch unexpected errors during processing
-        logging.error(f"An error occurred during directory processing: {e}")
-
+        # Catch unexpected errors during processing: the traceback goes to
+        # the log file, the screen gets one line.
+        logging.error(f"An error occurred during directory processing: {e}", exc_info=True)
+        stopped = True
     finally:
-        # Step 3: Ensure logout is always attempted, even if an error occurs
+        # Step 3: Ensure logout is always attempted, even if an error occurs.
+        # (A Ctrl-C still ends the run here without a RESULT; the log file
+        # holds everything up to the interruption.)
         client.logout()
-        
-        # Calculate and display elapsed time
-        elapsed_seconds = time.time() - start_time
-        hours, remainder = divmod(int(elapsed_seconds), 3600)
-        minutes, seconds = divmod(remainder, 60)
-        elapsed_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-        
-        log_spacing()
-        logging.info(f"Processing Time: {elapsed_str}")
-        logging.info(f"Log file: {LOG_FILE}")
 
-    # Non-zero exit when any directory failed, so automation/monitoring can detect it.
+    elapsed_seconds = time.time() - start_time
+    hours, remainder = divmod(int(elapsed_seconds), 3600)
+    minutes, seconds = divmod(remainder, 60)
+    elapsed_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+    show(print_rename_result, report, args.dry_run, elapsed_str, stopped=stopped)
+    show(print_saved, [("log", LOG_FILE)])
+    print()
+
+    # Non-zero exit when any directory did not finish (failed, partly done or
+    # of unknown outcome), so automation/monitoring can detect it.
     sys.exit(1 if failed_count else 0)
 
 if __name__ == "__main__":

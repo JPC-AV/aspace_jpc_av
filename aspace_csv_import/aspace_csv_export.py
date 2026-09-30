@@ -72,47 +72,11 @@ from aspace_client import ASpaceClient
 
 # Reuse the importer's console helpers and note-reading logic so the export
 # shows values the same way an update run would compare them.
-from aspace_csv_import import (Colors, print_status, print_header, print_section,
-                               get_note_content, staff_link_for, RUN_COMMAND,
-                               parse_date, render_options)
+from console import (Colors, print_status, print_header, print_section,  # shared display
+                     render_options, progress, close_progress, print_run_header,
+                     print_result, print_saved, help_screen, styled_parser)
+from aspace_csv_import import get_note_content, staff_link_for, RUN_COMMAND, parse_date
 
-
-_PROGRESS_OPEN = False  # a terminal progress line is waiting for its newline
-
-
-def close_progress():
-    """End an unfinished progress line, so whatever prints next - a warning,
-    an error, the Ctrl-C message - starts on a line of its own."""
-    global _PROGRESS_OPEN
-    if _PROGRESS_OPEN:
-        _PROGRESS_OPEN = False
-        print(flush=True)
-
-
-class _CloseProgressFirst(logging.Filter):
-    """On the console log handlers: close the progress line before any log
-    message is shown, so a warning is never glued to or hidden by it."""
-    def filter(self, record):
-        close_progress()
-        return True
-
-
-def progress(label, done, total):
-    """Progress on ONE line: in a terminal it updates in place and ends as a
-    single finished line; anywhere else (a log, a pipe) only the finished
-    count is printed. Keeps the screen for the results that matter. Callers
-    run the counted loop inside try/finally: close_progress()."""
-    global _PROGRESS_OPEN
-    finished = done >= total
-    if sys.stdout.isatty():
-        for handler in logging.getLogger().handlers:
-            if not any(isinstance(f, _CloseProgressFirst) for f in handler.filters):
-                handler.addFilter(_CloseProgressFirst())
-        print(f"\r{Colors.CYAN}[>]{Colors.RESET} {label} {done}/{total}"
-              f"{'' if finished else '...'}\033[K", end="\n" if finished else "", flush=True)
-        _PROGRESS_OPEN = not finished
-    elif finished:
-        print_status("info", f"{label} {done}/{total}")
 
 # Batch size for id_set fetches - one API call per BATCH records instead of
 # one call per record, which is the difference between minutes and an hour
@@ -1138,8 +1102,7 @@ def print_fill_result(ready, review, counts, unresolved, ready_path, review_path
     print(f"  {color}{C.BOLD}Needs review    {len(review):>6}{C.RESET}")
     if review:
         _print_review_groups(unresolved)
-    print(f"\n  Saved ready CSV:  {os.path.abspath(ready_path)}")
-    print(f"  Saved review CSV: {os.path.abspath(review_path)}")
+    print_saved([("ready CSV", ready_path), ("review CSV", review_path)])
     print()
     if review:
         print(f"  {C.DIM}Fix review rows where the {FIX_IN} column says, then pull again.{C.RESET}")
@@ -1288,7 +1251,7 @@ def print_check(results, holds=None):
         return f"  {Colors.YELLOW}[{holds[number]}]{Colors.RESET}" if number in holds else ""
     groups = {o: [(n, d) for n, out, d in results if out == o] for o in CHECK_OUTCOMES}
     found, new = groups["found"], groups["not found"]
-    print()
+    print_section("RESULT")
     print_status("success", f"In ArchivesSpace: {len(found)}")
     for number, detail in found:
         print(f"      {number}  {detail}{mark(number)}")
@@ -1342,7 +1305,8 @@ def run_check(list_path, csv_path=None):
         provenance = (f"{RUN_COMMAND} | target: {aspace_client.ACTIVE_ENV} | "
                       f"{datetime.now().strftime('%Y-%m-%d %H:%M')}")
         write_check_csv(results, csv_path, provenance)
-        print_status("info", f"Also saved to: {csv_path}")
+        print_saved([("check CSV", csv_path)])
+    print()
     return code
 
 
@@ -1366,90 +1330,58 @@ EXPORT_CLI_OPTIONS = [
     ("--mads-live", "", "Add a MADS live column: Yes / No / check failed / invalid catalog number"),
     ("-o, --output PATH", "", "Export CSV path (default: timestamped file in the reports folder)"),
     ("--env NAME", "", "Target environment from creds.py (required when several are configured)"),
+    ("--no-color", "", "Disable colored output"),
 ]
 
 
-def get_colored_help():
-    """The -h screen, laid out like the importer's."""
-    C = Colors
-    return "\n" + f"""{C.BOLD}{C.CYAN}===============================================================================
-              ArchivesSpace CSV Export Script
-==============================================================================={C.RESET}
+HELP_TITLE = "Read ArchivesSpace: export, check, fill parents (read-only)"
 
-{C.BOLD}DESCRIPTION{C.RESET}
-    Reads AV records from ArchivesSpace - never writes to it:
+
+def get_colored_help():
+    """The -h screen, in the shared layout. One umbrella title: each run
+    names its own mode in its heading."""
+    C = Colors
+    return help_screen(HELP_TITLE, [
+        ("DESCRIPTION", f"""    Reads AV records from ArchivesSpace - never writes to it:
     {C.GREEN}1.{C.RESET} Exports records to an import-shaped CSV, in tree order, with Level, Depth and Path
     {C.GREEN}2.{C.RESET} Checks which catalog numbers are already in ArchivesSpace (--check)
     {C.GREEN}3.{C.RESET} Fills a sheet's blank ASpace Parent RefID column (--fill-parents)
-    {C.GREEN}4.{C.RESET} Checks whether exported records are live in MADS (--mads-live)
-
-{C.BOLD}USAGE{C.RESET}
-    {C.GREEN}${C.RESET} python3 aspace_csv_export.py [--level LEVEL] [--parent REFID] [options]
-    {C.GREEN}${C.RESET} python3 aspace_csv_export.py --list FILE [options]
-    {C.GREEN}${C.RESET} python3 aspace_csv_export.py --check FILE [-o PATH] [--env NAME]
-    {C.GREEN}${C.RESET} python3 aspace_csv_export.py --fill-parents FILE [--env NAME]
-
-{C.BOLD}CHECK{C.RESET} {C.DIM}(instead of an export){C.RESET}
-{render_options(CHECK_OPTIONS)}
-
-{C.BOLD}SELECT{C.RESET} {C.DIM}(what to export; default: every item-level record){C.RESET}
-{render_options(SELECT_OPTIONS)}
-
-{C.BOLD}FILL PARENTS{C.RESET} {C.DIM}(instead of an export){C.RESET}
-{render_options(FILL_OPTIONS)}
-
-{C.BOLD}OPTIONS{C.RESET}
-{render_options(EXPORT_CLI_OPTIONS)}
-
-{C.BOLD}EXAMPLES{C.RESET}
-    {C.GREEN}${C.RESET} python3 aspace_csv_export.py --level all --env production
-    {C.GREEN}${C.RESET} python3 aspace_csv_export.py --level item --mads-live --env production
-    {C.GREEN}${C.RESET} python3 aspace_csv_export.py --list batch.csv --env production
-    {C.GREEN}${C.RESET} python3 aspace_csv_export.py --check batch.csv --env production
-    {C.GREEN}${C.RESET} python3 aspace_csv_export.py --fill-parents batch.csv --env production      {C.DIM}# batch_ready.csv + batch_review.csv{C.RESET}
-
-{C.BOLD}EXIT{C.RESET}
-    {C.GREEN}0{C.RESET}  done
-    {C.YELLOW}2{C.RESET}  written but incomplete: rows for review (--fill-parents, expected), listed numbers not found, or MADS checks failed;
-       --check: some numbers are ambiguous or could not be checked (new numbers alone are exit 0)
-       (also a bad argument or a creds.py problem - then nothing is written)
+    {C.GREEN}4.{C.RESET} Checks whether exported records are live in MADS (--mads-live)"""),
+        ("USAGE", f"""    {C.GREEN}${C.RESET} python3 aspace_csv_import/aspace_csv_export.py [--level LEVEL] [--parent REFID] [options]
+    {C.GREEN}${C.RESET} python3 aspace_csv_import/aspace_csv_export.py --list FILE [options]
+    {C.GREEN}${C.RESET} python3 aspace_csv_import/aspace_csv_export.py --check FILE [-o PATH] [--env NAME]
+    {C.GREEN}${C.RESET} python3 aspace_csv_import/aspace_csv_export.py --fill-parents FILE [--env NAME]"""),
+        ("OPTIONS", render_options(EXPORT_CLI_OPTIONS)),
+        ("CHECK", "instead of an export", render_options(CHECK_OPTIONS)),
+        ("SELECT", "what to export; default: every item-level record", render_options(SELECT_OPTIONS)),
+        ("FILL PARENTS", "instead of an export", render_options(FILL_OPTIONS)),
+        ("EXAMPLES", f"""    {C.GREEN}${C.RESET} python3 aspace_csv_import/aspace_csv_export.py --level all --env production
+    {C.GREEN}${C.RESET} python3 aspace_csv_import/aspace_csv_export.py --list batch.csv --env production
+    {C.GREEN}${C.RESET} python3 aspace_csv_import/aspace_csv_export.py --check batch.csv --env production
+    {C.GREEN}${C.RESET} python3 aspace_csv_import/aspace_csv_export.py --fill-parents batch.csv --env production"""),
+        ("OUTPUT", f"""    Exports: {C.CYAN}{OUTPUT_DIR}/{C.RESET} (or -o)
+    --fill-parents: FILE_ready.csv and FILE_review.csv beside FILE
+    --check: on screen only (a CSV too with -o)
+    {C.DIM}The reports folder can be changed by setting logs_dir in creds.py{C.RESET}"""),
+        ("EXIT", f"""    {C.GREEN}0{C.RESET}  done
+    {C.YELLOW}2{C.RESET}  written but incomplete: rows for review (--fill-parents, expected), listed numbers
+       not found, or MADS checks failed; --check: some numbers are ambiguous or could
+       not be checked (new numbers alone are exit 0); also a bad argument or a creds.py
+       problem - then nothing is written
     {C.RED}1{C.RESET}  failed - nothing written (a fill whose ready file fails after its review file
-       was written says so, and names the review file to delete)
-
-{C.BOLD}OUTPUT{C.RESET}
-    Reports saved to: {C.CYAN}{OUTPUT_DIR}/{C.RESET}
-    {C.DIM}Can be changed by setting logs_dir in creds.py{C.RESET}
-"""
+       was written says so, and names the review file to delete)"""),
+    ])
 
 
 def build_parser():
-    """The exporter's command-line parser: same look as the importer's -
-    a styled -h screen, and on error the short usage plus option list."""
-    class CustomArgumentParser(argparse.ArgumentParser):
-        def format_usage(self):
-            C = Colors
-            usage = (f"\nusage: {self.prog} [--level LEVEL] [--parent REFID] [options]\n"
-                     f"       {self.prog} --list FILE [options]\n"
-                     f"       {self.prog} --check FILE [-o PATH] [--env NAME]\n"
-                     f"       {self.prog} --fill-parents FILE [--env NAME]\n")
-            hint = f"       {C.DIM}Use -h or --help for detailed information{C.RESET}\n"
-            options = "\n" + "\n".join(render_options(group, indent="  ") for group in
-                                        (CHECK_OPTIONS, SELECT_OPTIONS, FILL_OPTIONS,
-                                         EXPORT_CLI_OPTIONS)) + "\n"
-            return usage + hint + options
-
-        def format_help(self):
-            return "\n" + super().format_help()
-
-        def error(self, message):
-            self.print_usage(sys.stderr)
-            self.exit(2, f"\n{Colors.RED}error: {message}{Colors.RESET}\n")
-
-    parser = CustomArgumentParser(description=get_colored_help(),
-                                  formatter_class=argparse.RawDescriptionHelpFormatter,
-                                  add_help=False, usage=argparse.SUPPRESS)
-    parser.add_argument("-h", "--help", action="help", default=argparse.SUPPRESS,
-                        help=argparse.SUPPRESS)
+    """The exporter's command-line parser, in the shared style: its own -h
+    screen, and on a mistake the usage lines plus the option list."""
+    parser = styled_parser(["[--level LEVEL] [--parent REFID] [options]",
+                            "--list FILE [options]",
+                            "--check FILE [-o PATH] [--env NAME]",
+                            "--fill-parents FILE [--env NAME]"],
+                           get_colored_help,
+                           [CHECK_OPTIONS, SELECT_OPTIONS, FILL_OPTIONS, EXPORT_CLI_OPTIONS])
     parser.add_argument("--level", default="item", choices=LEVELS, metavar="LEVEL",
                         help=argparse.SUPPRESS)
     parser.add_argument("--parent", metavar="REFID", help=argparse.SUPPRESS)
@@ -1459,6 +1391,7 @@ def build_parser():
     parser.add_argument("--mads-live", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("-o", "--output", metavar="PATH", help=argparse.SUPPRESS)
     parser.add_argument("--env", metavar="NAME", help=argparse.SUPPRESS)
+    parser.add_argument("--no-color", action="store_true", help=argparse.SUPPRESS)
     return parser
 
 
@@ -1466,6 +1399,8 @@ def main():
     aspace_client.console_logging()  # labelled detail, not a bare ERROR:root line
     parser = build_parser()
     args = parser.parse_args()
+    if args.no_color:
+        Colors.disable()
 
     if args.list_file and args.parent:
         parser.error("--list names the exact records to export - it cannot "
@@ -1523,28 +1458,23 @@ def main():
             if problem:
                 parser.error(problem)  # before any network work
 
-    if args.check_file:
-        print_header("Check catalog numbers in ArchivesSpace (read-only)")
-    elif args.fill_file:
-        print_header("Fill parents from ArchivesSpace (read-only)")
-    else:
-        print_header("Export ArchivesSpace records to CSV (read-only)")
-    target = (f"{aspace_client.ACTIVE_ENV.upper()} ({aspace_client.ASPACE_URL}, "
-              f"repo {aspace_client.REPO_ID}, resource {aspace_client.RESOURCE_ID})")
-    # Production gets the loud color, same convention as the importer.
-    target_color = Colors.RED if aspace_client.ACTIVE_ENV == 'production' else Colors.GREEN
-    print(f"  Target: {target_color}{Colors.BOLD}{target}{Colors.RESET}")
-    print(f"  Command: {RUN_COMMAND}")
+    source = (f"{aspace_client.ACTIVE_ENV.upper()} ({aspace_client.ASPACE_URL}, "
+              f"repo {aspace_client.REPO_ID}, resource {aspace_client.RESOURCE_ID}) - read-only")
     if args.fill_file:
-        print(f"  Fill parents: {args.fill_file}")
+        print_run_header("Fill parents from ArchivesSpace (read-only)", target=source,
+                         input=args.fill_file,
+                         mode="read ArchivesSpace, save ready and review CSVs beside the input")
         sys.exit(run_fill_parents(args.fill_file, *fill_paths))
     if args.check_file:
-        print(f"  Check: {args.check_file}")
+        print_run_header("Check catalog numbers in ArchivesSpace (read-only)", target=source,
+                         input=args.check_file,
+                         mode="check only" + (" - the answer is also saved as a CSV"
+                                              if args.output else " - nothing is saved"))
         sys.exit(run_check(args.check_file, out_path if args.output else None))
-    if args.list_file:
-        print(f"  List: {args.list_file}")
-    else:
-        print(f"  Level: {args.level}" + (f"  Parent: {args.parent}" if args.parent else ""))
+    selection = (args.list_file if args.list_file else
+                 f"level {args.level}" + (f", children of {args.parent}" if args.parent else ""))
+    print_run_header("Export ArchivesSpace records to CSV (read-only)", target=source,
+                     input=selection, mode="read ArchivesSpace, save a CSV")
 
     client = ASpaceClient()
     print_status("info", f"Connecting to {aspace_client.ASPACE_URL}...")
@@ -1601,12 +1531,14 @@ def main():
     def _other_warnings(r):
         return [w for w in r.get("Warnings", "").split("; ") if w]
     flagged = sum(1 for r in rows if _other_warnings(r))
-    print_status("success", f"Exported {len(rows)} record(s) to: {out_path}")
-    if non_items:
-        print_status("info", f"{non_items} of those are not item-level records (see the "
-                             f"Level column) - --update-only edits items only, so those "
-                             f"rows are for reference, not re-import")
+    print_result([("Exported", len(rows), "ok", True),
+                  ("Not item-level (for reference, not re-import)", non_items, "neutral"),
+                  ("With warnings", flagged, "attention"),
+                  ("Skipped: stale search-index entries", anomalies, "attention"),
+                  ("Could not be exported", len(problems), "bad"),
+                  ("MADS checks failed or invalid", mads_incomplete, "unknown")])
     if flagged:
+        print()
         print_status("warning", f"{flagged} record(s) have Warnings:")
         for r in rows:
             others = _other_warnings(r)
@@ -1616,13 +1548,18 @@ def main():
                 if r.get("ASpace Staff Link"):
                     print(f"       {Colors.DIM}{r['ASpace Staff Link']}{Colors.RESET}")
     if anomalies:
+        print()
         print_status("warning", f"{anomalies} record(s) skipped: the search index "
                                 f"listed them but the fetched record is not in the "
                                 f"configured resource (stale index entry)")
     if problems:
+        print()
         print_status("error", f"{len(problems)} listed number(s) could NOT be exported:")
         for problem in problems:
             print_status("error", problem, indent=1)
+    print_saved([("export CSV", out_path)])
+    print()
+    if problems:
         sys.exit(2)  # the file is complete for what was found; the gaps are named
     if mads_incomplete:
         sys.exit(2)  # same signal as check_mads.py: the file is accurate but not complete

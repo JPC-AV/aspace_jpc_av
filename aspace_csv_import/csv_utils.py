@@ -14,79 +14,21 @@ import argparse
 from pathlib import Path
 
 import sheet_rules as col  # single source of truth for CSV header names
+# The repo root holds what the tool folders share: aspace_client.py,
+# console.py and creds.py.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from console import (Colors, print_status, print_header, print_section,  # shared display
+                     print_run_header, print_result, print_saved, render_options,
+                     help_screen, styled_parser)
 
 # ==============================
 # TERMINAL COLORS
 # ==============================
 
-class Colors:
-    """ANSI color codes for terminal output."""
-    HEADER = '\033[95m'
-    BLUE = '\033[94m'
-    CYAN = '\033[96m'
-    GREEN = '\033[92m'
-    YELLOW = '\033[93m'
-    RED = '\033[91m'
-    BOLD = '\033[1m'
-    DIM = '\033[2m'
-    RESET = '\033[0m'
-    
-    @classmethod
-    def disable(cls):
-        """Disable colors (for non-TTY output)."""
-        cls.HEADER = ''
-        cls.BLUE = ''
-        cls.CYAN = ''
-        cls.GREEN = ''
-        cls.YELLOW = ''
-        cls.RED = ''
-        cls.BOLD = ''
-        cls.DIM = ''
-        cls.RESET = ''
-
-# Disable colors if not a TTY
-if not sys.stdout.isatty():
-    Colors.disable()
-
-
-def print_status(status: str, message: str, indent: int = 0):
-    """Print a colorized status message."""
-    indent_str = "  " * indent
-    if status == "success":
-        symbol = f"{Colors.GREEN}[OK]{Colors.RESET}"
-    elif status == "found":
-        symbol = f"{Colors.GREEN}[OK]{Colors.RESET}"
-    elif status == "error":
-        symbol = f"{Colors.RED}[X]{Colors.RESET}"
-    elif status == "not_found":
-        symbol = f"{Colors.RED}[X]{Colors.RESET}"
-    elif status == "warning":
-        symbol = f"{Colors.YELLOW}[!]{Colors.RESET}"
-    elif status == "info":
-        symbol = f"{Colors.CYAN}[>]{Colors.RESET}"
-    elif status == "skip":
-        symbol = f"{Colors.DIM}[-]{Colors.RESET}"
-    else:
-        symbol = "   "
-    print(f"{indent_str}{symbol} {message}")
-
-def print_header(text: str):
-    """Print a header line."""
-    print(f"\n{Colors.BOLD}{Colors.CYAN}{text}{Colors.RESET}")
-    print(f"{Colors.DIM}{'-' * 60}{Colors.RESET}")
-
-def print_section(text: str):
-    """Print a section divider."""
-    print(f"\n{Colors.DIM}{'-' * 60}{Colors.RESET}")
-    print(f"{Colors.BOLD}{text}{Colors.RESET}")
-    print(f"{Colors.DIM}{'-' * 60}{Colors.RESET}")
 
 # ==============================
 # CONFIGURATION
 # ==============================
-
-# Add parent directory to path for the shared client and creds.py import
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 # API access goes through the shared client (aspace_client.py at the repo
 # root) - same verified, escaped, fail-closed lookups and environment
@@ -146,44 +88,52 @@ def reports_dir(sub: str) -> str:
 # ==============================
 
 
+TITLE = "Check a CSV before import (read-only)"
+COMMANDS = [
+    ("--validate FILE", "", "Check the sheet's structure, dates and duplicates (local - no --env)"),
+    ("--parents FILE", "", "Check every parent ref ID exists in ArchivesSpace"),
+]
+OPTIONS = [
+    ("--update-only", "", "With --validate: check it as a narrow update sheet (no parent needed)"),
+    ("-o, --output PATH", "", "With --parents: report path (default: the reports folder)"),
+    ("--env NAME", "", "With --parents: environment from creds.py (required when several are configured)"),
+    ("-u, --username USER", "", "ASpace username (or use creds.py)"),
+    ("-p, --password PASS", "", "ASpace password (or use creds.py)"),
+    ("--no-color", "", "Disable colored output"),
+]
+
+
 def get_colored_help():
-    """Generate a colored and formatted help message for the command line."""
+    """The -h screen, in the shared layout."""
     C = Colors
-    
-    help_text = f"""
-{C.BOLD}{C.CYAN}===============================================================================
-                    CSV Validation & Parent Lookup Utility                     
-==============================================================================={C.RESET}
+    return help_screen(TITLE, [
+        ("DESCRIPTION", """    Troubleshooting checks for an import sheet. The import's own dry run runs
+    the same checks, so these are not routine steps:
+      --validate   structure, dates and duplicate catalog numbers (no network)
+      --parents    whether every parent ref ID exists in ArchivesSpace (read-only)"""),
+        ("USAGE", f"""    {C.GREEN}${C.RESET} python3 aspace_csv_import/csv_utils.py --validate FILE [--update-only]
+    {C.GREEN}${C.RESET} python3 aspace_csv_import/csv_utils.py --parents FILE [--env NAME] [-o PATH]"""),
+        ("OPTIONS", "one command required",
+         render_options(COMMANDS) + "\n\n" + render_options(OPTIONS)),
+        ("EXAMPLES", f"""    {C.GREEN}${C.RESET} python3 aspace_csv_import/csv_utils.py --validate data.csv
+    {C.GREEN}${C.RESET} python3 aspace_csv_import/csv_utils.py --validate titles.csv --update-only
+    {C.GREEN}${C.RESET} python3 aspace_csv_import/csv_utils.py --parents data.csv --env production"""),
+        ("OUTPUT", f"""    --validate: validation_report_<stamp>.json in {C.CYAN}csv_validation/{C.RESET}
+    --parents:  parent_lookup_<stamp>.csv in {C.CYAN}parent_lookups/{C.RESET} (or -o)"""),
+        ("EXIT", f"""    {C.GREEN}0{C.RESET}  passed
+    {C.YELLOW}2{C.RESET}  a bad argument
+    {C.RED}1{C.RESET}  the sheet failed a check, a parent is missing, ambiguous or unchecked, or
+       the file could not be read"""),
+    ])
 
-{C.BOLD}DESCRIPTION{C.RESET}
-    Validates CSV files and checks parent ref_ids before ArchivesSpace import:
-    {C.GREEN}1.{C.RESET} Validate CSV structure, dates, and duplicates
-    {C.GREEN}2.{C.RESET} Check parent ref_ids exist in ArchivesSpace
 
-{C.BOLD}USAGE{C.RESET}
-    {C.GREEN}${C.RESET} python3 csv_utils.py --validate FILE
-    {C.GREEN}${C.RESET} python3 csv_utils.py --parents FILE
+def _target():
+    """The ArchivesSpace instance --parents reads, as every tool shows it."""
+    if not aspace_client.ACTIVE_ENV:
+        return None
+    return (f"{aspace_client.ACTIVE_ENV.upper()} ({aspace_client.ASPACE_URL}, "
+            f"repo {aspace_client.REPO_ID}, resource {aspace_client.RESOURCE_ID}) - read-only")
 
-{C.BOLD}COMMANDS{C.RESET} {C.DIM}(mutually exclusive){C.RESET}
-    {C.CYAN}--validate FILE{C.RESET}           Check CSV structure and data quality
-    {C.CYAN}--parents FILE{C.RESET}            Check parent ref_ids exist in ArchivesSpace
-
-{C.BOLD}OPTIONS{C.RESET}
-    {C.CYAN}-u, --username USER{C.RESET}       ASpace username (or use creds.py)
-    {C.CYAN}-p, --password PASS{C.RESET}       ASpace password (or use creds.py)
-    {C.CYAN}-o, --output FILE{C.RESET}         Output file path (for --parents report)
-    {C.CYAN}--env NAME{C.RESET}                Target environment from creds.py
-                              (required for --parents when several are configured)
-    {C.CYAN}--no-color{C.RESET}                Disable colored output
-    {C.CYAN}--update-only{C.RESET}             Validate as a narrow update-only CSV
-                              (CATALOG_NUMBER + columns to change; no parent needed)
-
-{C.BOLD}EXAMPLES{C.RESET}
-    {C.GREEN}${C.RESET} python3 csv_utils.py --validate data.csv
-    {C.GREEN}${C.RESET} python3 csv_utils.py --parents data.csv
-    {C.GREEN}${C.RESET} python3 csv_utils.py --parents data.csv -u admin -p secret
-"""
-    return help_text
 
 # ==============================
 # VALIDATION FUNCTIONS
@@ -455,8 +405,8 @@ def generate_parent_lookup_report(csv_file: str, output_file: str = None,
     output_file = col.resolve_output_path(output_file, reports_dir("parent_lookups"),
                                           f"parent_lookup_{stamp}.csv")
     
-    print_header("Parent Ref ID Lookup")
-    print(f"  CSV File: {csv_file}")
+    print_run_header("Look up parent ref IDs in ArchivesSpace (read-only)",
+                     target=_target(), input=csv_file, mode="check only")
     
     problem = col.clobber_problem(csv_file, output_file)
     if problem:
@@ -503,13 +453,13 @@ def generate_parent_lookup_report(csv_file: str, output_file: str = None,
         print_status("error", f"Could not read {csv_file}: {e}")
         return None
     
-    print(f"  Found: {Colors.CYAN}{len(parent_refs)}{Colors.RESET} unique parent ref_ids")
+    print_status("info", f"{len(parent_refs)} unique parent ref ID(s) in the sheet")
     if blank_parent_rows:
         print_status("error", f"{blank_parent_rows} row(s) have no parent ref_id - the import "
                               f"will refuse them; fix the sheet first")
     
     if parent_refs:
-        print_section("Checking ArchivesSpace")
+        print_section("CHECKING ARCHIVESSPACE")
         ref_status = check_parent_refs(list(parent_refs), url, username, password, repo_id)
         
         # Write report (atomically: the final path only ever holds a complete file)
@@ -538,13 +488,11 @@ def generate_parent_lookup_report(csv_file: str, output_file: str = None,
         ambiguous = sum(1 for v in ref_status.values() if v == "multiple")
         unchecked = len(parent_refs) - found - not_found - ambiguous
 
-        print_section("Summary")
-        print(f"  {Colors.GREEN}Found:{Colors.RESET}     {found}")
-        print(f"  {Colors.RED}Not Found:{Colors.RESET} {not_found}")
-        if ambiguous:
-            print(f"  {Colors.RED}Ambiguous:{Colors.RESET} {ambiguous} (several records share the ref_id)")
-        if unchecked:
-            print(f"  {Colors.YELLOW}Not checked:{Colors.RESET} {unchecked} (lookup failed)")
+        print_result([("Found", found, "ok", True),
+                      ("Not found", not_found, "bad", True),
+                      ("Ambiguous (several records share the ref ID)", ambiguous, "bad"),
+                      ("Not checked (lookup failed)", unchecked, "unknown"),
+                      ("Rows with no parent", blank_parent_rows, "bad")])
 
         if not_found > 0 or ambiguous > 0:
             print()
@@ -567,41 +515,36 @@ def generate_parent_lookup_report(csv_file: str, output_file: str = None,
             print_status("success", "Parent check passed - every parent ref_id resolves to "
                                     "exactly one record (run --validate for the rest of the sheet)")
         
-        print(f"\n  Report saved: {Colors.CYAN}{output_file}{Colors.RESET}")
-        print(f"{Colors.DIM}{'-' * 60}{Colors.RESET}\n")
+        print_saved([("parent lookup report", output_file)])
+        print()
         return None if blank_parent_rows else ref_status
 
 def run_validation(csv_file: str, update_only: bool = False):
     """Run CSV validation and display results."""
 
-    print_header("CSV Validation")
-    print(f"  File: {csv_file}")
-    if update_only:
-        print(f"  Mode: update-only (narrow CSV allowed; parent ref not required)")
+    print_run_header(TITLE, input=csv_file,
+                     mode=("check only - as a narrow update sheet (no parent needed)" if update_only
+                           else "check only - as a create sheet"))
 
     results = validate_csv_structure(csv_file, update_only=update_only)
-    
-    # Print validation result
-    if results['valid']:
-        print(f"\n  Result: {Colors.GREEN}{Colors.BOLD}PASSED{Colors.RESET}")
-    else:
-        print(f"\n  Result: {Colors.RED}{Colors.BOLD}FAILED{Colors.RESET}")
-    
-    # Statistics
-    print_section("Statistics")
+
     stats = results['statistics']
-    print(f"  Total Rows:           {stats.get('total_rows', 0)}")
-    print(f"  Unique Catalog #s:    {stats.get('unique_catalog_numbers', 0)}")
-    print(f"  Duplicate Catalog #s: {Colors.RED if stats.get('duplicate_catalog_numbers', 0) > 0 else ''}{stats.get('duplicate_catalog_numbers', 0)}{Colors.RESET}")
-    print(f"  Missing Parent Refs:  {Colors.RED if stats.get('missing_parent_refs', 0) > 0 else ''}{stats.get('missing_parent_refs', 0)}{Colors.RESET}")
-    print(f"  Invalid Dates:        {Colors.RED if stats.get('invalid_dates', 0) > 0 else ''}{stats.get('invalid_dates', 0)}{Colors.RESET}")
-    print(f"  Unique Parent Refs:   {stats.get('unique_parent_refs', 0)}")
-    title_note = "(left unchanged)" if update_only else "(will use catalog #)"
-    print(f"  Empty Titles:         {stats.get('empty_titles', 0)} {Colors.DIM}{title_note}{Colors.RESET}" if stats.get('empty_titles', 0) > 0 else f"  Empty Titles:         0")
-    
+    title_note = "left unchanged" if update_only else "will use the catalog number"
+    print_result([("Rows", stats.get('total_rows', 0), "neutral", True),
+                  ("Unique catalog numbers", stats.get('unique_catalog_numbers', 0), "neutral", True),
+                  ("Duplicate catalog numbers", stats.get('duplicate_catalog_numbers', 0), "bad"),
+                  ("Missing parent ref IDs", stats.get('missing_parent_refs', 0), "bad"),
+                  ("Invalid dates", stats.get('invalid_dates', 0), "bad"),
+                  ("Unique parent ref IDs", stats.get('unique_parent_refs', 0), "neutral"),
+                  (f"Empty titles ({title_note})", stats.get('empty_titles', 0), "attention")])
+    if results['valid']:
+        print(f"\n  {Colors.GREEN}{Colors.BOLD}PASSED{Colors.RESET}")
+    else:
+        print(f"\n  {Colors.RED}{Colors.BOLD}FAILED{Colors.RESET}")
+
     # Errors
     if results['errors']:
-        print_section(f"Errors ({len(results['errors'])})")
+        print_section(f"ERRORS ({len(results['errors'])})")
         for error in results['errors'][:10]:
             print_status("error", error)
         if len(results['errors']) > 10:
@@ -609,7 +552,7 @@ def run_validation(csv_file: str, update_only: bool = False):
     
     # Warnings
     if results['warnings']:
-        print_section(f"Warnings ({len(results['warnings'])})")
+        print_section(f"WARNINGS ({len(results['warnings'])})")
         print(f"  {Colors.DIM}These are not local errors. The import's own ArchivesSpace checks can still "
               f"refuse a row (e.g. an out-of-range date that differs from the stored one){Colors.RESET}\n")
         for warning in results['warnings'][:10]:
@@ -619,7 +562,7 @@ def run_validation(csv_file: str, update_only: bool = False):
     
     # Duplicates
     if results['duplicate_ids']:
-        print_section("Duplicate Catalog Numbers")
+        print_section("DUPLICATE CATALOG NUMBERS")
         for dup in results['duplicate_ids']:
             print_status("error", dup)
     
@@ -632,47 +575,20 @@ def run_validation(csv_file: str, update_only: bool = False):
         json.dump(results, f, indent=2)
     os.replace(tmp_path, report_file)  # the final path only ever holds a complete report
     
-    print(f"\n  Detailed report: {Colors.CYAN}{report_file}{Colors.RESET}")
-    print(f"{Colors.DIM}{'-' * 60}{Colors.RESET}\n")
+    print_saved([("validation report", report_file)])
+    print()
     return results['valid']
 
 # ==============================
 # MAIN EXECUTION
 # ==============================
 
-def main():
-    """Main utility function."""
-    aspace_client.console_logging()  # labelled detail, not a bare ERROR:root line
-    
-    # Custom ArgumentParser for cleaner usage and colored errors
-    class CustomArgumentParser(argparse.ArgumentParser):
-        def format_usage(self):
-            C = Colors
-            usage = f"\nusage: {self.prog} [--validate | --parents] FILE [options]\n"
-            help_hint = f"       {C.DIM}Use -h or --help for detailed information{C.RESET}\n"
-            return usage + help_hint
-        
-        def format_help(self):
-            return get_colored_help()
-        
-        def error(self, message):
-            self.print_usage(sys.stderr)
-            self.exit(2, f"\n{Colors.RED}error: {message}{Colors.RESET}\n")
-    
-    parser = CustomArgumentParser(
-        description=get_colored_help(),
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        add_help=False,
-        usage=argparse.SUPPRESS
-    )
-    
-    parser.add_argument(
-        '-h', '--help',
-        action='help',
-        default=argparse.SUPPRESS,
-        help=argparse.SUPPRESS
-    )
-    
+def build_parser():
+    """The command-line parser (module-level so tests can check it against -h)."""
+    parser = styled_parser(["--validate FILE [--update-only]",
+                            "--parents FILE [--env NAME] [-o PATH] [-u USER -p PASS]"],
+                           get_colored_help, [COMMANDS, OPTIONS])
+
     # Command group (mutually exclusive)
     command_group = parser.add_mutually_exclusive_group()
     command_group.add_argument(
@@ -715,7 +631,14 @@ def main():
         metavar='NAME',
         help=argparse.SUPPRESS
     )
+    return parser
 
+
+def main():
+    """Main utility function."""
+    aspace_client.console_logging()  # labelled detail, not a bare ERROR:root line
+    
+    parser = build_parser()
     args = parser.parse_args()
     # Environment selection (see aspace_client): auto when one is configured,
     # explicit --env when several are. API-touching commands fail later with

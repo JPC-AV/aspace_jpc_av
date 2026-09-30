@@ -17,6 +17,7 @@ This repository contains the tools for the Johnson Publishing Company Archive (J
 aspace_jpc_av/
 ├── README.md                     # This file
 ├── aspace_client.py              # Shared ArchivesSpace API client (used by both scripts)
+├── console.py                    # Shared terminal display: -h screens, run headers, RESULT blocks
 ├── creds_template.py             # Credential template (see Setup below)
 ├── creds.py                      # Your local credentials (gitignored, you create this)
 ├── requirements.txt              # Python dependencies
@@ -48,6 +49,7 @@ More detailed descriptions of each file and usage in directory-specific README.m
 | File | User Interaction | Description |
 |------|------------------|-------------|
 | `aspace_client.py` | Backend | Shared API client: credentials loading, one keep-alive session, login/logout, retries, verified lookups, and scope-locked writes. Both main scripts build on it. |
+| `console.py` | Backend | Shared terminal display for every tool: the -h layout, argument-error screen, run header, RESULT block, saved-file lines and colors (`--no-color`). |
 | `creds_template.py` | Reference only | Template showing required credential format. Do not edit directly. |
 | `creds.py` | User creates/edits | Your local credentials file. You create this from the template. |
 | `requirements.txt` | One-time setup | Python package dependencies. Run `pip install -r requirements.txt` once. |

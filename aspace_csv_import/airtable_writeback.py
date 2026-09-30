@@ -57,8 +57,9 @@ AIRTABLE_PAT_WRITE = airtable_pat_write or os.environ.get("AIRTABLE_PAT_WRITE", 
 
 REF_ID_RE = re.compile(r"[0-9a-f]{32}")
 
-Colors = pull.Colors
-print_status = pull.print_status
+from console import (Colors, print_status, print_run_header,  # shared display  # noqa: E402
+                     print_result, print_saved, print_next_step, render_options,
+                     help_screen, styled_parser, progress_count, close_progress)
 PullError = pull.PullError
 
 
@@ -69,49 +70,47 @@ class UncertainWrite(PullError):
 # HELP MENU
 # ==============================
 
-def get_colored_help():
-    """Generate a colored and formatted help message for the command line."""
-    C = Colors
-    return f"""
-{C.BOLD}{C.CYAN}===============================================================================
-                   Record import results in Airtable
-==============================================================================={C.RESET}
+TITLE = "Record import results in Airtable"
+ARGUMENTS = [("REPORT.json", "", "import_report_<stamp>.json from a REAL (not -n) production create run")]
+OPTIONS = [
+    ("--run", "", 'Show the plan, ask for "yes", then write (without it: preview only)'),
+    ("--exclude-catalog NUM", "", "Leave this created row out (repeatable) - e.g. a record"),
+    ("", "", "deleted in ArchivesSpace since the import"),
+    ("--no-color", "", "Disable colored output"),
+]
 
-{C.BOLD}DESCRIPTION{C.RESET}
-    After a real production import, records its results in Airtable. For each
+
+def get_colored_help():
+    """The -h screen, in the shared layout."""
+    C = Colors
+    return help_screen(TITLE, [
+        ("DESCRIPTION", f"""    After a real production import, records its results in Airtable. For each
     row the run CREATED:
-      - {PARENT_FIELD} in <<< ASpace_import >>> gets the parent the import used
-      - {CREATED_FIELD} in ((( ASpace_tracking ))) is set to {CREATED_VALUE}
+      - {PARENT_FIELD} in {IMPORT_LABEL} gets the parent the import used
+      - {CREATED_FIELD} in {TRACKING_LABEL} is set to {CREATED_VALUE}
     The parent is written and confirmed first; {CREATED_VALUE} is set only after.
 
     Rows the run skipped, updated or refused are left alone. A row whose
-    Airtable parent already differs, or that matches no row or several, is
-    listed for review and not touched.
+    Airtable parent already differs, that matches no row or several, or that
+    is on hold in Airtable now, is listed for review and not touched."""),
+        ("USAGE", f"""    {C.GREEN}${C.RESET} python3 aspace_csv_import/airtable_writeback.py REPORT.json          {C.DIM}# preview{C.RESET}
+    {C.GREEN}${C.RESET} python3 aspace_csv_import/airtable_writeback.py REPORT.json --run    {C.DIM}# shows the plan, asks, writes{C.RESET}"""),
+        ("ARGUMENTS", render_options(ARGUMENTS)),
+        ("OPTIONS", render_options(OPTIONS)),
+        ("TOKENS", """    airtable_pat_read_only   read-only - schema and table reads (creds.py)
+    airtable_pat_write       data.records:write on this base - the writes only"""),
+        ("EXAMPLES", f"""    {C.GREEN}${C.RESET} python3 aspace_csv_import/airtable_writeback.py import_reports/import_report_<stamp>.json --run
+    {C.GREEN}${C.RESET} python3 aspace_csv_import/airtable_writeback.py REPORT.json --exclude-catalog JPC_AV_13500 --run"""),
+        ("OUTPUT", """    With --run: airtable_writeback_<stamp>.csv next to the report - each row's
+    outcome (done / already done / partial / unknown / not started / review).
+    "unknown" means a write may or may not have landed (lost response, server
+    error, Ctrl-C); run the same command again to settle it."""),
+        ("EXIT", f"""    {C.GREEN}0{C.RESET}  done (or, previewing, nothing for review)
+    {C.YELLOW}2{C.RESET}  rows for review or unfinished rows (rerun to finish), or a bad argument
+    {C.RED}1{C.RESET}  stopped: a report or token problem, a refused or unknown write,
+       cancelled at the prompt, or the outcomes file could not be saved"""),
+    ])
 
-{C.BOLD}USAGE{C.RESET}
-    {C.GREEN}${C.RESET} python3 aspace_csv_import/airtable_writeback.py REPORT.json          {C.DIM}# preview{C.RESET}
-    {C.GREEN}${C.RESET} python3 aspace_csv_import/airtable_writeback.py REPORT.json --run    {C.DIM}# shows the plan, asks, writes{C.RESET}
-    {C.GREEN}${C.RESET} python3 aspace_csv_import/airtable_writeback.py REPORT.json --exclude-catalog JPC_AV_13500 --run
-
-{C.BOLD}ARGUMENTS{C.RESET}
-    {C.CYAN}REPORT.json{C.RESET}               import_report_<stamp>.json from a REAL (not -n)
-                              production import run
-
-{C.BOLD}OPTIONS{C.RESET}
-    {C.CYAN}--run{C.RESET}                     Show the plan, ask for "yes", then write (without it: preview only)
-    {C.CYAN}--exclude-catalog NUM{C.RESET}     Leave this created row out (repeatable) - e.g. a
-                              record deleted in ArchivesSpace since the import
-    {C.CYAN}--no-color{C.RESET}                Disable colored output
-
-{C.BOLD}TOKENS{C.RESET} (creds.py)
-    airtable_pat_read_only   read-only - schema and table reads
-    airtable_pat_write       data.records:write on this base - the writes only
-
-{C.BOLD}OUTPUT{C.RESET}
-    With --run: airtable_writeback_<stamp>.csv next to the report - each row's
-    outcome (done / partial / unknown / not started / review). "unknown" means a
-    write may or may not have landed (lost response, Ctrl-C); rerun to settle it.
-"""
 
 # ==============================
 # IMPORT REPORT
@@ -253,6 +252,13 @@ def check_schema(token):
 
 def read_table(token, table_id, field_ids, label, as_text=False):
     """Every record of a table, only the given fields, keyed by field ID."""
+    try:
+        return _read_pages(token, table_id, field_ids, label, as_text)
+    finally:
+        close_progress()
+
+
+def _read_pages(token, table_id, field_ids, label, as_text):
     params = [("returnFieldsByFieldId", "true"), ("pageSize", "100")]
     params += [("fields[]", fid) for fid in field_ids]
     if as_text:
@@ -266,9 +272,8 @@ def read_table(token, table_id, field_ids, label, as_text=False):
         if not isinstance(page, dict) or not isinstance(page.get("records"), list):
             raise PullError(f"Airtable sent a malformed page reading {label}")
         records.extend(page["records"])
-        if len(records) % 2000 == 0:
-            print_status("info", f"  {label}: {len(records)} rows...", indent=1)
         offset = page.get("offset")
+        progress_count(f"Read {label}:", len(records), finished=not offset)
         if not offset:
             return records
         time.sleep(pull.PAGE_PAUSE)
@@ -292,7 +297,7 @@ def build_plan(token, candidates):
     Each plan entry: catalog, parent, import_rec, tracking_rec, set_parent,
     set_created, note (non-empty = review, nothing written)."""
     ids = check_schema(token)
-    print_status("info", "Reading Airtable (three tables - about a minute each)...")
+    print_status("info", "Reading Airtable - three tables, about a minute each...")
     sources = read_table(token, ids["source_table"], [ids["source_primary"]],
                          ids["source_name"], as_text=True)
     imports = read_table(token, IMPORT_TABLE_ID,
@@ -545,33 +550,28 @@ def confirm(report, plan, excluded, review_count):
     return answer.strip().lower() == "yes"
 
 
-def main():
-    class CustomArgumentParser(argparse.ArgumentParser):
-        def format_usage(self):
-            return (f"\nusage: {self.prog} REPORT.json [--run] [--no-color]\n"
-                    f"       {Colors.DIM}Use -h or --help for detailed information{Colors.RESET}\n")
-
-        def format_help(self):
-            return get_colored_help()
-
-        def error(self, message):
-            self.print_usage(sys.stderr)
-            self.exit(2, f"\n{Colors.RED}error: {message}{Colors.RESET}\n")
-
-    parser = CustomArgumentParser(add_help=False, usage=argparse.SUPPRESS)
-    parser.add_argument('-h', '--help', action='help', default=argparse.SUPPRESS)
+def build_parser():
+    """The command-line parser (module-level so tests can check it against -h)."""
+    parser = styled_parser(["REPORT.json [--run] [--exclude-catalog NUM ...] [--no-color]"],
+                           get_colored_help, [ARGUMENTS, OPTIONS])
     parser.add_argument('report')
     parser.add_argument('--run', action='store_true')
     parser.add_argument('--exclude-catalog', action='append', default=[], metavar='NUM')
     parser.add_argument('--no-color', action='store_true')
+    return parser
+
+
+def main():
+    parser = build_parser()
     args = parser.parse_args()
     if args.no_color:
         Colors.disable()
     command = " ".join([os.path.basename(sys.executable)] + [shlex.quote(a) for a in sys.argv])
 
-    pull.print_header("Record import results in Airtable")
-    print(f"  Report: {args.report}")
-    print(f"  Mode: {'WRITE (--run)' if args.run else 'preview - nothing is written'}")
+    print_run_header(TITLE, target=f"Airtable - base {BASE_ID} ({IMPORT_LABEL}, {TRACKING_LABEL})",
+                     input=os.path.abspath(args.report),
+                     mode=("apply - confirmation required" if args.run
+                           else "preview - nothing is written to Airtable"))
 
     if not pull.AIRTABLE_PAT_READ_ONLY:
         print_status("error", "No read token - add airtable_pat_read_only to creds.py")
@@ -584,12 +584,6 @@ def main():
     try:  # Ctrl-C while reading: nothing has been written yet
         candidates, review, left_alone, excluded = load_report(
             args.report, [c.strip() for c in args.exclude_catalog])
-        print_status("info", f"{len(candidates)} created row(s) eligible"
-                             + (f", {len(review)} created row(s) for review" if review else ""))
-        if excluded:
-            print_status("info", f"{len(excluded)} excluded: {', '.join(excluded)}")
-        if left_alone:
-            print_status("info", "Left alone: " + ", ".join(f"{n} {s}" for s, n in sorted(left_alone.items())))
         if not candidates:
             plan, ids = [], None
         else:
@@ -603,12 +597,18 @@ def main():
         sys.exit(1)
 
     counts, to_review = summarize(plan, review)
-    print()
-    for label, n in counts.items():
-        if n:
-            print_status("info", f"{n:4} {label}")
+    print_result(
+        [(label, n, "ok") for label, n in counts.items()]
+        + [("For review", len(to_review), "attention"),
+           ("Excluded", len(excluded), "neutral")]
+        + [(f"Left alone ({status} in the import)", n, "neutral")
+           for status, n in sorted(left_alone.items())],
+        title="PLAN")
+    if excluded:
+        print(f"\n  Excluded: {', '.join(excluded)}")
     if to_review:
-        print_status("warning", f"{len(to_review)} row(s) need review - nothing written for them:")
+        print()
+        print_status("warning", f"{len(to_review)} row(s) for review - nothing written for them:")
         for catalog, note in to_review:
             print_status("warning", f"{catalog}: {note}", indent=1)
 
@@ -617,8 +617,8 @@ def main():
     if not args.run:
         if pending:
             # the exact command plus --run, so the exclusions carry over
-            print(f"\n  {Colors.DIM}Preview only. To write (you'll be asked to confirm):{Colors.RESET} "
-                  f"{command} --run")
+            print_next_step([f"{command} --run",
+                             f"{Colors.DIM}(shows this plan again and asks before writing){Colors.RESET}"])
         sys.exit(2 if to_review else 0)
 
     if pending and not confirm(args.report, plan, excluded, len(to_review)):
@@ -631,26 +631,42 @@ def main():
     stamp = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{os.getpid()}"
     out_path = Path(args.report).resolve().parent / f"airtable_writeback_{stamp}.csv"
     provenance = f"{command} | {datetime.now().strftime('%Y-%m-%d %H:%M')}"
-    write_outcomes(out_path, plan, review, excluded, provenance)
+    try:
+        write_outcomes(out_path, plan, review, excluded, provenance)
+        saved = True
+    except OSError as e:
+        # Airtable is already written: still show what happened, and how
+        # to settle it (a rerun re-reads Airtable).
+        saved = False
+        save_problem = str(e)
 
     tally = {}
     for e in plan:
         tally[e["outcome"]] = tally.get(e["outcome"], 0) + 1
-    print()
-    for outcome in ("done", "already done", "partial", "parent not confirmed", "unknown",
-                    "not started", "review"):
-        if tally.get(outcome):
-            print_status("success" if outcome in ("done", "already done") else "warning",
-                         f"{tally[outcome]:4} {outcome}")
+    print_result([("Done", tally.get("done", 0), "ok"),
+                  ("Already done", tally.get("already done", 0), "neutral"),
+                  ("Partial (parent written, Yes not yet)", tally.get("partial", 0), "attention"),
+                  ("Parent not confirmed", tally.get("parent not confirmed", 0), "attention"),
+                  ("Outcome unknown", tally.get("unknown", 0), "unknown"),
+                  ("Not started", tally.get("not started", 0), "attention"),
+                  ("For review", len(to_review), "attention")])
     if error:
+        print()
         print_status("error", f"Stopped: {error}")
     unfinished = sum(tally.get(o, 0) for o in ("partial", "parent not confirmed", "unknown",
                                                "not started"))
     if unfinished:
         print_status("warning", f"{unfinished} row(s) unfinished - rerun the same command to "
                                 f"re-check Airtable and finish them")
-    print_status("info", f"Outcomes: {out_path}")
-    sys.exit(1 if error else (2 if unfinished or to_review else 0))
+    if saved:
+        print_saved([("write-back outcomes", out_path)])
+    else:
+        print_saved([], failed=[("write-back outcomes", out_path)])
+        print()
+        print_status("error", f"Could not save the outcomes file ({save_problem}) - Airtable "
+                              f"was written as shown above; rerun the same command to re-check it")
+    print()
+    sys.exit(1 if error or not saved else (2 if unfinished or to_review else 0))
 
 
 if __name__ == "__main__":

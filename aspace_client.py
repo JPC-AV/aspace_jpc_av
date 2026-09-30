@@ -50,8 +50,8 @@ from typing import Dict, List, Optional
 def missing_package_exit(package: str) -> None:
     """Exit with a colored, novice-friendly explanation for a missing
     third-party package (= the environment isn't active). Raw ANSI codes on
-    purpose: colorama itself may be the missing package. Colors only when
-    stderr is a real terminal, so piped/captured output stays clean."""
+    purpose: this runs before any display module has loaded. Colors only
+    when stderr is a real terminal, so piped/captured output stays clean."""
     if sys.stderr.isatty():
         red, cyan, bold, reset = "\033[91m", "\033[96m", "\033[1m", "\033[0m"
     else:

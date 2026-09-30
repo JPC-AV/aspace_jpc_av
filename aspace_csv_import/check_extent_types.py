@@ -10,77 +10,21 @@ import argparse
 from pathlib import Path
 
 import sheet_rules as col  # single source of truth for CSV header names
+# The repo root holds what the tool folders share: aspace_client.py,
+# console.py and creds.py.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from console import (Colors, print_status, print_header, print_section,  # shared display
+                     print_run_header, print_result, render_options, help_screen,
+                     styled_parser)
 
 # ==============================
 # TERMINAL COLORS
 # ==============================
 
-class Colors:
-    """ANSI color codes for terminal output."""
-    HEADER = '\033[95m'
-    BLUE = '\033[94m'
-    CYAN = '\033[96m'
-    GREEN = '\033[92m'
-    YELLOW = '\033[93m'
-    RED = '\033[91m'
-    BOLD = '\033[1m'
-    DIM = '\033[2m'
-    RESET = '\033[0m'
-    
-    @classmethod
-    def disable(cls):
-        """Disable colors (for non-TTY output)."""
-        cls.HEADER = ''
-        cls.BLUE = ''
-        cls.CYAN = ''
-        cls.GREEN = ''
-        cls.YELLOW = ''
-        cls.RED = ''
-        cls.BOLD = ''
-        cls.DIM = ''
-        cls.RESET = ''
-
-# Disable colors if not a TTY
-if not sys.stdout.isatty():
-    Colors.disable()
-
-
-def print_status(status: str, message: str, indent: int = 0):
-    """Print a colorized status message."""
-    indent_str = "  " * indent
-    if status == "success":
-        symbol = f"{Colors.GREEN}[OK]{Colors.RESET}"
-    elif status == "valid":
-        symbol = f"{Colors.GREEN}[OK]{Colors.RESET}"
-    elif status == "error":
-        symbol = f"{Colors.RED}[X]{Colors.RESET}"
-    elif status == "invalid":
-        symbol = f"{Colors.RED}[X]{Colors.RESET}"
-    elif status == "warning":
-        symbol = f"{Colors.YELLOW}[!]{Colors.RESET}"
-    elif status == "info":
-        symbol = f"{Colors.CYAN}[>]{Colors.RESET}"
-    else:
-        symbol = "   "
-    print(f"{indent_str}{symbol} {message}")
-
-def print_header(text: str):
-    """Print a header line."""
-    print(f"\n{Colors.BOLD}{Colors.CYAN}{text}{Colors.RESET}")
-    print(f"{Colors.DIM}{'-' * 60}{Colors.RESET}")
-
-def print_section(text: str):
-    """Print a section divider."""
-    print(f"\n{Colors.DIM}{'-' * 60}{Colors.RESET}")
-    print(f"{Colors.BOLD}{text}{Colors.RESET}")
-    print(f"{Colors.DIM}{'-' * 60}{Colors.RESET}")
 
 # ==============================
 # CONFIGURATION
 # ==============================
-
-# Add parent directory to path for the shared client and creds.py import
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 # API access goes through the importer's client, which carries the shared
 # fail-safe HTTP core (aspace_client.py) plus the extent-vocabulary logic -
@@ -92,42 +36,39 @@ from aspace_csv_import import ArchivesSpaceClient
 # HELP MENU
 # ==============================
 
+TITLE = "List extent types in ArchivesSpace (read-only)"
+ARGUMENTS = [("FILE", "", "Optional: a CSV whose Original Format values to check against the list")]
+OPTIONS = [
+    ("--env NAME", "", "Environment from creds.py (required when several are configured)"),
+    ("-u, --username USER", "", "ASpace username (or use creds.py)"),
+    ("-p, --password PASS", "", "ASpace password (or use creds.py)"),
+    ("--no-color", "", "Disable colored output"),
+]
+
+
 def get_colored_help():
-    """Generate a colored and formatted help message for the command line."""
+    """The -h screen, in the shared layout."""
     C = Colors
-    
-    help_text = f"""
-{C.BOLD}{C.CYAN}===============================================================================
-                   ArchivesSpace Extent Types Validator                        
-==============================================================================={C.RESET}
+    return help_screen(TITLE, [
+        ("DESCRIPTION", f"""    Lists the extent types ArchivesSpace accepts and, given a CSV, checks its
+    '{col.ORIGINAL_FORMAT}' values against them. A troubleshooting tool - the
+    import's dry run checks formats too. Authoritative for sheets that SET
+    formats (create runs); advisory for update sheets, where a stored value
+    that has since been retired shows INVALID here but round-trips unchanged
+    under --update-only."""),
+        ("USAGE", f"""    {C.GREEN}${C.RESET} python3 aspace_csv_import/check_extent_types.py [--env NAME]
+    {C.GREEN}${C.RESET} python3 aspace_csv_import/check_extent_types.py FILE [--env NAME]"""),
+        ("ARGUMENTS", render_options(ARGUMENTS)),
+        ("OPTIONS", render_options(OPTIONS)),
+        ("EXAMPLES", f"""    {C.GREEN}${C.RESET} python3 aspace_csv_import/check_extent_types.py --env production
+    {C.GREEN}${C.RESET} python3 aspace_csv_import/check_extent_types.py data.csv --env production"""),
+        ("OUTPUT", "    On screen only - no files are saved."),
+        ("EXIT", f"""    {C.GREEN}0{C.RESET}  listed (and every format in the CSV is valid)
+    {C.YELLOW}2{C.RESET}  a bad argument
+    {C.RED}1{C.RESET}  invalid formats in the CSV, the CSV could not be read, or the list
+       could not be fetched"""),
+    ])
 
-{C.BOLD}DESCRIPTION{C.RESET}
-    Fetches valid extent types from ArchivesSpace and optionally validates
-    the '{col.ORIGINAL_FORMAT}' column in your CSV against the controlled vocabulary.
-    Authoritative for sheets that SET formats (create runs). Advisory for
-    update sheets: a stored value that has since been retired shows INVALID
-    here but round-trips unchanged under --update-only.
-
-{C.BOLD}USAGE{C.RESET}
-    {C.GREEN}${C.RESET} python3 check_extent_types.py [options]
-    {C.GREEN}${C.RESET} python3 check_extent_types.py FILE [options]
-
-{C.BOLD}ARGUMENTS{C.RESET}
-    {C.CYAN}FILE{C.RESET}                      CSV file to validate (optional)
-
-{C.BOLD}OPTIONS{C.RESET}
-    {C.CYAN}-u, --username USER{C.RESET}       ASpace username (or use creds.py)
-    {C.CYAN}-p, --password PASS{C.RESET}       ASpace password (or use creds.py)
-    {C.CYAN}--env NAME{C.RESET}                Target environment from creds.py
-                              (required when several are configured)
-    {C.CYAN}--no-color{C.RESET}                Disable colored output
-
-{C.BOLD}EXAMPLES{C.RESET}
-    {C.GREEN}${C.RESET} python3 check_extent_types.py
-    {C.GREEN}${C.RESET} python3 check_extent_types.py data.csv
-    {C.GREEN}${C.RESET} python3 check_extent_types.py data.csv -u admin -p secret
-"""
-    return help_text
 
 # ==============================
 # EXTENT TYPE FUNCTIONS
@@ -213,38 +154,10 @@ def check_csv_values(csv_file):
 # MAIN EXECUTION
 # ==============================
 
-def main():
-    """Main function."""
-    aspace_client.console_logging()  # labelled detail, not a bare ERROR:root line
-    
-    # Custom ArgumentParser for cleaner usage and colored errors
-    class CustomArgumentParser(argparse.ArgumentParser):
-        def format_usage(self):
-            C = Colors
-            usage = f"\nusage: {self.prog} [FILE] [options]\n"
-            help_hint = f"       {C.DIM}Use -h or --help for detailed information{C.RESET}\n"
-            return usage + help_hint
-        
-        def format_help(self):
-            return get_colored_help()
-        
-        def error(self, message):
-            self.print_usage(sys.stderr)
-            self.exit(2, f"\n{Colors.RED}error: {message}{Colors.RESET}\n")
-    
-    parser = CustomArgumentParser(
-        description=get_colored_help(),
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        add_help=False,
-        usage=argparse.SUPPRESS
-    )
-    
-    parser.add_argument(
-        '-h', '--help',
-        action='help',
-        default=argparse.SUPPRESS,
-        help=argparse.SUPPRESS
-    )
+def build_parser():
+    """The command-line parser (module-level so tests can check it against -h)."""
+    parser = styled_parser(["[FILE] [--env NAME] [-u USER -p PASS] [--no-color]"],
+                           get_colored_help, [ARGUMENTS, OPTIONS])
     parser.add_argument(
         'csv_file',
         nargs='?',
@@ -269,7 +182,14 @@ def main():
         metavar='NAME',
         help=argparse.SUPPRESS
     )
+    return parser
 
+
+def main():
+    """Main function."""
+    aspace_client.console_logging()  # labelled detail, not a bare ERROR:root line
+    
+    parser = build_parser()
     args = parser.parse_args()
     # Environment selection (see aspace_client): auto when one is configured,
     # explicit --env when several are. API-touching commands fail later with
@@ -286,13 +206,15 @@ def main():
     if args.no_color:
         Colors.disable()
     
-    print_header("ArchivesSpace Extent Types Validator")
+    target = (f"{aspace_client.ACTIVE_ENV.upper()} ({aspace_client.ASPACE_URL}) - read-only"
+              if aspace_client.ACTIVE_ENV else None)
+    print_run_header(TITLE, target=target, input=args.csv_file, mode="check only")
     
     # Get valid types from ArchivesSpace
     valid_types = get_extent_types(args.username, args.password)
     
     if valid_types:
-        print_section(f"Valid Extent Types ({len(valid_types)})")
+        print_section(f"VALID EXTENT TYPES ({len(valid_types)})")
         for i, extent_type in enumerate(valid_types, 1):
             print(f"  {Colors.DIM}{i:3}.{Colors.RESET} {extent_type}")
         
@@ -302,7 +224,7 @@ def main():
                 print_status("error", f"File not found: {args.csv_file}")
                 sys.exit(1)
             
-            print_section(f"Validating CSV: {args.csv_file}")
+            print_section("FORMATS IN THE CSV")
             
             used_types = check_csv_values(args.csv_file)
             if used_types is None:
@@ -323,9 +245,9 @@ def main():
                         invalid_types.append(extent_type)
                 
                 if invalid_types:
-                    print_section("Suggested Mappings")
-                    print_status("warning", f"{Colors.YELLOW}{len(invalid_types)} invalid extent type(s) found!{Colors.RESET}")
-                    print()
+                    print_result([("Valid", len(used_types) - len(invalid_types), "ok", True),
+                                  ("Invalid", len(invalid_types), "bad")])
+                    print_section("SUGGESTED MAPPINGS")
                     
                     for invalid in invalid_types:
                         # Try to suggest similar valid types
@@ -342,26 +264,24 @@ def main():
                     
                     print(f"\n  {Colors.YELLOW}These values must be changed to match valid ArchivesSpace values{Colors.RESET}")
                     print(f"  {Colors.DIM}if you intend to SET them. A value already stored on a record (an export's{Colors.RESET}")
-                    print(f"  {Colors.DIM}retired term) round-trips unchanged: --update-only only checks a format it changes.{Colors.RESET}")
-                    print(f"{Colors.DIM}{'-' * 60}{Colors.RESET}\n")
+                    print(f"  {Colors.DIM}retired term) round-trips unchanged: --update-only only checks a format it changes.{Colors.RESET}\n")
                     sys.exit(1)
                 else:
+                    print_result([("Valid", len(used_types), "ok", True)])
                     print()
-                    print_status("success", f"{Colors.GREEN}All extent types in CSV are valid!{Colors.RESET}")
+                    print_status("success", "Every extent type in the CSV is valid")
         else:
             print(f"\n  {Colors.DIM}Tip: Run with a CSV file to validate its extent types:{Colors.RESET}")
             print(f"       {Colors.GREEN}${Colors.RESET} python3 {sys.argv[0]} your_file.csv")
-        
-        print(f"{Colors.DIM}{'-' * 60}{Colors.RESET}\n")
+        print()
     else:
-        print_section("Error")
+        print()
         print_status("error", "Could not fetch extent types from ArchivesSpace")
         print()
         print(f"  Possible issues:")
         print(f"    * Check your credentials (creds.py or -u/-p flags)")
         print(f"    * Verify ArchivesSpace URL in creds.py")
-        print(f"    * Ensure you have permission to view enumerations")
-        print(f"{Colors.DIM}{'-' * 60}{Colors.RESET}\n")
+        print(f"    * Ensure you have permission to view enumerations\n")
         sys.exit(1)
 
 if __name__ == "__main__":

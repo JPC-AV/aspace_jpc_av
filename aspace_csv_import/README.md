@@ -338,9 +338,9 @@ The script provides colorized terminal output. A real update run:
 ```
 Update ArchivesSpace records
 ────────────────────────────────────────────────────────────
-  Target: SANDBOX (https://api-jpcsb.as.atlas-sys.com, repo 2, resource 7)
-  File: your_file.csv
-  Mode: update-only (never creates)
+  Target:  SANDBOX (https://api-jpcsb.as.atlas-sys.com, repo 2, resource 7)
+  Input:   /Users/you/your_file.csv
+  Mode:    update-only (never creates)
 
 [>] Connecting to https://api-jpcsb.as.atlas-sys.com...
 [OK] Authenticated
@@ -378,18 +378,27 @@ WRITING
   [>] dates: {'creation': None} --> {'creation': '1987-01-29'}
 
 ────────────────────────────────────────────────────────────
-SUMMARY
+RESULT
 ────────────────────────────────────────────────────────────
-  Total Rows:    3
-  Updated:       2
-  Unchanged:     1
+  Rows in the CSV       3
+  Updated               2
+  Unchanged             1
 
-  Mode: update-only (never creates)
+  Time: 00:00:04
 
-  Reports: ~/aspace_import_reports/
-  Report: import_report_20260910_140212_71021.json
-  Records (as stored in ASpace): import_records_20260910_140212_71021.json (records: 3 of 3, containers: 3 of 3 captured)
+  Saved import report:  /Users/you/aspace_import_reports/import_report_20260910_140212_71021.json
+  Saved receipt CSV:    /Users/you/aspace_import_reports/import_report_20260910_140212_71021.csv
+  Saved records file:   /Users/you/aspace_import_reports/import_records_20260910_140212_71021.json
+  Saved log:            /Users/you/aspace_import_reports/csv_import_20260910_140212_71021.log
 ```
+
+The RESULT block shows every category that happened and hides the ones
+that did not. Besides the counts above it can show `Skipped` (already in
+ArchivesSpace), `On hold`, `Failed or refused`, `Outcome unknown` (a write
+whose reply was lost - check the record in ArchivesSpace before rerunning),
+`Not written (the run stopped)` and `Not reached (interrupted)`. A dry run
+says `Would create` / `Would update` under `RESULT - dry run`, and saves no
+files.
 
 A real **create** run ends with the next step - the exact command that
 records the results in Airtable, with the report already filled in:
@@ -405,7 +414,7 @@ It appears only for production runs that created records and saved their
 report. If the run did not carry out every row it is labelled **PARTIAL**,
 counting what was created, what has an unknown outcome (a lost response or
 Ctrl-C mid-write - check those in ArchivesSpace before rerunning), what
-failed, and what was never reached; the write-back records only the created
+was on hold, what failed, and what was never reached; the write-back records only the created
 rows.
 
 ### Status Symbols
@@ -769,6 +778,20 @@ aborts with no writes.
 | "Invalid extent type" | Check Original Format matches ASpace dropdown exactly |
 
 ## Version History
+
+- **v3.2** (2026): One display across the tools
+  - Every tool's `-h` screen uses the same banner, a title saying what it
+    does, and the same section order (DESCRIPTION, USAGE, ARGUMENTS, OPTIONS,
+    EXAMPLES, OUTPUT, EXIT, NEXT STEP); a wrong argument shows the same
+    usage-plus-options screen everywhere
+  - Runs open with aligned Target / Input / Mode lines. A run that gets past
+    its checks ends with a RESULT block that shows every category that
+    happened, then `Saved <what>:  <full path>` lines (`NOT saved` when a
+    file failed) and, where there is one, the NEXT STEP; a bad argument,
+    CSV or login stops earlier with the error
+  - The importer counts held rows, unknown outcomes, rows the run stopped
+    before and rows never reached apart from failures
+  - `--no-color` on every tool, including `aspace_csv_export.py`
 
 - **v3.1** (2026): Plan, confirm, and hand off
   - Every run checks all rows and prints a PLAN (create / skip / refused /

@@ -29,6 +29,7 @@ import argparse
 import csv
 import os
 import re
+import shlex
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -38,8 +39,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import aspace_client  # noqa: F401  (friendly missing-package guard for requests)
 import requests
 
-from aspace_csv_import import Colors, print_status, print_header, RUN_COMMAND
+from console import (Colors, print_status, print_run_header,  # shared display helpers
+                     print_result, print_saved, render_options, help_screen,
+                     styled_parser, close_progress)
+from console import progress as progress_line
 import sheet_rules as col
+
+# The command line as run, for the report's provenance line (this tool takes
+# no password, so nothing needs hiding).
+RUN_COMMAND = " ".join([os.path.basename(sys.executable)]
+                       + [shlex.quote(a) for a in sys.argv])
 
 MADS_URL_PREFIX = "https://api.jpc.si.edu/mads/view/JPC-"
 MADS_HOST = "api.jpc.si.edu"
@@ -125,12 +134,15 @@ def check_many(catalog_numbers, progress=True):
     unique = list(dict.fromkeys(n for n in catalog_numbers if n))
     results = {}
     session = requests.Session()
-    with ThreadPoolExecutor(max_workers=WORKERS) as pool:
-        for i, (cat, status) in enumerate(
-                zip(unique, pool.map(lambda c: mads_live(c, session), unique)), 1):
-            results[cat] = status
-            if progress and i % 50 == 0:
-                print_status("info", f"Checked {i}/{len(unique)}...")
+    try:
+        with ThreadPoolExecutor(max_workers=WORKERS) as pool:
+            for i, (cat, status) in enumerate(
+                    zip(unique, pool.map(lambda c: mads_live(c, session), unique)), 1):
+                results[cat] = status
+                if progress:
+                    progress_line("Checked MADS", i, len(unique))
+    finally:
+        close_progress()
     return results
 
 
@@ -149,16 +161,49 @@ same_file = col.same_file
 clobber_problem = col.clobber_problem
 
 
+TITLE = "Check which items are live in MADS (read-only)"
+ARGUMENTS = [("FILE", "", "A plain text list of catalog numbers, or any CSV with a CATALOG_NUMBER column")]
+OPTIONS = [("-o, --output PATH", "", f"Report path (default: timestamped file in the reports folder)"),
+           ("--no-color", "", "Disable colored output")]
+
+
+def get_colored_help():
+    """The -h screen, in the shared layout."""
+    C = Colors
+    return help_screen(TITLE, [
+        ("DESCRIPTION", """    Checks each catalog number's public MADS page (the Smithsonian DAMS
+    delivery) and saves the answer as a CSV. Public URLs only - ArchivesSpace
+    is never contacted, so no --env is needed."""),
+        ("USAGE", f"    {C.GREEN}${C.RESET} python3 aspace_csv_import/check_mads.py FILE [-o PATH]"),
+        ("ARGUMENTS", render_options(ARGUMENTS)),
+        ("OPTIONS", render_options(OPTIONS)),
+        ("EXAMPLES", f"""    {C.GREEN}${C.RESET} python3 aspace_csv_import/check_mads.py delivered.txt
+    {C.GREEN}${C.RESET} python3 aspace_csv_import/check_mads.py batch.csv -o batch_mads.csv"""),
+        ("OUTPUT", f"""    {C.CYAN}{OUTPUT_DIR}/{C.RESET}
+    mads_check_<stamp>.csv: CATALOG_NUMBER, MADS URL, MADS live, Checked
+    MADS live is Yes, No, check failed, or invalid catalog number - the last
+    two are never evidence that an item is missing"""),
+        ("EXIT", f"""    {C.GREEN}0{C.RESET}  every number got a definite Yes or No
+    {C.YELLOW}2{C.RESET}  some checks failed or numbers were invalid (re-run for those), or a bad argument
+    {C.RED}1{C.RESET}  nothing checked: the list could not be read, or the report would overwrite it"""),
+    ])
+
+
+def build_parser():
+    """The command-line parser (module-level so tests can check it against -h)."""
+    parser = styled_parser(["FILE [-o PATH] [--no-color]"], get_colored_help,
+                           [ARGUMENTS, OPTIONS])
+    parser.add_argument("file", metavar="FILE")
+    parser.add_argument("-o", "--output", metavar="PATH")
+    parser.add_argument("--no-color", action="store_true")
+    return parser
+
+
 def main():
-    parser = argparse.ArgumentParser(
-        description="Check which catalog numbers are live in MADS (public "
-                    "URLs only - ArchivesSpace is never contacted).")
-    parser.add_argument("file", metavar="FILE",
-                        help="Plain text list of catalog numbers, or any CSV "
-                             "with a CATALOG_NUMBER column")
-    parser.add_argument("-o", "--output", metavar="PATH",
-                        help=f"Output CSV path (default: timestamped file in {OUTPUT_DIR})")
+    parser = build_parser()
     args = parser.parse_args()
+    if args.no_color:
+        Colors.disable()
 
     from aspace_csv_export import read_catalog_list  # late import: avoids cycle
     numbers, problem = read_catalog_list(args.file)
@@ -173,8 +218,9 @@ def main():
         print_status("error", problem)
         sys.exit(1)
 
-    print_header("MADS Liveness Check")
-    print(f"  Source: {args.file} ({len(numbers)} catalog number(s))")
+    print_run_header(TITLE, target="the public MADS site (read-only) - answers saved to a local CSV",
+                     input=f"{args.file} ({len(numbers)} catalog number(s))",
+                     mode="check only - ArchivesSpace is never contacted")
     results = check_many(numbers)
 
     checked_at = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -188,18 +234,22 @@ def main():
     os.replace(tmp_path, out_path)
 
     live, not_live, failed = summarize(results)
-    print_status("success", f"Checked {len(results)} number(s): "
-                            f"{live} live, {not_live} not in MADS"
-                            + (f", {failed} check failed" if failed else ""))
+    invalid = [c for c, s in results.items() if s == "invalid catalog number"]
+    print_result([("Live in MADS", live, "ok", True),
+                  ("Not in MADS", not_live, "neutral", True),
+                  ("Check failed", failed - len(invalid), "unknown"),
+                  ("Invalid catalog number", len(invalid), "bad")])
     if failed:
-        invalid = [c for c, s in results.items() if s == "invalid catalog number"]
+        print()
         if invalid:
-            print_status("warning", f"{len(invalid)} catalog number(s) are not of the form "
-                                    f"JPC_AV_<digits> and were not looked up: {', '.join(invalid)}")
-        print_status("warning", "'check failed' means the check itself errored "
-                                "(network/odd response) - NOT that the item is "
-                                "absent; re-run for those")
-    print_status("success", f"Report: {out_path}")
+            print_status("warning", f"Not of the form JPC_AV_<digits>, so not looked up: "
+                                    f"{', '.join(invalid)}")
+        if failed - len(invalid):
+            print_status("warning", "'Check failed' means the check itself errored "
+                                    "(network or an odd response) - NOT that the item is "
+                                    "absent; re-run for those")
+    print_saved([("MADS report", out_path)])
+    print()
     sys.exit(2 if failed else 0)
 
 

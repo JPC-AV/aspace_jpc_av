@@ -44,7 +44,7 @@ JPC_AV_00001_refid_b645fa3ffd01ad7364c9658f83fdceda/
 - `mediainfo` CLI tool installed and on your system PATH
 - Required Python packages:
   ```bash
-  pip install requests colorama
+  pip install requests
   ```
 - `creds.py` configured at the repository root (see Installation)
 
@@ -118,8 +118,9 @@ python3 aspace-rename-directories.py -d /path/to/videos --verbose
 | `--no-rename` | Update ArchivesSpace only; skip directory renaming |
 | `--no-update` | Rename directories only; skip ArchivesSpace record updates |
 | `--rename-media` | Also rename the media file to include `ref_id` (`.mkv` batches only; `--rename-mkv` is an alias). Refused for a folder whose checksum manifest (`.md5`/`.sha256`...) names the media file (or whose manifests could not be read) - renaming would orphan that entry |
-| `-v, --verbose` | Enable debug-level logging |
+| `-v, --verbose` | Show debug detail too |
 | `--env NAME` | Target environment from `creds.py` (required when several are configured) |
+| `--no-color` | Disable colored output |
 
 One media format per run: the default is `.mkv` (vrecord digitizations); `--mp4` switches the run to optical-disc transfers. Future formats (`--wav`, `--mp3`) will follow the same pattern — audio formats will skip the `physical_details` fill, since the video default doesn't apply to them.
 
@@ -174,35 +175,95 @@ Filled when the record has a **single extent** whose `physical_details` is blank
 
 > **Note:** This default is correct for most JPCA AV material. For tapes that deviate from the standard (BW, silent, HD), set the Physical Details field manually in ArchivesSpace — the script only fills blanks and never overwrites an existing value, so manual corrections survive reruns. On records with multiple extents the script leaves all blanks alone (it can't tell which extent describes the video carrier), so fill those manually too.
 
-## Logs
+## Output
 
-Written to `~/aspace_rename_reports/` by default. Override by setting `logs_dir` in `creds.py`.
-
-```
-~/aspace_rename_reports/rename_YYYYMMDD_HHMMSS.log
-```
-
-## Example Log Output
+The screen opens with what the run will do, shows each folder's steps, and
+ends with the result:
 
 ```
-2024-12-20 15:30:25,123 [INFO] Successfully authenticated with ArchivesSpace
-===============================================================================
+Update ArchivesSpace and rename AV folders
+------------------------------------------------------------
+  Target:  PRODUCTION (https://api-aspace.jpcarchive.org, repo 2, resource 7)
+  Input:   /Volumes/Drive/one_inch
+  Mode:    update ArchivesSpace records + rename folders
+  Media:   .mkv  (JPC_AV_00001/JPC_AV_00001.mkv)
 
-2024-12-20 15:30:26,456 [INFO] Processing directory: JPC_AV_00001
-2024-12-20 15:30:26,789 [INFO] Found archival object with Component Unique Identifier 'JPC_AV_00001'
-2024-12-20 15:30:26,790 [INFO] RefID: b645fa3ffd01ad7364c9658f83fdceda, Archival Object ID: 12345
-2024-12-20 15:30:27,101 [INFO] Extracted runtime: 01:15:42 for file: JPC_AV_00001.mkv
-2024-12-20 15:30:27,200 [INFO] Found existing Physical Characteristics and Technical Requirements note - adding Duration defined list
-2024-12-20 15:30:27,201 [INFO] Added Duration defined list to Physical Characteristics and Technical Requirements note: 01:15:42
-2024-12-20 15:30:27,202 [INFO] Set physical_details to 'SD video, color, sound' on 1 extent(s)
-2024-12-20 15:30:28,567 [INFO] Archival object updated successfully!
-2024-12-20 15:30:29,123 [INFO] Directory renamed to: JPC_AV_00001_refid_b645fa3ffd01ad7364c9658f83fdceda
+[>] Found 53 directories to process
 
-===============================================================================
+JPC_AV_00001
+  [>] RefID: b645fa3ffd01ad7364c9658f83fdceda, Archival Object ID: 12345
+  [>] Extracted runtime: 01:15:42 for file: JPC_AV_00001.mkv
+  [OK] ArchivesSpace record updated: Duration -> 01:15:42
+  [OK] Directory renamed to: JPC_AV_00001_refid_b645fa3ffd01ad7364c9658f83fdceda
+...
+------------------------------------------------------------
+FOLDERS
+------------------------------------------------------------
+  Targets selected      53
+  Done                  52
+  Failed                 1
 
-2024-12-20 15:30:30,456 [INFO] Processing complete!
-2024-12-20 15:30:30,457 [INFO] Processing Time: 00:00:05
+------------------------------------------------------------
+CHANGES MADE
+------------------------------------------------------------
+  ArchivesSpace records updated      50
+  Folders renamed                    52
+  Records already correct (not rewritten)       2
+
+------------------------------------------------------------
+NEEDS ATTENTION
+------------------------------------------------------------
+  JPC_AV_04144  failed
+      JPC_AV_04144: 2 media files found - expected exactly one. Skipping.
+
+  Saved log:  /Users/you/aspace_rename_reports/rename_20260930_101500.log
 ```
+
+**FOLDERS** puts every target in exactly one line, so they add up to
+*Targets selected*:
+
+| Line | Meaning |
+|------|---------|
+| Done | Every requested step succeeded |
+| Already up to date | Every requested step needed no change (only possible with `--no-rename`) |
+| Partly done | Some changes were made and kept, others were not - e.g. the record was updated but the folder could not be renamed |
+| Failed | It did not finish, and nothing it changed was kept |
+| Outcome unknown | A step's result is uncertain - an update whose reply was lost, or a rename that reported an error but may have landed |
+
+**CHANGES MADE** counts only confirmed changes that were kept (a media
+rename that was rolled back is not counted). **NEEDS ATTENTION** names each
+target that did not finish, what was done, the problem, and any manual fix
+(e.g. "Rename it back to ... before rerunning"). For *Partly done* and
+*Outcome unknown*: inspect the named paths and resolve the reported problem
+before rerunning. Any Failed, Partly done or Outcome unknown target makes
+the run exit 1.
+
+A dry run (`-n`) says *Would be done* and *Would update / Would rename*
+instead, and changes nothing.
+
+### Log file
+
+Every run - dry runs too - writes a log to `~/aspace_rename_reports/`
+(or `rename_reports/` under `logs_dir` in `creds.py`). It holds every
+message with a timestamp, the command, the header and the result, the full
+folder list, the shared client's messages, and the full detail of any
+unexpected error (the screen shows one line and says the detail is in the
+log). Nothing is created for `-h` or an argument mistake.
+
+```
+2026-09-30 10:15:02,118 [INFO] Command: python3 aspace-rename-directories.py -d /Volumes/Drive/one_inch
+2026-09-30 10:15:02,118 [INFO]   Target:  PRODUCTION (https://api-aspace.jpcarchive.org, repo 2, resource 7)
+...
+2026-09-30 10:15:04,456 [INFO] Processing directory: JPC_AV_00001
+2026-09-30 10:15:04,790 [INFO] RefID: b645fa3ffd01ad7364c9658f83fdceda, Archival Object ID: 12345
+2026-09-30 10:15:05,101 [INFO] Extracted runtime: 01:15:42 for file: JPC_AV_00001.mkv
+2026-09-30 10:15:06,567 [INFO] ArchivesSpace record updated: Duration -> 01:15:42
+2026-09-30 10:15:07,123 [INFO] Directory renamed to: JPC_AV_00001_refid_b645fa3ffd01ad7364c9658f83fdceda
+```
+
+**Ctrl-C:** an interrupted run stops without the FOLDERS / CHANGES MADE
+result. The log file holds everything up to the interruption - read it to
+see which folders were finished.
 
 ## Notes
 
@@ -219,6 +280,7 @@ Written to `~/aspace_rename_reports/` by default. Override by setting `logs_dir`
 | Error | Solution |
 |-------|----------|
 | `mediainfo` not found | Install `mediainfo` and ensure it is on your system PATH |
+| `unrecognized arguments: /path/...` | The folder path needs `-d` in front of it (or `--single` for folders named one by one) - the error line below it shows the corrected form |
 | Authentication failed | Check `creds.py` credentials and ArchivesSpace URL |
 | No record with this Component Unique Identifier | Verify the identifier exists in ArchivesSpace (AV resource) |
 | N records share this Component Unique Identifier | Clean up the duplicate records in ArchivesSpace first |

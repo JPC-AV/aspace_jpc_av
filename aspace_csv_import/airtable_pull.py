@@ -23,6 +23,12 @@ from urllib.parse import urlencode
 import requests
 
 import sheet_rules as col  # single source of truth for CSV header names
+# The repo root holds what the tool folders share: aspace_client.py,
+# console.py and creds.py.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from console import (Colors, print_status, print_header,  # shared display helpers
+                     print_run_header, print_result, print_saved, print_next_step,
+                     render_options, help_screen, styled_parser)
 
 # ==============================
 # CONFIGURATION
@@ -49,7 +55,6 @@ RATE_LIMIT_RETRIES = 3
 
 # Token: airtable_pat_read_only in creds.py (repo root), else
 # AIRTABLE_PAT_READ_ONLY in the shell.
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 try:
     from creds import airtable_pat_read_only
 except ImportError:
@@ -63,87 +68,44 @@ RUN_COMMAND = " ".join([os.path.basename(sys.executable)]
 # TERMINAL COLORS
 # ==============================
 
-class Colors:
-    """ANSI color codes for terminal output."""
-    CYAN = '\033[96m'
-    GREEN = '\033[92m'
-    YELLOW = '\033[93m'
-    RED = '\033[91m'
-    BOLD = '\033[1m'
-    DIM = '\033[2m'
-    RESET = '\033[0m'
-
-    @classmethod
-    def disable(cls):
-        """Disable colors (for non-TTY output)."""
-        cls.CYAN = cls.GREEN = cls.YELLOW = cls.RED = ''
-        cls.BOLD = cls.DIM = cls.RESET = ''
-
-
-if not sys.stdout.isatty():
-    Colors.disable()
-
-
-def print_status(status: str, message: str, indent: int = 0):
-    """Print a colorized status message."""
-    symbols = {
-        "success": f"{Colors.GREEN}[OK]{Colors.RESET}",
-        "error": f"{Colors.RED}[X]{Colors.RESET}",
-        "warning": f"{Colors.YELLOW}[!]{Colors.RESET}",
-        "info": f"{Colors.CYAN}[>]{Colors.RESET}",
-    }
-    print(f"{'  ' * indent}{symbols.get(status, '   ')} {message}")
-
-
-def print_header(text: str):
-    """Print a header line."""
-    print(f"\n{Colors.BOLD}{Colors.CYAN}{text}{Colors.RESET}")
-    print(f"{Colors.DIM}{'-' * 60}{Colors.RESET}")
 
 # ==============================
 # HELP MENU
 # ==============================
 
-def get_colored_help():
-    """Generate a colored and formatted help message for the command line."""
-    C = Colors
-    return f"""
-{C.BOLD}{C.CYAN}===============================================================================
-                    Read an Airtable view (read-only)
-==============================================================================={C.RESET}
+TITLE = "Read an Airtable view (read-only)"
+ARGUMENTS = [("VIEW", "", "Airtable view name, exactly as spelled (quote it if it has spaces)")]
+OPTIONS = [("--no-color", "", "Disable colored output")]
 
-{C.BOLD}DESCRIPTION{C.RESET}
-    Saves one view of the <<< ASpace_import >>> table as a CSV, the same as
+
+def get_colored_help():
+    """The -h screen, in the shared layout."""
+    C = Colors
+    return help_screen(TITLE, [
+        ("DESCRIPTION", f"""    Saves one view of the <<< ASpace_import >>> table as a CSV, the same as
     Airtable's Download CSV: the view's visible columns in its order, with its
-    filters and sort. Read-only toward Airtable.
+    filters and sort, plus {col.HOLD} and {col.HOLD_REASON} even if the view hides
+    them. Read-only toward Airtable.
 
     The view must be a grid view, and the name must match exactly
-    (capitals and spaces count). A wrong name lists the table's views.
+    (capitals and spaces count). A wrong name lists the table's views."""),
+        ("USAGE", f"    {C.GREEN}${C.RESET} python3 aspace_csv_import/airtable_pull.py VIEW"),
+        ("ARGUMENTS", render_options(ARGUMENTS)),
+        ("OPTIONS", render_options(OPTIONS)),
+        ("TOKEN", """    airtable_pat_read_only in creds.py (or AIRTABLE_PAT_READ_ONLY in the shell).
+    Read-only: scopes data.records:read and schema.bases:read, this base only."""),
+        ("EXAMPLES", f"""    {C.GREEN}${C.RESET} python3 aspace_csv_import/airtable_pull.py OpticalDisc-ASpace
+    {C.GREEN}${C.RESET} python3 aspace_csv_import/airtable_pull.py 'DVD batch 2'"""),
+        ("OUTPUT", f"""    {C.CYAN}{EXPORT_DIR}/{C.RESET}
+    <view>_<YYYYMMDD_HHMM>.csv - never overwrites an earlier pull"""),
+        ("EXIT", f"""    {C.GREEN}0{C.RESET}  saved
+    {C.YELLOW}2{C.RESET}  a bad argument
+    {C.RED}1{C.RESET}  nothing saved: no token, a view or token problem, an empty view, or a
+       pull of this view already saved this minute"""),
+        ("NEXT STEP", f"""    Creating records:  {C.GREEN}${C.RESET} python3 aspace_csv_import/aspace_csv_export.py --fill-parents FILE --env production
+    Updating records:  {C.GREEN}${C.RESET} python3 aspace_csv_import/aspace_csv_import.py --update-only -n -f FILE --env production"""),
+    ])
 
-{C.BOLD}USAGE{C.RESET}
-    {C.GREEN}${C.RESET} python3 aspace_csv_import/airtable_pull.py VIEW
-
-{C.BOLD}ARGUMENTS{C.RESET}
-    {C.CYAN}VIEW{C.RESET}                      Airtable view name (quote it if it has spaces)
-
-{C.BOLD}OPTIONS{C.RESET}
-    {C.CYAN}--no-color{C.RESET}                Disable colored output
-
-{C.BOLD}OUTPUT{C.RESET}
-    {C.CYAN}{EXPORT_DIR}/{C.RESET}
-    <view>_<YYYYMMDD_HHMM>.csv - never overwrites an earlier pull
-
-{C.BOLD}TOKEN{C.RESET}
-    airtable_pat_read_only in creds.py (or AIRTABLE_PAT_READ_ONLY in the shell).
-    Read-only: scopes data.records:read and schema.bases:read, this base only.
-
-{C.BOLD}EXAMPLES{C.RESET}
-    {C.GREEN}${C.RESET} python3 aspace_csv_import/airtable_pull.py OpticalDisc-ASpace
-    {C.GREEN}${C.RESET} python3 aspace_csv_import/airtable_pull.py "DVD batch 2"
-
-{C.BOLD}NEXT STEP{C.RESET}
-    {C.GREEN}${C.RESET} python3 aspace_csv_import/aspace_csv_export.py --fill-parents FILE --env production   # writes FILE_ready.csv + FILE_review.csv
-"""
 
 # ==============================
 # AIRTABLE API
@@ -330,30 +292,28 @@ def write_csv(path, columns, records, provenance):
 # MAIN EXECUTION
 # ==============================
 
-def main():
-    class CustomArgumentParser(argparse.ArgumentParser):
-        def format_usage(self):
-            return (f"\nusage: {self.prog} VIEW [--no-color]\n"
-                    f"       {Colors.DIM}Use -h or --help for detailed information{Colors.RESET}\n")
+def _script(name):
+    """A sibling script's path as the operator would type it from here."""
+    return os.path.relpath(Path(__file__).resolve().parent / name)
 
-        def format_help(self):
-            return get_colored_help()
 
-        def error(self, message):
-            self.print_usage(sys.stderr)
-            self.exit(2, f"\n{Colors.RED}error: {message}{Colors.RESET}\n")
-
-    parser = CustomArgumentParser(add_help=False, usage=argparse.SUPPRESS)
-    parser.add_argument('-h', '--help', action='help', default=argparse.SUPPRESS)
+def build_parser():
+    """The command-line parser (module-level so tests can check it against -h)."""
+    parser = styled_parser(["VIEW [--no-color]"], get_colored_help, [ARGUMENTS, OPTIONS])
     parser.add_argument('view')
     parser.add_argument('--no-color', action='store_true')
+    return parser
+
+
+def main():
+    parser = build_parser()
     args = parser.parse_args()
     if args.no_color:
         Colors.disable()
 
-    print_header("Read an Airtable view (read-only)")
-    print(f"  Base/table: {BASE_ID} / {TABLE_ID}")
-    print(f"  View: {args.view}")
+    print_run_header(TITLE, target=f"a new CSV in {EXPORT_DIR}",
+                     input=f"Airtable view '{args.view}' ({BASE_ID} / {TABLE_ID})",
+                     mode="read Airtable, save a local file")
 
     if not AIRTABLE_PAT_READ_ONLY:
         print_status("error", "No Airtable token - add airtable_pat_read_only = \"pat...\" to creds.py "
@@ -383,17 +343,32 @@ def main():
 
     provenance = f"{RUN_COMMAND} | airtable view: {args.view} | {now.strftime('%Y-%m-%d %H:%M')}"
     write_csv(out_path, columns, records, provenance)
-    print_status("success", f"Wrote {len(records)} row(s) to: {out_path}")
 
-    shown = {name for _, name, _ in columns}
+    names = {fid: name for fid, name, _ in columns}
+    hold_fid = next((fid for fid, name in names.items() if name == col.HOLD), None)
+    held = sum(1 for r in records
+               if hold_fid and cell_text(r.get("fields", {}).get(hold_fid)).strip())
+    print_result([("Rows", len(records), "ok", True),
+                  ("Columns", len(columns), "neutral", True),
+                  ("On hold", held, "attention")])
+    shown = set(names.values())
     missing = [c for c in col.REQUIRED_COLUMNS if c not in shown]
     if col.CATALOG not in shown:
+        print()
         print_status("warning", f"The view has no {col.CATALOG} column - every import "
                                 f"needs it; show it in the view and pull again")
     elif missing:
+        print()
         print_status("warning", f"The view is missing import column(s): {', '.join(missing)} - "
                                 f"fine for --update-only (it changes only the columns present); "
                                 f"--create-records needs all of them")
+    print_saved([("pulled CSV", out_path)])
+    print_next_step([
+        f"Creating records:  python3 {_script('aspace_csv_export.py')} --fill-parents "
+        f"{shlex.quote(os.path.relpath(out_path))} --env production",
+        f"Updating records:  python3 {_script('aspace_csv_import.py')} --update-only -n -f "
+        f"{shlex.quote(os.path.relpath(out_path))} --env production",
+    ])
 
 
 if __name__ == "__main__":
