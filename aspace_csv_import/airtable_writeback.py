@@ -74,7 +74,7 @@ TITLE = "Record import results in Airtable"
 ARGUMENTS = [("REPORT.json", "", "import_report_<stamp>.json from a REAL (not -n) production create run")]
 OPTIONS = [
     ("--run", "", 'Show the plan, ask for "yes", then write (without it: preview only)'),
-    ("--exclude-catalog NUM", "", "Leave this created row out (repeatable) - e.g. a record"),
+    ("--exclude-catalog JPC_AV_xxxxx", "", "Leave this created row out (repeatable) - e.g. a record"),
     ("", "", "deleted in ArchivesSpace since the import"),
     ("--no-color", "", "Disable colored output"),
 ]
@@ -552,11 +552,11 @@ def confirm(report, plan, excluded, review_count):
 
 def build_parser():
     """The command-line parser (module-level so tests can check it against -h)."""
-    parser = styled_parser(["REPORT.json [--run] [--exclude-catalog NUM ...] [--no-color]"],
+    parser = styled_parser(["REPORT.json [--run] [--exclude-catalog JPC_AV_xxxxx ...] [--no-color]"],
                            get_colored_help, [ARGUMENTS, OPTIONS])
     parser.add_argument('report')
     parser.add_argument('--run', action='store_true')
-    parser.add_argument('--exclude-catalog', action='append', default=[], metavar='NUM')
+    parser.add_argument('--exclude-catalog', action='append', default=[], metavar='JPC_AV_xxxxx')
     parser.add_argument('--no-color', action='store_true')
     return parser
 
