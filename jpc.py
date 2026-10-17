@@ -1345,7 +1345,9 @@ def command_help(verb):
     elif spec["aspace"]:
         sections.append(("ENVIRONMENT", f"    {C.RED}{C.BOLD}Production by default{C.RESET} - "
                                         f"unlike the tool itself, which asks for --env.\n"
-                                        f"    Add --env sandbox for the sandbox."))
+                                        f"    Add --env sandbox for the sandbox.\n\n"
+                                        f"    If the requested environment is not configured, the command stops\n"
+                                        f"    (exit 1); it never switches to another environment."))
     exports = str(ROOT / "aspace_csv_import" / "__airtable_exports__")  # as the pull prints it
     style = dict(exports=exports, bold=C.BOLD, cyan=C.CYAN, command=C.GREEN,
                  ready=C.GREEN, review=C.YELLOW, dim=C.DIM, reset=C.RESET,
@@ -1407,7 +1409,10 @@ def overview_help():
         ("ENVIRONMENT", f"""    jpc-check, jpc-fill, jpc-import and jpc-update talk to ArchivesSpace.
     They use {C.RED}{C.BOLD}PRODUCTION{C.RESET} unless you add --env sandbox - on EACH command:
     every one defaults to production on its own. The other two, jpc-pull
-    and jpc-writeback, work on Airtable only and take no --env."""),
+    and jpc-writeback, work on Airtable only and take no --env.
+
+    If the requested environment is not configured, the command stops
+    (exit 1); it never switches to another environment."""),
         ("WORKFLOWS", f"""    These workflows use production. For sandbox work, add --env sandbox
     to every ArchivesSpace command and stop before jpc-writeback.
 
@@ -1450,6 +1455,59 @@ def missing_package():
             "       active, run: python -m pip install -e . in the repo folder")
 
 
+def configured_environments():
+    """The environment names creds.py declares, read by the tools' own
+    loader (aspace_client) - or None when creds.py is missing or broken,
+    which the tool then explains in its own words. Imported here rather
+    than at the top, so help, refusals, jpc-pull and jpc-writeback never
+    load creds.py. Loading it reads its settings, as every tool does; only
+    the names come back, and no setting is ever printed."""
+    try:
+        import aspace_client
+    except Exception:  # e.g. a creds.py that does not parse
+        return None
+    if aspace_client.CONFIG_ERROR or not aspace_client.ENVIRONMENTS:
+        return None
+    return sorted(aspace_client.ENVIRONMENTS)
+
+
+def environment_stop(verb, env, extras):
+    """The message that stops an ArchivesSpace command whose environment is
+    not configured on this computer, or None to go ahead. The target is
+    production unless --env sandbox was given, and it is never switched.
+    A suggested command keeps the flags given (--dry-run stays) but shows
+    each value by its placeholder - errors never echo what was typed."""
+    target = env or "production"
+    names = configured_environments()
+    if names is None or target in names:
+        return None
+    C = Colors
+    spec = COMMANDS[verb]
+    flag, metavar, _ = spec["input"]
+    lines = [f"{C.RED}jpc-{verb}: error: "
+             f"{'production' if target == 'production' else 'the sandbox'} "
+             f"is not set up on this computer.{C.RESET}",
+             f"  creds.py here has: {', '.join(names)}"]
+    if target == "production":
+        if "sandbox" in names:
+            shown, i = [f"jpc-{verb}", flag, metavar], 0
+            while i < len(extras):
+                shown.append(extras[i])
+                if spec["extras"].get(extras[i]):  # a flag with a value: show its placeholder
+                    shown.append(spec["extras"][extras[i]])
+                    i += 1
+                i += 1
+            lines += ["  For the sandbox, run the same command with --env sandbox added:",
+                      f"    {C.GREEN}{' '.join(shown + ['--env', 'sandbox'])}{C.RESET}"]
+        lines += ['  For production access, add a "production" entry to creds.py',
+                  "  (see creds_template.py)."]
+    else:
+        # never suggest dropping --env sandbox: that would point the command at production
+        lines += ['  To use the sandbox, add a "sandbox" entry to creds.py',
+                  "  (see creds_template.py)."]
+    return "\n".join(lines)
+
+
 def refuse(verb, message):
     C = Colors
     prefix = f"jpc-{verb}" if verb else "jpc"
@@ -1475,6 +1533,11 @@ def run(verb, args, execute=os.execv):
     if not requests_available():
         refuse(None, missing_package())
         return 1
+    if COMMANDS[verb]["aspace"]:
+        stop = environment_stop(verb, env, extras)
+        if stop:
+            print(stop, file=sys.stderr)
+            return 1
     argv = build(verb, value, env, extras)
     C = Colors
     if COMMANDS[verb]["aspace"]:

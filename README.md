@@ -166,6 +166,10 @@ their own checks, PLANs and `yes` prompts. `jpc` lists them;
   a sandbox trial needs `--env sandbox` on **every** step - and a sandbox
   import never goes on to `jpc-writeback` (the write-back accepts production
   reports only). The Airtable commands take no `--env`.
+- **A target missing from `creds.py` stops the command.** On a computer set
+  up for the sandbox only, a command without `--env sandbox` stops before
+  anything runs (exit 1), names what `creds.py` has and shows the command
+  with `--env sandbox`; it never switches environments by itself.
 - **Paths are read from the folder you are in.** Pasting the full path a
   tool printed ("Saved pulled CSV: ...") works from anywhere.
 - **Only the flags listed**, in their long form: anything else - a short
