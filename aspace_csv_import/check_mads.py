@@ -183,7 +183,8 @@ def get_colored_help():
     two are never evidence that an item is missing"""),
         ("EXIT", f"""    {C.GREEN}0{C.RESET}  every number got a definite Yes or No
     {C.YELLOW}2{C.RESET}  some checks failed or numbers were invalid (re-run for those), or a bad argument
-    {C.RED}1{C.RESET}  nothing checked: the list could not be read, or the report would overwrite it"""),
+    {C.RED}1{C.RESET}  nothing checked: the list could not be read, or the report would overwrite it;
+       or the checks ran (RESULT shows them) but the report could not be saved"""),
     ])
 
 
@@ -225,15 +226,27 @@ def main():
                      mode="check only - ArchivesSpace is never contacted")
     results = check_many(numbers)
 
+    # Written to a staging file, then moved into place in one step, so a
+    # half-written report never sits under the final name. A failure here
+    # comes after the checks: their RESULT is still shown, and the report is
+    # announced as NOT saved (exit 1).
     checked_at = datetime.now().strftime("%Y-%m-%d %H:%M")
     tmp_path = out_path + ".tmp"
-    with open(tmp_path, "w", newline="", encoding="utf-8") as f:
-        f.write(f"# {RUN_COMMAND} | {checked_at}\n")
-        writer = csv.writer(f)
-        writer.writerow([col.CATALOG, "MADS URL", "MADS live", "Checked"])
-        for cat in numbers:
-            writer.writerow([cat, mads_url(cat), results.get(cat, ""), checked_at])
-    os.replace(tmp_path, out_path)
+    save_error = None
+    try:
+        with open(tmp_path, "w", newline="", encoding="utf-8") as f:
+            f.write(f"# {RUN_COMMAND} | {checked_at}\n")
+            writer = csv.writer(f)
+            writer.writerow([col.CATALOG, "MADS URL", "MADS live", "Checked"])
+            for cat in numbers:
+                writer.writerow([cat, mads_url(cat), results.get(cat, ""), checked_at])
+        os.replace(tmp_path, out_path)
+    except OSError as e:
+        save_error = e
+        try:
+            os.remove(tmp_path)        # a staging file is not a report
+        except OSError:
+            pass
 
     live, not_live, failed = summarize(results)
     invalid = [c for c, s in results.items() if s == "invalid catalog number"]
@@ -250,6 +263,12 @@ def main():
             print_status("warning", "'Check failed' means the check itself errored "
                                     "(network or an odd response) - NOT that the item is "
                                     "absent; re-run for those")
+    if save_error is not None:
+        print_saved([], failed=[("MADS report", out_path)])
+        print_status("error", f"The checks completed (above), but the report could not be "
+                              f"saved: {save_error}")
+        print()
+        sys.exit(1)
     print_saved([("MADS report", out_path)])
     print()
     sys.exit(2 if failed else 0)

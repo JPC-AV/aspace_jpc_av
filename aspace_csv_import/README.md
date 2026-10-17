@@ -677,6 +677,10 @@ Writes `CATALOG_NUMBER, MADS URL, MADS live, Checked` to `~/aspace_mads_reports/
 by default (`<logs_dir>/mads_reports/` when `logs_dir` is set).
 `MADS live` is `Yes`, `No`, `check failed`, or `invalid catalog number` -
 the last two are never evidence of absence.
+Exit 0: every number got a definite Yes or No. Exit 2: some checks failed or
+numbers were invalid (re-run for those). Exit 1: nothing was checked, or the
+checks ran but the report could not be saved - RESULT still shows the counts,
+and the report is listed as NOT saved.
 
 ## Recommended Workflow
 

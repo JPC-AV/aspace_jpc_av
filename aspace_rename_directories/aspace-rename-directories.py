@@ -805,7 +805,9 @@ def apply_folder(client, prep, outcome, fail, dry_run=False, no_update=False, no
 
         # Step 7: Rename the directory (unless --no-rename). Target collision
         # was already checked above. If this fails after the media file was
-        # renamed, roll the file back so the directory is left untouched.
+        # renamed, roll the file back so the directory is left untouched -
+        # unless the folder may have moved (RenameUncertain): its location is
+        # then unknown, so nothing is rolled back and nothing restored.
         if not no_rename:
             dir_target = prep["rename_to"]
             if dry_run:
@@ -815,11 +817,31 @@ def apply_folder(client, prep, outcome, fail, dry_run=False, no_update=False, no
                 writing = "rename"
                 try:
                     rename_no_overwrite(dir_path, dir_target)
+                except RenameUncertain as e:
+                    # The folder may be at either name. A media rollback would
+                    # act on a path that may no longer exist, and "rename it
+                    # back" could be wrong: say where to look, change nothing.
+                    # (writing stays set: a Ctrl-C here is still unknown.)
+                    message = f"Directory rename of {directory} has an unknown outcome: {e}"
+                    logging.error(message)
+                    manual = (f"MANUAL CHECK NEEDED: the folder may be at {dir_path} "
+                              f"(original name) or {dir_target} (new name)")
+                    if mkv_renamed_now:
+                        manual += (f". This run renamed the media file inside it from "
+                                   f"{mkv_filename} to {mkv_target_name} - check the folder's "
+                                   f"name and that media name before rerunning or renaming "
+                                   f"anything.")
+                    else:
+                        manual += " - find it before rerunning."
+                    logging.error(manual)
+                    fail(outcome, message, uncertain=True, manual=manual, log=False)
+                    return
                 except OSError as e:
+                    # a definite failure: the folder did not move
                     writing = None
                     message = f"Directory rename failed for {directory}: {e}"
                     logging.error(message)
-                    uncertain = isinstance(e, RenameUncertain)
+                    uncertain = False
                     manual = str(e) if isinstance(e, PlaceholderLeft) else None
                     if mkv_renamed_now:
                         writing = "rollback"
@@ -1265,7 +1287,8 @@ def rename_and_update_directories(client, target_dir, dry_run=False, no_rename=F
     return counters["failed"]
 
 
-def print_rename_result(report, dry_run, elapsed=None, stopped=False, interrupted=False):
+def print_rename_result(report, dry_run, elapsed=None, stopped=False, interrupted=False,
+                        logout_interrupted=False):
     """FOLDERS (each target once, in one category), CHANGES MADE (confirmed,
     kept changes), the targets that need a person, then the log's path."""
     outcomes = report.get("outcomes", [])
@@ -1317,6 +1340,9 @@ def print_rename_result(report, dry_run, elapsed=None, stopped=False, interrupte
         why = "was interrupted (Ctrl-C)" if interrupted else "stopped on an unexpected error"
         print(f"\n  {Colors.RED}{Colors.BOLD}The run {why} - targets after the last one "
               f"shown were not processed (details in the log){Colors.RESET}")
+    elif logout_interrupted:
+        print(f"\n  {Colors.YELLOW}{Colors.BOLD}Interrupted (Ctrl-C) while logging out, after "
+              f"every folder was processed - the results above stand{Colors.RESET}")
     if dry_run:
         print(f"\n  {Colors.YELLOW}{Colors.BOLD}DRY RUN - nothing written to ArchivesSpace, "
               f"nothing renamed{Colors.RESET}")
@@ -1681,7 +1707,7 @@ def main():
     # Default to a failure if processing raises before returning a count, so an
     # unexpected crash can never look like a clean run.
     failed_count = 1
-    stopped = interrupted = False
+    stopped = interrupted = logout_interrupted = False
     report = {}
     try:
         # Step 2: Process directories and perform updates
@@ -1710,7 +1736,13 @@ def main():
         stopped = True
     finally:
         # Step 3: Ensure logout is always attempted, even if an error occurs.
-        client.logout()
+        # A Ctrl-C during it comes after processing: the outcomes recorded
+        # above stand, and RESULT still shows them (exit 130).
+        try:
+            client.logout()
+        except KeyboardInterrupt:
+            logging.error("Interrupted by operator (Ctrl-C) while logging out")
+            logout_interrupted = True
 
     if report.get("cancelled") or (interrupted and report.get("phase") == "planning"):
         # Nothing was written and nothing renamed - no RESULT, which would
@@ -1720,7 +1752,7 @@ def main():
         print(f"  {Colors.BOLD}Nothing written to ArchivesSpace, nothing renamed.{Colors.RESET}")
         show(print_saved, [("log", LOG_FILE)])
         print()
-        sys.exit(130 if interrupted else 1)
+        sys.exit(130 if interrupted or logout_interrupted else 1)
 
     elapsed_seconds = time.time() - start_time
     hours, remainder = divmod(int(elapsed_seconds), 3600)
@@ -1728,13 +1760,13 @@ def main():
     elapsed_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
     show(print_rename_result, report, args.dry_run, elapsed_str, stopped=stopped,
-         interrupted=interrupted)
+         interrupted=interrupted, logout_interrupted=logout_interrupted)
     show(print_saved, [("log", LOG_FILE)])
     print()
 
     # Non-zero exit when any directory did not finish (failed, partly done or
     # of unknown outcome), so automation/monitoring can detect it.
-    if interrupted:
+    if interrupted or logout_interrupted:
         sys.exit(130)
     sys.exit(1 if failed_count else 0)
 

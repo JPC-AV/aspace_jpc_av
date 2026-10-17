@@ -281,7 +281,11 @@ NEEDS ATTENTION
 **CHANGES MADE** counts only confirmed changes that were kept (a media
 rename that was rolled back is not counted). **NEEDS ATTENTION** names each
 target that did not finish, what was done, the problem, and any manual fix
-(e.g. "Rename it back to ... before rerunning"). For *Partly done* and
+(e.g. "Rename it back to ... before rerunning"). A folder rename that
+reports an error but may have landed is *Outcome unknown*, and nothing is
+rolled back: NEEDS ATTENTION gives both possible folder locations - and,
+with `--rename-media`, the media file's old and new names - to check before
+rerunning. For *Partly done* and
 *Outcome unknown*: inspect the named paths and resolve the reported problem
 before rerunning. A run that finishes processing exits 1 if any target
 failed, is partly done or has an unknown outcome. Ctrl-C exits 130.
@@ -333,6 +337,9 @@ problem: the run stops before the log starts.
   write was under way is marked *Outcome unknown*: compare the record in
   ArchivesSpace and the folder on disk with the PLAN and RESULT before
   rerunning. Exit 130.
+- **While logging out** (after every folder was processed): RESULT still
+  shows every outcome - they stand - and says the run was interrupted while
+  logging out. Exit 130.
 
 The log holds everything up to the interruption.
 
