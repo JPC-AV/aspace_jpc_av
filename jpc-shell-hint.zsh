@@ -28,6 +28,12 @@
 
 typeset -g _JPC_HINT_REPO=${${(%):-%x}:A:h}
 
+# Every jpc command, bare jpc first - the same commands as COMMANDS in
+# jpc.py (a test compares them). One list, for both recognizing a name and
+# finding an install.
+typeset -ga _JPC_HINT_COMMANDS=(jpc jpc-pull jpc-check jpc-fill jpc-import jpc-update
+                                jpc-writeback jpc-rename)
+
 command_not_found_handler() {
   emulate -L zsh
   if [[ $1 == jpc || $1 == jpc-* ]]; then
@@ -76,7 +82,7 @@ _jpc_hint_activate() {
 _jpc_hint_has_any() {
   emulate -L zsh
   local name
-  for name in jpc jpc-pull jpc-check jpc-fill jpc-import jpc-update jpc-writeback; do
+  for name in $_JPC_HINT_COMMANDS; do
     [[ -x $1/bin/$name ]] && return 0
   done
   return 1
@@ -122,7 +128,7 @@ _jpc_hint_conda_envs() {
 _jpc_hint() {
   emulate -L zsh
   local cmd=$1 repo=$_JPC_HINT_REPO
-  local -a known=(jpc jpc-pull jpc-check jpc-fill jpc-import jpc-update jpc-writeback)
+  local -a known=($_JPC_HINT_COMMANDS)
   local active=${VIRTUAL_ENV:-$CONDA_PREFIX}
   local conda=${CONDA_EXE:-$commands[conda]} root=
   [[ -n $conda && -x $conda ]] && root=${conda:A:h:h}
@@ -154,7 +160,8 @@ _jpc_hint() {
       fi
     else
       print -u2 -r -- "$cmd: missing from the active environment, $name, which has the"
-      print -u2 -r -- "  other jpc- commands - an incomplete install. Reinstall from the checkout:"
+      print -u2 -r -- "  other jpc- commands - an older or incomplete install. Reinstall it"
+      print -u2 -r -- "  from the checkout:"
       print -u2 -r -- "    cd ${(q-)repo}"
       print -u2 -r -- "    python -m pip install -e ."
     fi
@@ -207,7 +214,7 @@ _jpc_hint() {
   fi
   if (( $#partial )); then
     print -u2 -r -- "  $cmd itself is missing from $(_jpc_hint_name $partial[1] $root)${partial[2]:+ and others} -"
-    print -u2 -r -- "  an incomplete install. After activating, reinstall from the checkout:"
+    print -u2 -r -- "  an older or incomplete install. After activating, reinstall:"
     print -u2 -r -- "    cd ${(q-)repo}"
     print -u2 -r -- "    python -m pip install -e ."
   fi

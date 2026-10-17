@@ -9,7 +9,7 @@ This repository contains the tools for the Johnson Publishing Company Archive (J
 1. **aspace_csv_import** — Creates and updates item-level archival objects from CSV metadata
 2. **aspace_csv_export** — Exports AV records to an import-shaped CSV (round trip / audit), optionally checking MADS
 3. **check_mads** — Reports which items are live in MADS, the public DAMS delivery
-4. **aspace_rename_directories** — Processes digitized video files, extracts runtime, and updates ArchivesSpace records
+4. **aspace_rename_directories** — Processes digitized video folders: records each runtime in ArchivesSpace and adds the record's ref ID to the folder name
 
 ## Directory Structure
 
@@ -51,7 +51,7 @@ More detailed descriptions of each file and usage in directory-specific README.m
 |------|------------------|-------------|
 | `aspace_client.py` | Backend | Shared API client: credentials loading, one keep-alive session, login/logout, retries, verified lookups, and scope-locked writes. Both main scripts build on it. |
 | `console.py` | Backend | Shared terminal display for every tool: the -h layout, argument-error screen, run header, RESULT block, saved-file lines and colors (`--no-color`). |
-| `jpc.py` | Run via the `jpc-` commands | The short commands for each workflow step (`jpc-pull`, `jpc-check`, `jpc-fill`, `jpc-import`, `jpc-update`, `jpc-writeback`). Each runs one tool with that step's fixed flags; `jpc` lists them. |
+| `jpc.py` | Run via the `jpc-` commands | The short commands for each workflow step (`jpc-pull`, `jpc-check`, `jpc-fill`, `jpc-import`, `jpc-update`, `jpc-writeback`, `jpc-rename`). Each runs one tool with that step's fixed flags; `jpc` lists them. |
 | `pyproject.toml` | One-time setup | Installs the `jpc-` commands into the active environment. |
 | `creds_template.py` | Reference only | Template showing required credential format. Do not edit directly. |
 | `creds.py` | User creates/edits | Your local credentials file. You create this from the template. |
@@ -64,7 +64,7 @@ More detailed descriptions of each file and usage in directory-specific README.m
 | `check_extent_types.py` | Run via command line | Troubleshooting: lists valid extent types in your ASpace instance. The import's dry run already checks formats. |
 | `sheet_rules.py` | Backend | The sheet contract: column names and the validation rules every tool applies. |
 | `docs/*.md` | Reference | Field-mapping contract, a worked example, and the unmapped-column analysis. |
-| `aspace-rename-directories.py` | Run via command line | Main script for processing video directories. |
+| `aspace-rename-directories.py` | Run via command line | Processes digitized video folders: records runtimes in ArchivesSpace and adds ref IDs to folder names. Everyday runs: `jpc-rename`. |
 
 ### Logs and Reports
 
@@ -140,13 +140,18 @@ python -m pip install -e .
 ```
 
 This installs `jpc`, `jpc-pull`, `jpc-check`, `jpc-fill`, `jpc-import`,
-`jpc-update` and `jpc-writeback`, and the one package the tools need
+`jpc-update`, `jpc-writeback` and `jpc-rename`, and the one package the tools need
 (`requests`), into the **active environment only**, whatever its name. The
 commands exist whenever that environment is active; another environment
 needs its own install. The `-e` (editable) matters: the commands run the tools in this
 folder, so `git pull` keeps them current - reinstall only when a command is
 added or renamed. (`pip install -r requirements.txt` installs just
 `requests`, for running the tools directly without the commands.)
+
+**After a pull that adds a command** - `jpc-rename` is the newest - run the
+install again, once in each environment that has the commands. The
+reinstall is what creates the new command: until then the shell answers
+"command not found" (with the hint on, it says to reinstall).
 
 ### 4. Configure credentials
 
@@ -214,6 +219,11 @@ then does it look - at the environments Conda lists and at the checkout's
 `~/.zshrc` already defines a `command_not_found_handler`, that one stays
 and the hint stays off.
 
+**After a `git pull`** the hint file is current, but a Terminal that was
+already open keeps the hint it loaded. Open a new Terminal to use the
+revised hint; the `~/.zshrc` line stays as it is. (A new command still needs
+the reinstall in step 3 - the new Terminal only reloads the hint.)
+
 ### 6. Check the setup
 
 Open a new Terminal, go to a folder outside the checkout (`cd ~`), activate
@@ -258,13 +268,19 @@ their own checks, PLANs and `yes` prompts. `jpc` lists them;
 | `jpc-import --file FILE [--dry-run] [--keep-going]` | `aspace_csv_import.py --create-records --file FILE --env production` |
 | `jpc-update --file FILE [--dry-run]` | `aspace_csv_import.py --update-only --file FILE --env production` |
 | `jpc-writeback --report REPORT.json [--run] [--exclude-catalog JPC_AV_xxxxx]...` | `airtable_writeback.py REPORT.json` |
+| `jpc-rename --directory PATH [--dry-run] [--mp4]` | `aspace-rename-directories.py -d PATH --env production` |
 
 - **Production by default** for the commands that talk to ArchivesSpace,
-  shown before anything runs; add `--env sandbox` for the sandbox. (The tools
-  themselves ask for `--env` every time.) Each command decides on its own, so
-  a sandbox trial needs `--env sandbox` on **every** step - and a sandbox
-  import never goes on to `jpc-writeback` (the write-back accepts production
-  reports only). The Airtable commands take no `--env`.
+  shown before anything runs; add `--env sandbox` for the sandbox. (Direct
+  tools require `--env` when several environments are configured.) Each
+  command decides on its own, so a sandbox trial needs `--env sandbox` on
+  **every** step - and a sandbox import never goes on to `jpc-writeback`
+  (the write-back accepts production reports only). The Airtable commands
+  take no `--env`.
+- **`jpc-rename` renames the real folders in either environment.**
+  `--env sandbox` changes only which ArchivesSpace it reads and writes; the
+  folders on disk are renamed all the same, with the sandbox records' ref
+  IDs. Try the sandbox only on disposable copies of the folders.
 - **A target missing from `creds.py` stops the command.** On a computer set
   up for the sandbox only, a command without `--env sandbox` stops before
   anything runs (exit 1), names what `creds.py` has and shows the command
@@ -278,8 +294,8 @@ their own checks, PLANs and `yes` prompts. `jpc` lists them;
 - Each command prints the exact tool command it runs, then hands over: the
   tool's prompts, Ctrl-C and exit code are its own. The tools' own NEXT STEP
   lines keep printing the long commands, which always work too.
-- Export, MADS and directory processing have no `jpc-` command yet; run
-  those tools directly.
+- Export and the MADS check have no `jpc-` command yet; run those tools
+  directly.
 
 ## Scripts
 
@@ -326,21 +342,20 @@ All of these are documented in [aspace_csv_import/README.md](aspace_csv_import/R
 
 ### aspace_rename_directories
 
-Processes digitized video directories to extract runtime from MKV files via `mediainfo`, update ArchivesSpace records with duration (added as a Defined List subnote to the Physical Characteristics and Technical Requirements note) and physical details, and rename directories with ref_ids.
+Processes digitized video folders: reads each media file's runtime with `mediainfo` (`.mkv`, or optical-disc `.mp4` with `--mp4`), writes it to the record's Duration (a Defined List subnote of the Physical Characteristics and Technical Requirements note), fills a blank physical details on a single-extent record, and renames each folder with the record's ref ID. A real run first shows a PLAN of every change and writes only after you type `yes`; each folder is checked again just before it is written. A dry run shows each folder's outcome, leaves ArchivesSpace and folder names unchanged, and saves a log.
 
 ```bash
-cd aspace_rename_directories
-python3 aspace-rename-directories.py -d /path/to/videos --dry-run
+jpc-rename --directory /path/to/videos --dry-run
 ```
 
-See [aspace_rename_directories/README.md](aspace_rename_directories/README.md) for full documentation.
+`jpc-rename` (see [Commands](#commands)) is the everyday run. The tool run directly also offers `--single`, `--rename-media`, `--no-update` and `--no-rename`. See [aspace_rename_directories/README.md](aspace_rename_directories/README.md) for full documentation.
 
 ## Workflow
 
 Typical usage order:
 
 1. **CSV Import** — Create archival objects from catalog metadata (validate, check parents and formats, dry run, real run)
-2. **Directory Processing** — After digitization, extract runtime and update records; folders gain the ref ID
+2. **Directory Processing** (`jpc-rename`) — After digitization: a dry run, then the real run (PLAN, then `yes`) records each runtime and gives each folder its ref ID
 3. **DAMS ingest** — Outside these tools; MADS publishes the item within about a day
 4. **Export / MADS check** — Any time: pull records to a CSV for auditing or round-trip edits, and see which items are live in MADS
 

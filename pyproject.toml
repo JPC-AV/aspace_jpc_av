@@ -29,6 +29,7 @@ jpc-fill = "jpc:fill"
 jpc-import = "jpc:import_"
 jpc-update = "jpc:update"
 jpc-writeback = "jpc:writeback"
+jpc-rename = "jpc:rename"
 
 [tool.setuptools]
 py-modules = ["jpc"]

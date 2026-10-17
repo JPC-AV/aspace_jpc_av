@@ -7,16 +7,42 @@ This script automates two tasks for digitized AV assets from the JPC Archive:
 1. **Updates ArchivesSpace records** with duration and physical details extracted from or confirmed by the digitized media file (`.mkv` by default; `--mp4` for optical-disc transfers).
 2. **Renames directories** to append the ArchivesSpace `ref_id` for tracking and DAMS ingest.
 
+## Two Ways to Run It
+
+| | `jpc-rename` (everyday runs) | The tool run directly |
+|---|---|---|
+| Setup | The root README's [Setup](../README.md#setup), which installs the command | The same `creds.py`, plus `requests` (`pip install -r requirements.txt` in the repo root) |
+| Where | Any folder | `python3 aspace-rename-directories.py ...` from this folder (`aspace_rename_directories/`) |
+| Environment | Production unless you add `--env sandbox` | `--env NAME` is required when `creds.py` has several environments (no default); with one, it is used automatically |
+| Input | `--directory PATH` | `-d PATH`, or `--single PATH [PATH ...]` |
+| Options | `--dry-run`, `--mp4`, `--no-color`, `--env sandbox` | Every option below |
+
+Either way, `mediainfo` must be installed (see Prerequisites), and
+**`--env sandbox` changes only which ArchivesSpace is used**: a real sandbox
+run still renames the real folders, with the sandbox records' ref IDs. Try
+the sandbox only on disposable copies of the folders.
+
 ## What It Does
 
-For each `JPC_AV_*` directory, the script:
+For each folder named exactly `JPC_AV_<digits>` directly inside the given folder (nothing deeper is searched), the script:
 
 1. Resolves the directory's Component Unique Identifier (e.g., `JPC_AV_00001`) to exactly one verified ArchivesSpace record — each search candidate is fetched and must match the identifier exactly within the AV resource. Zero matches, multiple matches, or a failed search all fail the directory with a message saying which it was.
 2. Extracts the runtime of the media file using `mediainfo`. The directory must contain exactly one media file of the selected format, named after the directory — zero, several, or a mismatched name fail the directory rather than guessing which file's runtime to record. (In `--mp4` mode the media lives in the `access_<name>/` subdirectory — see below.)
-3. Updates the ArchivesSpace record **only if something changed** (otherwise it's counted as `Unchanged` and nothing is written):
+3. Updates the ArchivesSpace record **only if something changed** (otherwise it is counted as already correct and nothing is written):
    - Sets Duration in the Physical Characteristics and Technical Requirements note — existing Duration entries are updated in place (in every phystech note, preserving neighboring items), or a Defined List subnote is added if none exists.
    - Fills a **blank** `physical_details` with `SD video, color, sound` on single-extent records — existing values are never overwritten, so manual corrections survive reruns; multi-extent records are left for staff.
 4. Renames the directory to append `_refid_<ref_id>`.
+
+**A real run asks first.** Every folder is first worked out with reads
+only (the record, the media file, the runtime, and what step 3 would
+change). A PLAN then shows every change - each current and new Duration,
+the physical details fill, the new folder name - and every refused folder
+with its reason. Only `yes` writes; anything else, Ctrl-C at
+the prompt included, cancels with nothing written and nothing renamed. Only
+the planned folders are then processed, each read again just before it is
+written and refused if its planned changes no longer match. A dry run
+(`--dry-run`) shows each folder's outcome, leaves ArchivesSpace and folder
+names unchanged, and saves a log.
 
 ## Directory Structure
 
@@ -40,78 +66,67 @@ JPC_AV_00001_refid_b645fa3ffd01ad7364c9658f83fdceda/
 
 ## Prerequisites
 
-- Python 3.8 or higher
-- `mediainfo` CLI tool installed and on your system PATH
-- Required Python packages:
-  ```bash
-  pip install requests
-  ```
-- `creds.py` configured at the repository root (see Installation)
+- `mediainfo` CLI tool installed and on your system PATH - it reads the runtimes
+- Everything else - Python, the `jpc-` commands, `requests` and `creds.py` - comes from the root README's [Setup](../README.md#setup)
 
 ## Installation
 
-1. Copy the credentials template (both files live at the repository root)
-   and add your credentials:
-   ```bash
-   cp creds_template.py creds.py
-   ```
-
-2. Edit `creds.py` - credentials live inside an `environments` dict, one
-   entry per ArchivesSpace instance (the template ships with the sandbox
-   filled in and production commented out):
-   ```python
-   environments = {
-       "sandbox": {
-           "baseURL": "https://api-jpcsb.as.atlas-sys.com",
-           "user": "your_username",
-           "password": "your_password",
-           "repo_id": "2",
-           "resource_id": "7",
-           "staff_url": "https://staff-jpcsb.as.atlas-sys.com",
-       },
-   }
-   logs_dir = ""  # Optional: parent folder for every tool's reports
-   ```
-   With one environment configured it is selected automatically; with
-   several, every run must pass `--env NAME` (there is no default - a
-   forgotten flag can never mean production).
-
-   `creds.py` is already in `.gitignore`; never commit or share it.
+Follow the root README's [Setup](../README.md#setup): it installs
+`jpc-rename` with the other `jpc-` commands and explains `creds.py`. For
+direct runs, `creds.py` and `requests` are all the tool needs; it picks the
+environment as described in [Two Ways to Run It](#two-ways-to-run-it).
 
 ## Usage
 
+Everyday runs, from any folder (production unless you add `--env sandbox`):
+
 ```bash
-# Process all JPC_AV_* subdirectories in a folder
-python3 aspace-rename-directories.py -d /path/to/videos
+# Dry run - each folder's outcome; ArchivesSpace and folder names unchanged
+jpc-rename --directory /path/to/videos --dry-run
 
-# Process specific directories directly
-python3 aspace-rename-directories.py --single /path/to/JPC_AV_00001
-python3 aspace-rename-directories.py --single /path/to/JPC_AV_00001 /path/to/JPC_AV_00002
+# Real run - the PLAN, then type yes
+jpc-rename --directory /path/to/videos
 
-# Dry run — preview changes without making them
-python3 aspace-rename-directories.py -d /path/to/videos --dry-run
+# Optical-disc .mp4 transfers instead of .mkv
+jpc-rename --directory /path/to/discs --mp4
+```
+
+The tool run directly, from this folder, naming the environment
+(`--env sandbox` for the sandbox):
+
+```bash
+cd ~/github/jpc/aspace_jpc_av/aspace_rename_directories
+
+# Process all JPC_AV_<digits> folders directly inside a folder
+python3 aspace-rename-directories.py -d /path/to/videos --env production
+
+# Process specific folders, named one by one
+python3 aspace-rename-directories.py --single /path/to/JPC_AV_00001 /path/to/JPC_AV_00002 --env production
+
+# Dry run
+python3 aspace-rename-directories.py -d /path/to/videos --env production --dry-run
 
 # Update ASpace records only, skip directory renaming
-python3 aspace-rename-directories.py -d /path/to/videos --no-rename
+python3 aspace-rename-directories.py -d /path/to/videos --env production --no-rename
 
 # Rename directories only, skip ASpace record updates
-python3 aspace-rename-directories.py -d /path/to/videos --no-update
+python3 aspace-rename-directories.py -d /path/to/videos --env production --no-update
 
 # Also rename the media file to include ref_id (.mkv batches only)
-python3 aspace-rename-directories.py -d /path/to/videos --rename-media
-
-# Process optical-disc .mp4 transfers instead of .mkv
-python3 aspace-rename-directories.py -d /path/to/discs --mp4
+python3 aspace-rename-directories.py -d /path/to/videos --env production --rename-media
 
 # Enable debug logging
-python3 aspace-rename-directories.py -d /path/to/videos --verbose
+python3 aspace-rename-directories.py -d /path/to/videos --env production --verbose
 ```
 
 ## Command-Line Options
 
+`jpc-rename` takes only `--directory`, `--dry-run`, `--mp4`, `--no-color` and
+`--env sandbox`; the rest are for direct runs.
+
 | Option | Description |
 |--------|-------------|
-| `-d, --directory PATH` | Target directory containing `JPC_AV_*` subdirectories **(required unless `--single`)** |
+| `-d, --directory PATH` | The folder holding the `JPC_AV_<digits>` folders (only those directly inside are processed) **(required unless `--single`)** |
 | `--single PATH [PATH ...]` | Process specific directories directly (not their subdirectories) |
 | `-n, --dry-run` | Preview changes without executing |
 | `--mp4` | Process optical-disc `.mp4` transfers instead of the default `.mkv` (see below) |
@@ -142,7 +157,14 @@ JPC_AV_14180/
 
 - The runtime is extracted from `access_<name>/<name>.mp4`; the record update (Duration, `physical_details`) is identical to `.mkv` runs.
 - **Only the top-level directory is renamed.** The manifests record the inner filenames and paths, so nothing inside the structure is ever renamed — `--rename-media` is rejected in `--mp4` mode.
-- **Multi-title discs** (`<name>_title01.mp4`, `_title02.mp4`, ... instead of a single `<name>.mp4`) have no single runtime and are failed with a clear message for manual handling.
+- **Multi-title discs** (`<name>_title02.mp4`, `_title03.mp4`, ... beside or instead of `<name>.mp4`) have no single runtime. They are refused on every run - running again never finishes one - and handled by hand:
+  1. Complete the record's work by hand in ArchivesSpace, following the manual (4.D.iv).
+  2. Then rename just that folder with the tool run directly. `--no-update` skips **all** record updates (it reads no media file and writes nothing to the record), which is why the record work comes first; once renamed, the folder is excluded from later runs.
+     ```bash
+     cd ~/github/jpc/aspace_jpc_av/aspace_rename_directories
+     python3 aspace-rename-directories.py --single /path/to/JPC_AV_14180 --no-update --mp4 --env production
+     ```
+     It checks the record, shows a PLAN with the new folder name and asks for `yes`.
 - A directory without an `access_<name>/` subdirectory (incomplete transfer) is failed, not skipped.
 
 ## ArchivesSpace Updates
@@ -177,7 +199,8 @@ Filled when the record has a **single extent** whose `physical_details` is blank
 
 ## Output
 
-The screen opens with what the run will do, shows each folder's steps, and
+The screen opens with what the run will do. A real run then shows the
+PLAN and asks; after `yes` it shows each folder's steps under WRITING and
 ends with the result:
 
 ```
@@ -188,7 +211,31 @@ Update ArchivesSpace and rename AV folders
   Mode:    update ArchivesSpace records + rename folders
   Media:   .mkv  (JPC_AV_00001/JPC_AV_00001.mkv)
 
+[>] Successfully authenticated with ArchivesSpace
 [>] Found 53 directories to process
+
+------------------------------------------------------------
+PLAN - what this run will change (nothing written yet)
+------------------------------------------------------------
+
+  JPC_AV_00001
+    update   Duration (none) -> 01:15:42
+    rename   folder -> JPC_AV_00001_refid_b645fa3ffd01ad7364c9658f83fdceda
+...
+  JPC_AV_04144
+    refused  2 media files found (JPC_AV_04144.mkv, JPC_AV_04144_v2.mkv) - expected exactly one - left as it is
+
+  Records:  50 to update, 2 already up to date (not rewritten)
+  Folders:  52 to rename
+  Refused:  1 (left as they are - see the PLAN)
+
+  About to write to ArchivesSpace (PRODUCTION) and rename folders
+
+  Type yes to go ahead, anything else to cancel: yes
+
+------------------------------------------------------------
+WRITING
+------------------------------------------------------------
 
 JPC_AV_00001
   [>] RefID: b645fa3ffd01ad7364c9658f83fdceda, Archival Object ID: 12345
@@ -214,7 +261,7 @@ CHANGES MADE
 NEEDS ATTENTION
 ------------------------------------------------------------
   JPC_AV_04144  failed
-      JPC_AV_04144: 2 media files found - expected exactly one. Skipping.
+      JPC_AV_04144: 2 media files found (JPC_AV_04144.mkv, JPC_AV_04144_v2.mkv) - expected exactly one. Skipping.
 
   Saved log:  /Users/you/aspace_rename_reports/rename_20260930_101500.log
 ```
@@ -229,26 +276,40 @@ NEEDS ATTENTION
 | Partly done | Some changes were made and kept, others were not - e.g. the record was updated but the folder could not be renamed |
 | Failed | It did not finish, and nothing it changed was kept |
 | Outcome unknown | A step's result is uncertain - an update whose reply was lost, or a rename that reported an error but may have landed |
+| Not reached (the run stopped) | The run stopped - Ctrl-C or an unexpected error - before this target was processed |
 
 **CHANGES MADE** counts only confirmed changes that were kept (a media
 rename that was rolled back is not counted). **NEEDS ATTENTION** names each
 target that did not finish, what was done, the problem, and any manual fix
 (e.g. "Rename it back to ... before rerunning"). For *Partly done* and
 *Outcome unknown*: inspect the named paths and resolve the reported problem
-before rerunning. Any Failed, Partly done or Outcome unknown target makes
-the run exit 1.
+before rerunning. A run that finishes processing exits 1 if any target
+failed, is partly done or has an unknown outcome. Ctrl-C exits 130.
 
-A dry run (`-n`) says *Would be done* and *Would update / Would rename*
-instead, and changes nothing.
+A dry run (`-n`) has no PLAN and no prompt: it shows each folder's
+outcome - *Would update ArchivesSpace record*, *Would rename directory* -
+and a result that says *Would be done*. ArchivesSpace and folder names stay
+unchanged, and the log is saved.
+
+RESULT appears after folder processing. A run cancelled at the prompt shows
+none - it says nothing was written or renamed - and a run stopped by a login
+problem or a missing folder shows the error and no RESULT.
+
+**Exit codes:** `0` every folder done or already up to date (or none found);
+`1` some folders refused, failed, partly done or of unknown outcome - or the
+run stopped before writing (a `creds.py` or login problem, a missing folder,
+or cancelled at the prompt); `2` an argument was rejected, nothing done;
+`130` interrupted with Ctrl-C (see below).
 
 ### Log file
 
-Every run - dry runs too - writes a log to `~/aspace_rename_reports/`
-(or `rename_reports/` under `logs_dir` in `creds.py`). It holds every
+A run writes a log to `~/aspace_rename_reports/` (or `rename_reports/`
+under `logs_dir` in `creds.py`) - dry runs and cancelled runs too. It holds every
 message with a timestamp, the command, the header and the result, the full
 folder list, the shared client's messages, and the full detail of any
 unexpected error (the screen shows one line and says the detail is in the
-log). Nothing is created for `-h` or an argument mistake.
+log). Nothing is created for `-h`, an argument mistake or a `creds.py`
+problem: the run stops before the log starts.
 
 ```
 2026-09-30 10:15:02,118 [INFO] Command: python3 aspace-rename-directories.py -d /Volumes/Drive/one_inch
@@ -261,16 +322,26 @@ log). Nothing is created for `-h` or an argument mistake.
 2026-09-30 10:15:07,123 [INFO] Directory renamed to: JPC_AV_00001_refid_b645fa3ffd01ad7364c9658f83fdceda
 ```
 
-**Ctrl-C:** an interrupted run stops without the FOLDERS / CHANGES MADE
-result. The log file holds everything up to the interruption - read it to
-see which folders were finished.
+**Ctrl-C:**
+
+- **While planning** (before the prompt): nothing has been written. The run
+  says "Interrupted while planning" and exits 130.
+- **At the prompt:** a cancel, like any answer but `yes` - nothing written
+  or renamed, no RESULT, exit 1.
+- **While writing:** the run stops and RESULT reports how far it got - the
+  folders done, the one interrupted, and those not reached. A folder whose
+  write was under way is marked *Outcome unknown*: compare the record in
+  ArchivesSpace and the folder on disk with the PLAN and RESULT before
+  rerunning. Exit 130.
+
+The log holds everything up to the interruption.
 
 ## Notes
 
 - The script matches directories to ArchivesSpace records using the Component Unique Identifier field (`component_id`); every search candidate is fetched and verified as an exact match within the AV resource.
 - If multiple verified matches exist for one identifier, the directory FAILS with a clean-up-duplicates message — the script never picks one arbitrarily.
 - A failed search (network/server error) is reported as such, distinct from "no record found", and fails the directory so it is retried on a later run.
-- Directory names must be exactly `JPC_AV_<digits>`; anything else (including already-renamed `_refid_` directories) is not processed.
+- Directory names must be exactly `JPC_AV_<digits>`; anything else (including already-renamed `_refid_` directories) is not processed. Only folders directly inside `-d` are checked - nothing deeper.
 - If `.mkv` extraction or API updates fail for a directory, the script logs the error and moves on to the next directory.
 - Authentication is always required, even when using `--no-update`, because the ArchivesSpace lookup for `ref_id` is needed for renaming.
 - `--no-update` renames directories **without** requiring a media file. A directory renamed this way (e.g. before its transfer finished) gets the `_refid_` suffix and is therefore **excluded from all future runs** — its record will never receive a Duration unless you process it manually. Only use `--no-update` on directories whose records are already up to date.

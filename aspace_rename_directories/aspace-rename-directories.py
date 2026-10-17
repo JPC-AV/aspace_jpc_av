@@ -3,6 +3,7 @@ ASpace phystech (Physical Characteristics and Technical Requirements) note, and
 renames directories to include the record's ref_id."""
 
 import contextlib  # capturing a screen block so the log file gets it too
+import copy  # the record to write is built on a copy of the one read
 import io  # in-memory buffer for that capture
 import os  # Library for interacting with the operating system (e.g., files, directories)
 import stat  # S_ISREG for the manifest scan
@@ -175,8 +176,11 @@ def get_colored_help():
        {C.DIM}(existing values kept; single-extent records only){C.RESET}
     {C.GREEN}3.{C.RESET} Renames the folder to JPC_AV_<digits>_refid_<ref_id>
 
-    The record is updated before anything is renamed, and nothing is renamed
-    when the update fails. Every message goes to a timestamped log file."""),
+    A real run first shows the PLAN - every change, folder by folder - and
+    writes only after you type yes; each folder is checked again just
+    before it is written. The record is updated before anything is renamed,
+    and nothing is renamed when the update fails. Every message goes to a
+    timestamped log file."""),
         ("USAGE", f"""    {C.GREEN}${C.RESET} python3 aspace-rename-directories.py -d PATH [options]
     {C.GREEN}${C.RESET} python3 aspace-rename-directories.py --single PATH [PATH ...] [options]"""),
         ("OPTIONS", render_options(TARGET_OPTIONS) + "\n" + render_options(OPTIONS)),
@@ -193,8 +197,11 @@ def get_colored_help():
               {C.DIM}every message, timestamped - dry runs too; logs_dir in creds.py moves it{C.RESET}"""),
         ("EXIT", f"""    {C.GREEN}0{C.RESET}  every folder done or already up to date (or none found)
     {C.RED}1{C.RESET}  some folders failed, are partly done or have an unknown outcome;
-       or a creds.py or login problem
-    {C.YELLOW}2{C.RESET}  a bad argument or combination - nothing was done"""),
+       or a creds.py or login problem; or cancelled at the yes prompt
+       (nothing written, nothing renamed)
+    {C.YELLOW}2{C.RESET}  a bad argument or combination - nothing was done
+    {C.YELLOW}130{C.RESET} interrupted (Ctrl-C) - while planning nothing was written; after
+       writing began, RESULT shows what each folder reached"""),
     ])
 
 
@@ -564,9 +571,431 @@ def outcome_category(outcome, dry_run):
     return "done" if outcome["done"] else "current"
 
 
+def plan_folder(client, parent_path, directory, fmt, no_update=False, no_rename=False,
+                rename_mkv=False, verbose=False):
+    """Every read and check one folder needs before anything is written:
+    (prep, None), or (None, problem). Read-only either way. The PLAN and
+    the recheck just before writing both come from here, so what was shown
+    and what gets written are worked out the same way.
+
+    prep holds the verified record (ref_id, object id), the media file and
+    its runtime, the Duration values the record holds now (every Duration
+    item, in every phystech note), the physical_details before the fill,
+    what would change, the record to write (built from the record fetched
+    HERE, never from an earlier fetch), and the new folder (and media
+    file) names. --no-update skips the runtime and the record fetch;
+    --no-rename skips the rename-target checks."""
+    dir_path = os.path.join(parent_path, directory)
+    prep = {"directory": directory, "parent": parent_path, "dir_path": dir_path,
+            "refid": None, "object_id": None, "media": None, "runtime": None,
+            "durations": (), "details": (), "needs_duration": False, "fills": 0,
+            "write": False, "updated": None, "rename_to": None, "media_rename_to": None}
+
+    # Step 1: Resolve the ArchivesSpace record (needed for both rename and update)
+    refid, archival_object_id, problem = get_refid(client, directory)
+    if problem:
+        return None, f"Could not resolve {directory}: {problem}. Skipping."
+    logging.info(f"RefID: {refid}, Archival Object ID: {archival_object_id}")
+    prep.update(refid=refid, object_id=archival_object_id)
+
+    # Step 2: Locate THE media file if we'll need it (duration and/or mkv rename).
+    # Rename-only mode (--no-update) does NOT require a media file or mediainfo.
+    # Exactly one candidate is required - guessing among several could write
+    # the wrong file's runtime to the record.
+    if (not no_update) or (rename_mkv and not no_rename):
+        mkv_filename, media_problem = find_media_file(
+            dir_path, extensions=fmt["extensions"], media_subdir=fmt["media_subdir"])
+        if media_problem:
+            return None, f"{directory}: {media_problem}. Skipping."
+        prep["media"] = mkv_filename
+
+    # Step 3: Precompute rename targets and collision-check BEFORE any write,
+    # so a rename can never half-complete after the record was already updated.
+    if not no_rename:
+        dir_target = os.path.join(parent_path, f"{directory}_refid_{refid}")
+        # lexists, not exists: a DANGLING symlink at the target would
+        # pass exists() and then be silently replaced by os.rename.
+        if os.path.lexists(dir_target):
+            return None, (f"Target directory already exists, refusing to overwrite: "
+                          f"{os.path.basename(dir_target)}. Skipping.")
+        prep["rename_to"] = dir_target
+        if rename_mkv and prep["media"]:
+            mkv_filename = prep["media"]
+            base, ext = os.path.splitext(mkv_filename)
+            mkv_target_name = f"{base}_refid_{refid}{ext}"
+            if os.path.lexists(os.path.join(dir_path, mkv_target_name)):
+                return None, (f"Target .mkv already exists, refusing to overwrite: "
+                              f"{mkv_target_name}. Skipping.")
+            try:
+                manifests = checksum_manifests_naming(dir_path, mkv_filename)
+            except OSError as e:
+                return None, (f"Refusing --rename-media for {directory}: could not "
+                              f"inspect checksum manifests ({e}). Skipping.")
+            if manifests:
+                # A checksum manifest lists the media by NAME; renaming
+                # the file would orphan that entry and break any
+                # filename-based verification downstream. Rewriting
+                # manifests is not implemented (no workflow uses
+                # --rename-media with manifests yet) - refuse, and
+                # say what would have to happen.
+                return None, (f"Refusing --rename-media for {directory}: "
+                              f"{', '.join(manifests)} reference {mkv_filename} by name "
+                              f"and would be orphaned by the rename. Drop --rename-media "
+                              f"for this folder, or regenerate the manifest after renaming "
+                              f"by hand. Skipping.")
+            prep["media_rename_to"] = mkv_target_name
+
+    if no_update:
+        return prep, None
+
+    # Step 4: Extract runtime. A failed/unparseable read returns None - never
+    # write a bogus 00:00:00. Skip the whole directory so it keeps its
+    # original name and is retried later.
+    mkv_path = os.path.join(dir_path, prep["media"])
+    if verbose:
+        logging.debug(f"Full MKV path: {mkv_path}")
+    video_duration = get_video_duration(mkv_path)
+    if video_duration is None:
+        return None, (f"Could not extract a valid runtime from {prep['media']}. "
+                      f"Skipping directory (no update, no rename).")
+    logging.info(f"Extracted runtime: {video_duration} for file: {prep['media']}")
+    prep["runtime"] = video_duration
+
+    # Step 5: Fetch the record and work out the change. A dry run does the
+    # same fetch and change detection as a real run - GETs are safe, and a
+    # dry run that just claims "would update" without looking at the record
+    # hides both no-op rows and problems that only surface at comparison time.
+    archival_object_data = fetch_archival_object(client, archival_object_id)
+    if not archival_object_data:
+        return None, f"Failed to fetch archival object for ID: {archival_object_id}. Skipping."
+    # The lookup verified ONE record; this second fetch must be that
+    # same record - same uri, resource, catalog number, item level
+    # and ref_id - before anything is modified or renamed after it.
+    # A malformed or stale response is enough to fail this; no
+    # concurrent writer is required.
+    problem = record_identity_problem(archival_object_data, archival_object_id,
+                                      directory, refid)
+    if problem:
+        return None, f"Refusing to update {directory}: re-fetched record {problem}"
+    prep["durations"] = tuple(item.get("value") for item in _iter_duration_items(archival_object_data))
+    prep["details"] = tuple(e.get("physical_details") if isinstance(e, dict) else e
+                            for e in archival_object_data.get("extents") or [])
+    # Change detection: only write when something actually changes.
+    # Rewriting an already-correct record churns lock_versions and hides
+    # what a run really did. The changes go onto a COPY: planning only
+    # reads, and the record as fetched stays exactly as it was.
+    needs_duration = duration_needs_update(archival_object_data, video_duration)
+    updated_data = copy.deepcopy(archival_object_data)
+    if fmt["fill_physical_details"]:
+        updated_data, filled_details = set_extent_physical_details(updated_data)
+    else:
+        # Audio formats: the video default would mislabel the
+        # record - staff curate physical_details for those.
+        filled_details = 0
+    if needs_duration:
+        updated_data = modify_phystech_note(updated_data, video_duration)
+    prep.update(needs_duration=needs_duration, fills=filled_details,
+                write=bool(needs_duration or filled_details), updated=updated_data)
+    return prep, None
+
+
+# What the PLAN showed for one folder; the recheck before writing must match
+# it exactly, or the folder is refused.
+PLAN_KEYS = ("object_id", "refid", "media", "runtime", "durations", "details",
+             "needs_duration", "fills", "rename_to", "media_rename_to")
+
+
+def plan_signature(prep):
+    return tuple(prep[key] for key in PLAN_KEYS)
+
+
+WRITE_WORDS = {"update": "ArchivesSpace update", "media": "media file rename",
+               "rename": "folder rename"}
+WRITE_PLACES = {"update": "in ArchivesSpace", "media": "on disk", "rename": "on disk"}
+# `writing` names the step in flight. It is cleared only AFTER the step is
+# recorded as done, so a Ctrl-C anywhere in between reads as UNKNOWN (the
+# safe side), never as "not done".
+
+
+def apply_folder(client, prep, outcome, fail, dry_run=False, no_update=False, no_rename=False):
+    """Carry out one prepared folder: update the record, then rename the
+    media file (with --rename-media), then the folder. The outcome records
+    what was done. A Ctrl-C is recorded on the outcome before it stops the
+    run: during a write the result is unknown; between writes the folder is
+    partly done (or untouched); during the rollback of a media rename the
+    file's name is unknown."""
+    directory, dir_path = prep["directory"], prep["dir_path"]
+    archival_object_id = prep["object_id"]
+    writing = None
+    old_mkv_path = new_mkv_path = None
+    try:
+        # Step 5: Update ASpace record (unless --no-update).
+        if not no_update:
+            changes = []
+            if prep["needs_duration"]:
+                changes.append(f"Duration -> {prep['runtime']}")
+            if prep["fills"]:
+                changes.append(f"physical_details -> '{PHYSICAL_DETAILS_DEFAULT}' "
+                               f"on {prep['fills']} blank extent(s)")
+            if not prep["write"]:
+                logging.info(f"Record already up to date for {directory} "
+                             f"(Duration and physical_details unchanged) - nothing written")
+                outcome["unchanged"] = True
+            elif dry_run:
+                logging.info(f"Would update ArchivesSpace record: {'; '.join(changes)}")
+                outcome["done"].append("update")
+            else:
+                # None is the failure signal; a 200 with an empty body is
+                # still a success (the shared client already treats it so).
+                writing = "update"
+                result = update_archival_object(client, archival_object_id, prep["updated"])
+                if result is None:
+                    if client.last_failure_definitive:
+                        fail(outcome, f"ArchivesSpace rejected the update for "
+                                      f"{archival_object_id}. Skipping (nothing renamed).")
+                    else:
+                        fail(outcome, f"Update outcome UNKNOWN for {archival_object_id} "
+                                      f"(timeout/lost response) - the write may have "
+                                      f"committed; verify in ArchivesSpace. Nothing renamed.",
+                             uncertain=True)
+                    return
+                outcome["done"].append("update")
+                writing = None
+                logging.info(f"ArchivesSpace record updated: {'; '.join(changes)}", extra=OK)
+
+        # Step 6: Rename the media file FIRST (if --rename-mkv), then the
+        # directory. This order fails loudly if interrupted: a refid-
+        # stamped file inside a not-yet-renamed directory makes the next
+        # run report "no media file found" (a counted failure), whereas
+        # renaming the directory first meant a media rename failure left a
+        # refid directory that later runs silently skipped as done.
+        mkv_filename, mkv_target_name = prep["media"], prep["media_rename_to"]
+        mkv_renamed_now = False
+        if mkv_target_name and not no_rename:
+            old_mkv_path = os.path.join(dir_path, mkv_filename)
+            new_mkv_path = os.path.join(dir_path, mkv_target_name)
+            if dry_run:
+                logging.info(f"Would rename media file: {mkv_filename} → {mkv_target_name}")
+                outcome["done"].append("media")
+            else:
+                writing = "media"
+                try:
+                    rename_no_overwrite(old_mkv_path, new_mkv_path)
+                except FileExistsError as e:
+                    # a file appeared at the target since the pre-check:
+                    # refused before anything moved
+                    fail(outcome, f"Media rename failed for {directory}: {e} - "
+                                  f"the media file was not renamed")
+                    return
+                except RenameUncertain as e:
+                    fail(outcome, f"Media rename failed for {directory}: {e}", uncertain=True)
+                    return
+                except PlaceholderLeft as e:
+                    fail(outcome, f"Media rename failed for {directory}: {e}", manual=str(e))
+                    return
+                except OSError as e:
+                    # the rename itself failed and the folder is known
+                    # unchanged (the uncertain cases raise the types above)
+                    fail(outcome, f"Media rename failed for {directory}: {e}")
+                    return
+                outcome["done"].append("media")
+                mkv_renamed_now = True
+                writing = None
+                logging.info(f".mkv file renamed to: {mkv_target_name}", extra=OK)
+
+        # Step 7: Rename the directory (unless --no-rename). Target collision
+        # was already checked above. If this fails after the media file was
+        # renamed, roll the file back so the directory is left untouched.
+        if not no_rename:
+            dir_target = prep["rename_to"]
+            if dry_run:
+                logging.info(f"Would rename directory: {directory} → {os.path.basename(dir_target)}")
+                outcome["done"].append("rename")
+            else:
+                writing = "rename"
+                try:
+                    rename_no_overwrite(dir_path, dir_target)
+                except OSError as e:
+                    writing = None
+                    message = f"Directory rename failed for {directory}: {e}"
+                    logging.error(message)
+                    uncertain = isinstance(e, RenameUncertain)
+                    manual = str(e) if isinstance(e, PlaceholderLeft) else None
+                    if mkv_renamed_now:
+                        writing = "rollback"
+                        try:
+                            rename_no_overwrite(new_mkv_path, old_mkv_path)
+                            outcome["done"].remove("media")
+                            writing = None
+                            logging.info(f"Rolled back media file rename: {mkv_target_name} → {mkv_filename}")
+                        except RenameUncertain as e2:
+                            # the rollback may have landed: the media rename
+                            # is no longer a confirmed change, and "rename it
+                            # back" could be wrong - both names must be checked
+                            outcome["done"].remove("media")
+                            manual = (f"MANUAL CHECK NEEDED: the rollback of the media file "
+                                      f"rename may or may not have completed ({e2}). Check "
+                                      f"which of {new_mkv_path} / {old_mkv_path} exists "
+                                      f"before rerunning.")
+                            logging.error(manual)
+                            uncertain = True
+                        except OSError as e2:
+                            manual = (f"MANUAL FIX NEEDED: could not roll back media file "
+                                      f"rename ({new_mkv_path}): {e2}. Rename it back to "
+                                      f"{mkv_filename} before rerunning.")
+                            logging.error(manual)
+                    fail(outcome, message, uncertain=uncertain, manual=manual, log=False)
+                    return
+                outcome["done"].append("rename")
+                writing = None
+                logging.info(f"Directory renamed to: {os.path.basename(dir_target)}", extra=OK)
+    except KeyboardInterrupt:
+        if writing == "rollback":
+            # the media rename is no longer a confirmed change: the rollback
+            # may or may not have landed
+            if "media" in outcome["done"]:
+                outcome["done"].remove("media")
+            fail(outcome, f"Interrupted (Ctrl-C) while rolling back the media file rename "
+                          f"of {directory} - the outcome is UNKNOWN", uncertain=True,
+                 manual=(f"MANUAL CHECK NEEDED: check which of {new_mkv_path} / "
+                         f"{old_mkv_path} exists before rerunning."))
+        elif writing:
+            fail(outcome, f"Interrupted (Ctrl-C) during the {WRITE_WORDS[writing]} of "
+                          f"{directory} - the outcome is UNKNOWN; check it "
+                          f"{WRITE_PLACES[writing]} before rerunning", uncertain=True)
+        else:
+            fail(outcome, f"Interrupted (Ctrl-C) before {directory} was finished")
+        raise
+
+
+@contextlib.contextmanager
+def quiet_screen():
+    """While planning, the per-folder detail goes to the log only; the
+    screen gets the PLAN. (Raises the screen handlers' level; the log
+    file's handler is untouched.)"""
+    root = logging.getLogger()
+    screens = [h for h in root.handlers if isinstance(h, logging.StreamHandler)
+               and not isinstance(h, logging.FileHandler)]
+    levels = [h.level for h in screens]
+    for h in screens:
+        h.setLevel(logging.CRITICAL + 1)
+    try:
+        yield
+    finally:
+        for h, level in zip(screens, levels):
+            h.setLevel(level)
+
+
+def _durations_text(values):
+    """The Duration values a record holds now, as the PLAN shows them -
+    every one, so conflicting old values are never reduced to one."""
+    if not values:
+        return "(none)"
+    shown = " / ".join(str(v) for v in values) if len(set(values)) > 1 else str(values[0])
+    return shown + (f" ({len(values)} entries)" if len(values) > 1 else "")
+
+
+def plan_counts(planned, early=()):
+    """The PLAN's counts; `early` are the targets refused before planning."""
+    ready = [prep for _, _, prep, problem in planned if not problem]
+    return {"update": sum(1 for p in ready if p["write"]),
+            "current": sum(1 for p in ready if p["runtime"] is not None and not p["write"]),
+            "rename": sum(1 for p in ready if p["rename_to"]),
+            "media": sum(1 for p in ready if p["media_rename_to"]),
+            "refused": sum(1 for _, _, _, problem in planned if problem) + len(early)}
+
+
+def plan_summary(counts, no_update, no_rename, rename_mkv):
+    """The PLAN's closing counts, just above the yes prompt - only the
+    operations this run was asked for, values aligned."""
+    rows = []
+    if not no_update:
+        records = [f"{counts['update']} to update"] if counts["update"] else []
+        if counts["current"]:
+            records.append(f"{counts['current']} already up to date (not rewritten)")
+        rows.append(("Records:", ", ".join(records) or "nothing to update"))
+    if not no_rename:
+        rows.append(("Folders:", f"{counts['rename']} to rename"))
+        if rename_mkv:
+            rows.append(("Media files:", f"{counts['media']} to rename"))
+    if counts["refused"]:
+        rows.append(("Refused:", f"{counts['refused']} (left as they are - see the PLAN)"))
+    width = max((len(label) for label, _ in rows), default=0) + 2
+    return [f"{label:<{width}}{value}" for label, value in rows]
+
+
+def plan_heading(counts):
+    """'About to ...' naming only what will actually happen."""
+    parts = []
+    if counts["update"]:
+        parts.append(f"write to ArchivesSpace ({(aspace_client.ACTIVE_ENV or '').upper()})")
+    if counts["rename"] or counts["media"]:
+        parts.append("rename folders" + (" and media files" if counts["media"] else ""))
+    return "About to " + " and ".join(parts)
+
+
+def _plan_line(label, color, text):
+    print(f"    {color}{label:<8}{Colors.RESET} {text}")
+
+
+def _plan_reason(directory, problem):
+    """A refusal as the PLAN shows it, under the folder's own heading: no
+    repeated folder name, no "Skipping." (RESULT keeps the full message)."""
+    if problem.startswith(f"{directory}: "):
+        problem = problem[len(directory) + 2:]
+    if problem.endswith(". Skipping."):
+        problem = problem[:-len(". Skipping.")]
+    return problem
+
+
+def print_rename_plan(planned, no_update, no_rename, rename_mkv, media_format, early=()):
+    """PLAN: what this run will change, folder by folder - nothing written
+    yet. Every change is shown: each current Duration value, the
+    physical_details fill, the media file and folder renames; refused
+    folders say why and are left as they are. `early` (name, problem) are
+    the targets refused before planning, listed in name order with the
+    rest."""
+    print_section("PLAN - what this run will change (nothing written yet)")
+    entries = [(os.path.basename(name.rstrip("/")) or name, None, problem)
+               for name, problem in early]
+    entries += [(directory, prep, problem) for _, directory, prep, problem in planned]
+    entries.sort(key=lambda entry: entry[0])
+    for directory, prep, problem in entries:
+        print(f"\n  {Colors.BOLD}{directory}{Colors.RESET}")
+        if problem:
+            _plan_line("refused", Colors.RED,
+                       f"{_plan_reason(directory, problem)} - left as it is")
+            continue
+        if not no_update:
+            if prep["write"]:
+                changes = []
+                if prep["needs_duration"]:
+                    changes.append(f"Duration {_durations_text(prep['durations'])} -> "
+                                   f"{prep['runtime']}")
+                if prep["fills"]:
+                    changes.append(f"Physical details (blank) -> '{PHYSICAL_DETAILS_DEFAULT}'")
+                _plan_line("update", Colors.BLUE, changes[0])
+                for change in changes[1:]:
+                    _plan_line("", "", change)
+            else:
+                _plan_line("record", Colors.DIM,
+                           f"already up to date (Duration {prep['runtime']}) - not rewritten")
+        if prep["media_rename_to"]:
+            _plan_line("rename", Colors.BLUE, f"media file {os.path.basename(prep['media'])} "
+                                              f"-> {prep['media_rename_to']}")
+        if not no_rename:
+            only = "  (top folder only)" if media_format == "mp4" else ""
+            _plan_line("rename", Colors.BLUE,
+                       f"folder -> {os.path.basename(prep['rename_to'])}{only}")
+    print()
+    for line in plan_summary(plan_counts(planned, early), no_update, no_rename, rename_mkv):
+        print(f"  {line}")
+
+
 def rename_and_update_directories(client, target_dir, dry_run=False, no_rename=False,
                                    no_update=False, verbose=False, rename_mkv=False,
-                                   single=False, media_format="mkv", report=None):
+                                   single=False, media_format="mkv", report=None,
+                                   confirm=None):
     """
     Process directories to:
     - Extract video metadata.
@@ -586,7 +1015,13 @@ def rename_and_update_directories(client, target_dir, dry_run=False, no_rename=F
             where the media lives, and whether physical_details is filled.
         report (dict): Filled as the run goes, for the RESULT screen:
             "selected" (targets named or found), "requested" (the steps
-            asked for) and "outcomes" (one per target, see new_outcome).
+            asked for) and "outcomes" (one per target, see new_outcome);
+            "phase" ("planning" / "writing") and "cancelled" on a run with
+            a confirm step.
+        confirm (callable): on a real run, (heading) -> True to write.
+            Every folder is planned first (read-only) and the PLAN shown; after yes, only the planned folders are processed, each
+            checked again and refused if it no longer matches its PLAN
+            line. None (and every dry run) keeps the single pass.
     Returns:
         int: the number of targets that did not finish (failed, partly done
         or of unknown outcome) - nonzero means the run must exit nonzero.
@@ -620,6 +1055,9 @@ def rename_and_update_directories(client, target_dir, dry_run=False, no_rename=F
 
     # Every target that stops is counted once, here, with its outcome.
     counters = {"failed": 0}
+    # A real run with a confirm step shows refusals in the PLAN (the screen)
+    # and logs them to the file only.
+    planned_run = confirm is not None and not dry_run
 
     def fail(outcome, message, uncertain=False, manual=None, log=True):
         if log:
@@ -635,7 +1073,8 @@ def rename_and_update_directories(client, target_dir, dry_run=False, no_rename=F
     def refuse(name, message):
         outcome = new_outcome(name)
         outcomes.append(outcome)
-        fail(outcome, message)
+        with quiet_screen() if planned_run else contextlib.nullcontext():
+            fail(outcome, message)
 
     if single:
         # --single mode: process only the specified directories (not their
@@ -733,243 +1172,100 @@ def rename_and_update_directories(client, target_dir, dry_run=False, no_rename=F
     for parent_path, directory in targets:
         FILE_LOG.info(f"  - {os.path.join(parent_path, directory) if single else directory}")
 
-    # Process each directory
-    for parent_path, directory in targets:
-        dir_path = os.path.join(parent_path, directory)
-        outcome = new_outcome(directory)
-        outcomes.append(outcome)
-        folder_heading(directory)
+    options = dict(fmt=fmt, no_update=no_update, no_rename=no_rename,
+                   rename_mkv=rename_mkv, verbose=verbose)
+
+    def run_one(parent_path, directory, outcome, planned_prep=None):
+        """Plan the folder now, compare it with its PLAN line (if any), and
+        carry it out - each failure recorded on the outcome."""
+        applying = False
         try:
-            # Step 1: Resolve the ArchivesSpace record (needed for both rename and update)
-            refid, archival_object_id, problem = get_refid(client, directory)
+            prep, problem = plan_folder(client, parent_path, directory, **options)
             if problem:
-                fail(outcome, f"Could not resolve {directory}: {problem}. Skipping.")
-                continue
-
-            logging.info(f"RefID: {refid}, Archival Object ID: {archival_object_id}")
-
-            # Step 2: Locate THE media file if we'll need it (duration and/or mkv rename).
-            # Rename-only mode (--no-update) does NOT require a media file or mediainfo.
-            # Exactly one candidate is required - guessing among several could write
-            # the wrong file's runtime to the record.
-            need_mkv = (not no_update) or (rename_mkv and not no_rename)
-            mkv_filename = None
-            if need_mkv:
-                mkv_filename, media_problem = find_media_file(
-                    dir_path, extensions=fmt["extensions"],
-                    media_subdir=fmt["media_subdir"])
-                if media_problem:
-                    fail(outcome, f"{directory}: {media_problem}. Skipping.")
-                    continue
-
-            # Step 3: Precompute rename targets and collision-check BEFORE any write,
-            # so a rename can never half-complete after the record was already updated.
-            dir_target = None
-            mkv_target_name = None
-            if not no_rename:
-                dir_target = os.path.join(parent_path, f"{directory}_refid_{refid}")
-                # lexists, not exists: a DANGLING symlink at the target would
-                # pass exists() and then be silently replaced by os.rename.
-                if os.path.lexists(dir_target):
-                    fail(outcome, f"Target directory already exists, refusing to overwrite: "
-                                  f"{os.path.basename(dir_target)}. Skipping.")
-                    continue
-                if rename_mkv and mkv_filename:
-                    base, ext = os.path.splitext(mkv_filename)
-                    mkv_target_name = f"{base}_refid_{refid}{ext}"
-                    if os.path.lexists(os.path.join(dir_path, mkv_target_name)):
-                        fail(outcome, f"Target .mkv already exists, refusing to overwrite: "
-                                      f"{mkv_target_name}. Skipping.")
-                        continue
-                    try:
-                        manifests = checksum_manifests_naming(dir_path, mkv_filename)
-                    except OSError as e:
-                        fail(outcome, f"Refusing --rename-media for {directory}: could not "
-                                      f"inspect checksum manifests ({e}). Skipping.")
-                        continue
-                    if manifests:
-                        # A checksum manifest lists the media by NAME; renaming
-                        # the file would orphan that entry and break any
-                        # filename-based verification downstream. Rewriting
-                        # manifests is not implemented (no workflow uses
-                        # --rename-media with manifests yet) - refuse, and
-                        # say what would have to happen.
-                        fail(outcome, f"Refusing --rename-media for {directory}: "
-                                      f"{', '.join(manifests)} reference {mkv_filename} by name "
-                                      f"and would be orphaned by the rename. Drop --rename-media "
-                                      f"for this folder, or regenerate the manifest after renaming "
-                                      f"by hand. Skipping.")
-                        continue
-
-            # Step 4: Extract runtime (only when updating the record). A failed/unparseable
-            # read returns None — never write a bogus 00:00:00. Skip the whole directory so
-            # it keeps its original name and is retried later.
-            video_duration = None
-            if not no_update:
-                mkv_path = os.path.join(dir_path, mkv_filename)
-                if verbose:
-                    logging.debug(f"Full MKV path: {mkv_path}")
-                video_duration = get_video_duration(mkv_path)
-                if video_duration is None:
-                    fail(outcome, f"Could not extract a valid runtime from {mkv_filename}. "
-                                  f"Skipping directory (no update, no rename).")
-                    continue
-                logging.info(f"Extracted runtime: {video_duration} for file: {mkv_filename}")
-
-            # Step 5: Update ASpace record (unless --no-update). Dry run does
-            # the same fetch and change detection as a real run - GETs are
-            # safe, and a dry run that just claims "would update" without
-            # looking at the record hides both no-op rows and problems that
-            # only surface at comparison time.
-            if not no_update:
-                archival_object_data = fetch_archival_object(client, archival_object_id)
-                if not archival_object_data:
-                    fail(outcome, f"Failed to fetch archival object for ID: {archival_object_id}. Skipping.")
-                    continue
-                # The lookup verified ONE record; this second fetch must be that
-                # same record - same uri, resource, catalog number, item level
-                # and ref_id - before anything is modified or renamed after it.
-                # A malformed or stale response is enough to fail this; no
-                # concurrent writer is required.
-                problem = record_identity_problem(archival_object_data, archival_object_id,
-                                                  directory, refid)
-                if problem:
-                    fail(outcome, f"Refusing to update {directory}: re-fetched record {problem}")
-                    continue
-
-                # Change detection: only write when something actually
-                # changes. Rewriting an already-correct record churns
-                # lock_versions and hides what a run really did.
-                needs_duration = duration_needs_update(archival_object_data, video_duration)
-                if fmt["fill_physical_details"]:
-                    updated_data, filled_details = set_extent_physical_details(archival_object_data)
-                else:
-                    # Audio formats: the video default would mislabel the
-                    # record - staff curate physical_details for those.
-                    updated_data, filled_details = archival_object_data, 0
-                if needs_duration:
-                    updated_data = modify_phystech_note(updated_data, video_duration)
-                changes = []
-                if needs_duration:
-                    changes.append(f"Duration -> {video_duration}")
-                if filled_details:
-                    changes.append(f"physical_details -> '{PHYSICAL_DETAILS_DEFAULT}' "
-                                   f"on {filled_details} blank extent(s)")
-
-                if not needs_duration and filled_details == 0:
-                    logging.info(f"Record already up to date for {directory} "
-                                 f"(Duration and physical_details unchanged) - nothing written")
-                    outcome["unchanged"] = True
-                elif dry_run:
-                    logging.info(f"Would update ArchivesSpace record: {'; '.join(changes)}")
-                    outcome["done"].append("update")
-                else:
-                    # None is the failure signal; a 200 with an empty body is
-                    # still a success (the shared client already treats it so).
-                    if update_archival_object(client, archival_object_id, updated_data) is None:
-                        if client.last_failure_definitive:
-                            fail(outcome, f"ArchivesSpace rejected the update for "
-                                          f"{archival_object_id}. Skipping (nothing renamed).")
-                        else:
-                            fail(outcome, f"Update outcome UNKNOWN for {archival_object_id} "
-                                          f"(timeout/lost response) - the write may have "
-                                          f"committed; verify in ArchivesSpace. Nothing renamed.",
-                                 uncertain=True)
-                        continue
-                    logging.info(f"ArchivesSpace record updated: {'; '.join(changes)}", extra=OK)
-                    outcome["done"].append("update")
-
-            # Step 6: Rename the media file FIRST (if --rename-mkv), then the
-            # directory. This order fails loudly if interrupted: a refid-
-            # stamped file inside a not-yet-renamed directory makes the next
-            # run report "no media file found" (a counted failure), whereas
-            # renaming the directory first meant a media rename failure left a
-            # refid directory that later runs silently skipped as done.
-            mkv_renamed_now = False
-            old_mkv_path = new_mkv_path = None
-            if rename_mkv and not no_rename and mkv_target_name:
-                old_mkv_path = os.path.join(dir_path, mkv_filename)
-                new_mkv_path = os.path.join(dir_path, mkv_target_name)
-                if dry_run:
-                    logging.info(f"Would rename media file: {mkv_filename} → {mkv_target_name}")
-                    outcome["done"].append("media")
-                else:
-                    try:
-                        rename_no_overwrite(old_mkv_path, new_mkv_path)
-                    except FileExistsError as e:
-                        # a file appeared at the target since the pre-check:
-                        # refused before anything moved
-                        fail(outcome, f"Media rename failed for {directory}: {e} - "
-                                      f"the media file was not renamed")
-                        continue
-                    except RenameUncertain as e:
-                        fail(outcome, f"Media rename failed for {directory}: {e}", uncertain=True)
-                        continue
-                    except PlaceholderLeft as e:
-                        fail(outcome, f"Media rename failed for {directory}: {e}", manual=str(e))
-                        continue
-                    except OSError as e:
-                        # the rename itself failed and the folder is known
-                        # unchanged (the uncertain cases raise the types above)
-                        fail(outcome, f"Media rename failed for {directory}: {e}")
-                        continue
-                    logging.info(f".mkv file renamed to: {mkv_target_name}", extra=OK)
-                    outcome["done"].append("media")
-                    mkv_renamed_now = True
-
-            # Step 7: Rename the directory (unless --no-rename). Target collision
-            # was already checked above. If this fails after the media file was
-            # renamed, roll the file back so the directory is left untouched.
-            if not no_rename:
-                if dry_run:
-                    logging.info(f"Would rename directory: {directory} → {os.path.basename(dir_target)}")
-                    outcome["done"].append("rename")
-                else:
-                    try:
-                        rename_no_overwrite(dir_path, dir_target)
-                    except OSError as e:
-                        message = f"Directory rename failed for {directory}: {e}"
-                        logging.error(message)
-                        uncertain = isinstance(e, RenameUncertain)
-                        manual = str(e) if isinstance(e, PlaceholderLeft) else None
-                        if mkv_renamed_now:
-                            try:
-                                rename_no_overwrite(new_mkv_path, old_mkv_path)
-                                outcome["done"].remove("media")
-                                logging.info(f"Rolled back media file rename: {mkv_target_name} → {mkv_filename}")
-                            except RenameUncertain as e2:
-                                # the rollback may have landed: the media rename
-                                # is no longer a confirmed change, and "rename it
-                                # back" could be wrong - both names must be checked
-                                outcome["done"].remove("media")
-                                manual = (f"MANUAL CHECK NEEDED: the rollback of the media file "
-                                          f"rename may or may not have completed ({e2}). Check "
-                                          f"which of {new_mkv_path} / {old_mkv_path} exists "
-                                          f"before rerunning.")
-                                logging.error(manual)
-                                uncertain = True
-                            except OSError as e2:
-                                manual = (f"MANUAL FIX NEEDED: could not roll back media file "
-                                          f"rename ({new_mkv_path}): {e2}. Rename it back to "
-                                          f"{mkv_filename} before rerunning.")
-                                logging.error(manual)
-                        fail(outcome, message, uncertain=uncertain, manual=manual, log=False)
-                        continue
-                    logging.info(f"Directory renamed to: {os.path.basename(dir_target)}", extra=OK)
-                    outcome["done"].append("rename")
-
+                fail(outcome, problem)
+                return
+            if planned_prep is not None and plan_signature(prep) != plan_signature(planned_prep):
+                fail(outcome, f"{directory} changed after the PLAN - not written; rerun "
+                              f"to see its current changes")
+                return
+            applying = True
+            apply_folder(client, prep, outcome, fail, dry_run, no_update, no_rename)
+        except KeyboardInterrupt:
+            # apply_folder records its own interruptions; one during the
+            # reads before it leaves this folder untouched - recorded, so
+            # an empty outcome is never read as "already up to date"
+            if not applying:
+                fail(outcome, f"Interrupted (Ctrl-C) before anything was changed for "
+                              f"{directory}")
+            raise
         except Exception as e:
             logging.error(f"An error occurred while processing directory {directory}: {e}",
                           exc_info=True)
             fail(outcome, f"An error occurred while processing directory {directory}: {e}",
                  log=False)
+
+    if not planned_run:
+        # One pass: dry runs, and callers that ask for no confirmation.
+        for parent_path, directory in targets:
+            outcome = new_outcome(directory)
+            outcomes.append(outcome)
+            folder_heading(directory)
+            try:
+                run_one(parent_path, directory, outcome)
+            finally:
+                _IN_FOLDER = False
+        return counters["failed"]
+
+    # A real run: PLAN every folder first - read-only, detail to the log -
+    # then ask, then process ONLY the planned folders, each planned again
+    # from fresh reads and refused if it no longer matches what was shown.
+    report["phase"] = "planning"
+    # refused before planning (symlinks, invalid --single targets): already
+    # counted in outcomes - shown in the PLAN, never added twice
+    early = [(o["name"], o["problem"]) for o in outcomes]
+    planned = []
+    with quiet_screen():
+        for parent_path, directory in targets:
+            FILE_LOG.info(f"Planning directory: {directory}")
+            try:
+                prep, problem = plan_folder(client, parent_path, directory, **options)
+            except Exception as e:
+                logging.error(f"An error occurred while planning directory {directory}: {e}",
+                              exc_info=True)
+                prep, problem = None, (f"An error occurred while planning directory "
+                                       f"{directory}: {e} (details in the log)")
+            else:
+                if problem:
+                    logging.error(problem)   # the log only: the PLAN shows it on screen
+            planned.append((parent_path, directory, prep, problem))
+    show(print_rename_plan, planned, no_update, no_rename, rename_mkv, media_format, early)
+    counts = plan_counts(planned, early)
+    if counts["update"] or counts["rename"] or counts["media"]:
+        if not confirm(plan_heading(counts)):
+            FILE_LOG.info("Cancelled at the confirmation prompt - nothing written or renamed")
+            report["cancelled"] = True
+            return 0
+        FILE_LOG.info("Confirmed with yes - writing")
+
+    report["phase"] = "writing"
+    show(print_section, "WRITING")
+    for parent_path, directory, planned_prep, problem in planned:
+        outcome = new_outcome(directory)
+        outcomes.append(outcome)
+        if problem:
+            # refused in the PLAN: left as it is (the PLAN said why)
+            fail(outcome, problem, log=False)
+            continue
+        folder_heading(directory)
+        try:
+            run_one(parent_path, directory, outcome, planned_prep)
         finally:
             _IN_FOLDER = False
 
     return counters["failed"]
 
 
-def print_rename_result(report, dry_run, elapsed=None, stopped=False):
+def print_rename_result(report, dry_run, elapsed=None, stopped=False, interrupted=False):
     """FOLDERS (each target once, in one category), CHANGES MADE (confirmed,
     kept changes), the targets that need a person, then the log's path."""
     outcomes = report.get("outcomes", [])
@@ -1018,8 +1314,9 @@ def print_rename_result(report, dry_run, elapsed=None, stopped=False):
             print(f"\n  {Colors.BOLD}Inspect the named paths and resolve the reported problem "
                   f"before rerunning.{Colors.RESET}")
     if stopped:
-        print(f"\n  {Colors.RED}{Colors.BOLD}The run stopped on an unexpected error - targets "
-              f"after the last one shown were not processed (details in the log){Colors.RESET}")
+        why = "was interrupted (Ctrl-C)" if interrupted else "stopped on an unexpected error"
+        print(f"\n  {Colors.RED}{Colors.BOLD}The run {why} - targets after the last one "
+              f"shown were not processed (details in the log){Colors.RESET}")
     if dry_run:
         print(f"\n  {Colors.YELLOW}{Colors.BOLD}DRY RUN - nothing written to ArchivesSpace, "
               f"nothing renamed{Colors.RESET}")
@@ -1264,6 +1561,19 @@ def print_rename_header(title, target, args, mode, media_format):
         print(f"             {path}")
 
 
+def confirm_run(heading):
+    """The yes prompt after the PLAN (its counts are just above). Anything
+    but yes - no, blank, closed input, Ctrl-C - writes nothing and renames
+    nothing."""
+    print(f"\n  {Colors.BOLD}{heading}{Colors.RESET}")
+    try:
+        answer = input("\n  Type yes to go ahead, anything else to cancel: ")
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return False
+    return answer.strip().lower() == "yes"
+
+
 def main():
     """
     Main function to:
@@ -1371,7 +1681,7 @@ def main():
     # Default to a failure if processing raises before returning a count, so an
     # unexpected crash can never look like a clean run.
     failed_count = 1
-    stopped = False
+    stopped = interrupted = False
     report = {}
     try:
         # Step 2: Process directories and perform updates
@@ -1386,7 +1696,13 @@ def main():
             single=args.single,
             media_format=media_format,
             report=report,
+            confirm=confirm_run,
         )
+    except KeyboardInterrupt:
+        # The folder in progress has already recorded where it stopped
+        # (partly done, or unknown when a write was cut off).
+        logging.error("Interrupted by operator (Ctrl-C)")
+        stopped = interrupted = True
     except Exception as e:
         # Catch unexpected errors during processing: the traceback goes to
         # the log file, the screen gets one line.
@@ -1394,21 +1710,32 @@ def main():
         stopped = True
     finally:
         # Step 3: Ensure logout is always attempted, even if an error occurs.
-        # (A Ctrl-C still ends the run here without a RESULT; the log file
-        # holds everything up to the interruption.)
         client.logout()
+
+    if report.get("cancelled") or (interrupted and report.get("phase") == "planning"):
+        # Nothing was written and nothing renamed - no RESULT, which would
+        # read as work done.
+        print()
+        print_status("warning", "Interrupted while planning" if interrupted else "Cancelled")
+        print(f"  {Colors.BOLD}Nothing written to ArchivesSpace, nothing renamed.{Colors.RESET}")
+        show(print_saved, [("log", LOG_FILE)])
+        print()
+        sys.exit(130 if interrupted else 1)
 
     elapsed_seconds = time.time() - start_time
     hours, remainder = divmod(int(elapsed_seconds), 3600)
     minutes, seconds = divmod(remainder, 60)
     elapsed_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
-    show(print_rename_result, report, args.dry_run, elapsed_str, stopped=stopped)
+    show(print_rename_result, report, args.dry_run, elapsed_str, stopped=stopped,
+         interrupted=interrupted)
     show(print_saved, [("log", LOG_FILE)])
     print()
 
     # Non-zero exit when any directory did not finish (failed, partly done or
     # of unknown outcome), so automation/monitoring can detect it.
+    if interrupted:
+        sys.exit(130)
     sys.exit(1 if failed_count else 0)
 
 if __name__ == "__main__":

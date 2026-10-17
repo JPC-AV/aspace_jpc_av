@@ -7,6 +7,7 @@ The jpc- commands: one short command per workflow step.
     jpc-import --file FILE        create records (PLAN, then type yes)
     jpc-update --file FILE        update records (PLAN, then type yes)
     jpc-writeback --report JSON   record a create run's results in Airtable
+    jpc-rename --directory PATH   record runtimes, rename folders (PLAN, then type yes)
     jpc / jpc --help              this list
 
 Each command runs exactly one existing tool with that step's fixed flags
@@ -149,6 +150,10 @@ def runs_footer(verb):
             f"\n    The shorter jpc-{verb} command works from any folder.")
 
 
+# A refusal hint for the rename tool's options that jpc-rename leaves out.
+DIRECT_ONLY = "on the direct command only - see RUNS in jpc-rename --help"
+
+
 def refusal_note(flag):
     """The closing lines of every EXIT section; flag is the command's input."""
     return (f"\n\n    A launcher refusal stops before the tool runs: a missing {flag},"
@@ -159,7 +164,9 @@ def refusal_note(flag):
 # always gets, the extra flags a person may add (flag -> metavar, or None
 # for a switch), and whether it talks to ArchivesSpace (and so takes
 # --env). "base" builds the fixed part of the tool's arguments from the
-# input; extras follow in the order given.
+# input; extras follow in the order given. Optional: "extra_help" (this
+# command's own OPTIONS wording for an extra) and "elsewhere" (this
+# command's own refusal hints - see ELSEWHERE).
 COMMANDS = {
     "pull": {
         "title": "save an Airtable view as a CSV",
@@ -1140,8 +1147,255 @@ COMMANDS = {
                     file missing - run the same command again to re-check.""",
         },
     },
+    "rename": {
+        "title": "record runtimes and rename AV folders",
+        "summary": ("Record the runtime of each digitized JPC_AV_xxxxx in ArchivesSpace and add "
+                    "its RefID to the folder name: shows every change in the PLAN, writes after "
+                    "you type yes"),
+        "script": "aspace_rename_directories/aspace-rename-directories.py",
+        "input": ("--directory", "PATH", "The folder holding the digitized JPC_AV_xxxxx folders; "
+                  "folders already renamed are skipped"),
+        "base": lambda value: ["-d", value],
+        "extras": {"--dry-run": None, "--mp4": None, "--no-color": None},
+        # a rename dry run shows each folder's outcome, not a PLAN
+        "extra_help": {"--dry-run": "Preview only: check every folder and show what would "
+                                    "change - nothing is written or renamed"},
+        # the tool's other options stay on the direct command (see RUNS)
+        "elsewhere": {"--rename-media": DIRECT_ONLY, "--rename-mkv": DIRECT_ONLY,
+                      "--no-update": DIRECT_ONLY, "--no-rename": DIRECT_ONLY,
+                      "-v": DIRECT_ONLY, "--verbose": DIRECT_ONLY,
+                      "--single": ("give the folder holding them as --directory PATH; "
+                                   "--single is on the direct command only"),
+                      "-d": "use --directory"},
+        "aspace": True,
+        "example": "jpc-rename --directory /Volumes/AV_DRIVE/batch --dry-run",
+        "help": {
+            "paths": help_blocks(
+                """    {bold}Full path{reset}
+      Give --directory the folder that holds the JPC_AV_xxxxx folders, for
+      example on the delivery drive. Dragging the folder from Finder into
+      Terminal gives its full path; a full path works from any folder.
+
+      Example: {cyan}/Volumes/AV_DRIVE/batch{reset}""",
+                """    {bold}Short path{reset}
+      A folder name or relative path is read from your current folder.
+
+      Example: {cyan}batch{reset}
+      This works when your current folder is the one containing batch.""",
+                paths_with_spaces("'/Volumes/AV DRIVE/batch'"),
+                """    {bold}Log{reset}
+      A run saves a timestamped log, {cyan}rename_YYYYMMDD_HHMMSS.log{reset}, in
+      ~/aspace_rename_reports/, or in rename_reports/ inside the logs_dir
+      folder set in creds.py - dry runs and cancelled runs too. A run that
+      stops at an argument or creds.py problem saves none. The run prints
+      the log's path at the end ("Saved log:")."""),
+            "environment_note": """    {bold}The folders are real in either environment.{reset} --env sandbox changes
+    only which ArchivesSpace is used: a real sandbox run still renames the
+    folders, with the sandbox records' RefIDs, which may not match
+    production. Try the sandbox only on disposable copies of the folders.""",
+            "how": """    {bold}Folders it reads{reset}
+{jpc_av_definition}
+
+      Only the folders directly inside --directory are checked - nothing
+      deeper - and only those named exactly JPC_AV_ followed by digits.
+      Folders already renamed (JPC_AV_xxxxx_refid_...) do not match, so a
+      rerun skips them. A symlinked folder is refused; use the real folder.
+
+      Each folder must hold exactly one media file named after the folder.
+      A JPC_AV_00002.mkv inside JPC_AV_00001/ is refused, never measured.
+
+      .mkv (the default) - the media file sits in the folder:
+        JPC_AV_00001/
+        └── JPC_AV_00001.mkv
+
+      --mp4 (optical discs) - the .mp4 sits one level down:
+        JPC_AV_14180/
+        ├── access_JPC_AV_14180/
+        │   └── JPC_AV_14180.mp4
+        └── the .iso, manifests and logs
+
+      No other file in the folder is read.
+
+    {bold}What it changes{reset}
+      In the item record that matches the folder's JPC_AV_xxxxx:
+
+        • Duration - the runtime (hh:mm:ss, read by mediainfo) goes into
+          the Duration list of the Physical Characteristics and Technical
+          Requirements note. Every existing Duration entry is set to it; a
+          record without one gets the list, and the note if it has none.
+        • Physical details - a blank one is set to "SD video, color,
+          sound" on a record with exactly one extent. An existing value is
+          never changed; a record with no extent or several gets no fill.
+
+      A record that already has this runtime and needs no fill is not
+      rewritten.
+
+      Then the folder is renamed with the record's 32-character RefID:
+
+        JPC_AV_00001/  ->  JPC_AV_00001_refid_<RefID>/
+
+      Only the JPC_AV_xxxxx folder itself is renamed. Everything inside
+      keeps its name - the .mkv, or with --mp4 the access_ folder and its
+      .mp4 - and no checksum manifest is changed.
+
+    {bold}Checks before anything is written{reset}
+      Every folder is checked first, reading only. A folder that fails a
+      check is refused and left as it is; the other folders go ahead:
+
+        • Its JPC_AV_xxxxx matches exactly one item record in the resource,
+          and that record has a valid RefID.
+        • It holds exactly one media file, named after the folder.
+        • mediainfo reads a runtime from that file (mediainfo must be
+          installed).
+        • No folder with the new name exists yet.
+        • With --mp4, it is not a multi-title disc (JPC_AV_14180_title02.mp4
+          and so on beside the main file): there is no single runtime to
+          record.
+
+    {bold}Dry run and real run{reset}
+      --dry-run checks every folder and shows each one's outcome ("Would
+      update ArchivesSpace record", "Would rename directory") and a
+      "FOLDERS - dry run" summary. Nothing is written to ArchivesSpace and
+      nothing is renamed; the log is saved.
+
+      A real run first shows the PLAN: for each folder, the current and new
+      Duration (every entry), the physical details fill and the new folder
+      name - or why the folder is refused. Then it asks:
+
+          Type yes to go ahead, anything else to cancel:
+
+      Only yes writes. Anything else - Ctrl-C at the prompt too - cancels:
+      nothing is written and nothing is renamed. When nothing would change,
+      nothing is asked.
+
+    {bold}During writing{reset}
+      Only the folders in the PLAN are processed; a folder added afterwards
+      waits for the next run. Each one is read again just before it is
+      written and refused if its planned changes no longer match ("changed
+      after the PLAN"). Other edits to the record made in the meantime are
+      not checked; the update starts from the record as just read, so they
+      are kept.
+
+      For each folder the record is updated first, then the folder is
+      renamed. If the update fails, nothing is renamed. A successful record
+      update is not rolled back if the folder rename fails.
+
+      Ctrl-C while writing stops the run. RESULT shows what each folder
+      reached; one interrupted mid-write has an unknown outcome.""",
+            "output": """    jpc-rename changes the records in ArchivesSpace and the folder names on
+    disk (see HOW IT WORKS). It saves no report file - the log is the
+    run's record:
+
+      • {cyan}rename_YYYYMMDD_HHMMSS.log{reset}
+        Every message, timestamped (see FILE PATHS for when one is saved).
+        {bold}YYYYMMDD_HHMMSS{reset} is the run's date and time.
+
+    After folder processing, RESULT shows:
+
+      • FOLDERS counts each folder once: done, already up to date, partly
+        done, failed, outcome unknown, or not reached.
+      • CHANGES MADE counts the records updated and the folders renamed (a
+        dry run: WOULD CHANGE).
+      • NEEDS ATTENTION appears only when a folder needs a person: what was
+        done to it, and the problem.
+
+    A run cancelled at the prompt shows no RESULT. It says nothing was
+    written or renamed, and saves the log. A run stopped by a login
+    problem or a missing folder shows the error and no RESULT.
+
+    jpc-rename never changes Airtable.""",
+            "next_steps": """    {bold}After a dry run{reset}
+      If every folder shows what you expect, run the real rename on the same
+      folder, in the same environment as the dry run:
+
+      {command}jpc-rename --directory PATH{reset}
+
+      Add --env sandbox if the dry run used it - on copies of the folders
+      only (see ENVIRONMENT). The real run shows the PLAN before asking
+      for yes.
+
+    {bold}Refused folders{reset}
+      A refused folder is left as it is. Fix what the reason names, then
+      run again - folders already renamed are skipped:
+
+        • No record, or several - create the record (jpc-import), or clean
+          up the duplicates in ArchivesSpace.
+        • No media file, several, or one not named after the folder - fix
+          the folder's contents.
+        • No runtime - check the file, and that mediainfo is installed.
+        • The new folder name already exists - find out which folder is
+          right before changing either.
+        • Changed after the PLAN - run again to see its current changes.
+        • Search failed - a connection or server problem; run again.
+
+    {bold}Multi-title discs{reset}
+      A manual exception: jpc-rename refuses a multi-title disc every time,
+      so running it again never finishes one. Enter its Duration by hand
+      (manual 4.D.iv). Then rename just that folder with the direct tool,
+      which with --no-update reads no media file and changes no record.
+      From the tools repository folder:
+
+        {command}cd {repo}{reset}
+        {command}python3 aspace_rename_directories/aspace-rename-directories.py --single PATH --no-update --mp4 --env production{reset}
+
+      PATH is that JPC_AV_xxxxx folder itself. The tool checks the record,
+      shows a PLAN with the new folder name and asks for yes.
+
+    {bold}Partly done or outcome unknown{reset}
+      Partly done: the record was updated but the folder was not renamed.
+      Fix the reason shown, then run again - the record comes out already
+      up to date and the folder is renamed.
+
+      Outcome unknown: a write was interrupted or its result is not known.
+      Compare the record in ArchivesSpace and the folder on disk with the
+      PLAN and RESULT before running again.
+
+    {bold}After a real production run{reset}
+      1. DAMS ingest - production deliveries only, outside these tools.
+         MADS, the public DAMS delivery, publishes each item within about a
+         day.
+
+      2. The MADS check - which items are live in MADS. From the tools
+         repository folder (there is no jpc- command for it yet):
+
+           {command}cd {repo}{reset}
+           {command}python3 aspace_csv_import/check_mads.py FILE{reset}
+
+         FILE is a list of the batch's JPC_AV_xxxxx - not the media folder
+         and not the rename log. Make a plain text file with one
+         JPC_AV_xxxxx per line (the folder names without _refid_...), or
+         use any CSV with a CATALOG_NUMBER column, such as a jpc-pull CSV.
+
+         It reads only the public MADS pages, never ArchivesSpace, and saves
+         mads_check_<stamp>.csv in the MADS reports folder: Yes, No, check
+         failed or invalid catalog number for each item.""",
+            "runs": """    jpc-rename runs the Python tool aspace-rename-directories.py for you.
+    You do not need to run it separately.
+
+    {bold}Equivalent direct command{reset}
+      {command}python3 aspace_rename_directories/aspace-rename-directories.py -d PATH --env production{reset}
+      Replace PATH with the folder's path; quote paths with spaces.
+
+    {bold}Underlying tool's help{reset}
+      {command}python3 aspace_rename_directories/aspace-rename-directories.py --help{reset}
+      This describes all of the Python tool's direct-use options, including
+      --single, --rename-media, --no-update and --no-rename. jpc-rename
+      accepts only the flags listed in OPTIONS above.""",
+            "exit": """    {ok}{bold}0{reset}    Done       Every folder was done or already up to date, or no
+                    JPC_AV_xxxxx folder was found.
+    {bad}{bold}1{reset}    Review     Some folders were refused or failed, are partly done
+                    or have an unknown outcome (RESULT lists them). Also:
+                    stopped before writing - a creds.py or login problem, a
+                    missing folder, or cancelled at the yes prompt (nothing
+                    written, nothing renamed).
+    {warn}{bold}2{reset}    Refused    An argument was rejected; nothing was done.
+    {warn}{bold}130{reset}  Stopped    Interrupted with Ctrl-C. While planning, nothing was
+                    written; after writing began, RESULT shows what each
+                    folder reached.""",
+        },
+    },
 }
-ORDER = ["pull", "check", "fill", "import", "update", "writeback"]
+ORDER = ["pull", "check", "fill", "import", "update", "writeback", "rename"]
 
 # Where a refused flag belongs instead - said in the refusal.
 ELSEWHERE = {
@@ -1241,7 +1495,7 @@ def _refusal(verb, arg):
         flag, metavar, _ = spec["input"]
         return (f"unexpected {arg!r} - give the input as {flag} {metavar}, "
                 f"and flags only from: {', '.join(allowed)}")
-    hint = ELSEWHERE.get(name)
+    hint = spec.get("elsewhere", {}).get(name) or ELSEWHERE.get(name)
     if "=" in arg:
         hint = f"write it as {name} VALUE (two words)" if name in allowed else hint
     return (f"{shown(arg)} is not allowed with jpc-{verb}"
@@ -1266,7 +1520,9 @@ def build(verb, value, env, extras):
     return argv + extras
 
 
-def usage(verb):
+def usage_parts(verb):
+    """The usage line's pieces: the command with its input, then one
+    [option] each."""
     spec = COMMANDS[verb]
     flag, metavar, _ = spec["input"]
     parts = [f"jpc-{verb} {flag} {metavar}"]
@@ -1275,7 +1531,11 @@ def usage(verb):
                      + ("..." if extra in spec.get("repeatable", ()) else ""))
     if spec["aspace"]:
         parts.append("[--env sandbox]")
-    return " ".join(parts)
+    return parts
+
+
+def usage(verb):
+    return " ".join(usage_parts(verb))
 
 
 EXTRA_HELP = {
@@ -1287,7 +1547,13 @@ EXTRA_HELP = {
                      "CSV check still stops the whole run."),
     "--run": "Write to Airtable: shows every change, writes after you type yes",
     "--exclude-catalog": "Leave out this JPC_AV_xxxxx (e.g. a record deleted since the import); repeat for each",
+    "--mp4": ("The folders hold optical-disc .mp4 transfers "
+              "(access_JPC_AV_xxxxx/JPC_AV_xxxxx.mp4) instead of .mkv files; only the top "
+              "folder is renamed"),
 }
+
+
+NBSP = "\u00a0"
 
 
 def launcher_help_screen(title, sections):
@@ -1327,7 +1593,8 @@ def command_help(verb):
     custom = spec.get("help", {})
     flag, metavar, input_help = spec["input"]
     options = [(f"{flag} {metavar}", "(required)", input_help)]
-    options += [(f"{extra}{' ' + meta if meta else ''}", "(optional)", EXTRA_HELP[extra])
+    extra_help = {**EXTRA_HELP, **spec.get("extra_help", {})}
+    options += [(f"{extra}{' ' + meta if meta else ''}", "(optional)", extra_help[extra])
                 for extra, meta in spec["extras"].items()]
     if spec["aspace"]:
         options.append(("--env sandbox", "(optional)", "Uses the sandbox env instead of the default production env"))
@@ -1335,25 +1602,34 @@ def command_help(verb):
         ("DESCRIPTION", textwrap.fill(f"{spec['summary']}.", width=78,
                                      initial_indent="    ", subsequent_indent="    ",
                                      break_long_words=False, break_on_hyphens=False)),
-        ("USAGE", C.BOLD + C.GREEN + textwrap.fill(usage(verb), width=72, initial_indent="    ",
-                               subsequent_indent="      ", break_long_words=False,
-                               break_on_hyphens=False)
+        # wrapped between pieces only: a no-break space keeps "[--env sandbox]"
+        # on one line
+        ("USAGE", C.BOLD + C.GREEN
+                  + textwrap.fill(" ".join(p.replace(" ", NBSP) for p in usage_parts(verb)),
+                                  width=72, initial_indent="    ", subsequent_indent="      ",
+                                  break_long_words=False, break_on_hyphens=False
+                                  ).replace(NBSP, " ")
                   + C.RESET),
         ("OPTIONS", launcher_options(options)),
     ]
+    exports = str(ROOT / "aspace_csv_import" / "__airtable_exports__")  # as the pull prints it
+    style = dict(exports=exports, repo=shlex.quote(str(ROOT)), bold=C.BOLD, cyan=C.CYAN,
+                 command=C.GREEN, ready=C.GREEN, review=C.YELLOW, dim=C.DIM, reset=C.RESET,
+                 ok=C.GREEN, bad=C.RED, warn=C.YELLOW)
+    style.update({name: text.format(**style) for name, text in SHARED_HELP.items()})
     if "environment" in custom:
         sections.append(("ENVIRONMENT", custom["environment"]))
     elif spec["aspace"]:
-        sections.append(("ENVIRONMENT", f"    {C.RED}{C.BOLD}Production by default{C.RESET} - "
-                                        f"unlike the tool itself, which asks for --env.\n"
-                                        f"    Add --env sandbox for the sandbox.\n\n"
-                                        f"    If the requested environment is not configured, the command stops\n"
+        # the standard text, with this command's own note (if any) before
+        # the closing paragraph
+        note = custom.get("environment_note")
+        sections.append(("ENVIRONMENT", f"    {C.RED}{C.BOLD}Production by default{C.RESET}. "
+                                        f"Add --env sandbox for the sandbox.\n"
+                                        f"    The tool run directly selects its only configured environment\n"
+                                        f"    itself; with several configured, it requires --env NAME.\n\n"
+                                        + (note.format(**style) + "\n\n" if note else "")
+                                        + f"    If the requested environment is not configured, the command stops\n"
                                         f"    (exit 1); it never switches to another environment."))
-    exports = str(ROOT / "aspace_csv_import" / "__airtable_exports__")  # as the pull prints it
-    style = dict(exports=exports, bold=C.BOLD, cyan=C.CYAN, command=C.GREEN,
-                 ready=C.GREEN, review=C.YELLOW, dim=C.DIM, reset=C.RESET,
-                 ok=C.GREEN, bad=C.RED, warn=C.YELLOW)
-    style.update({name: text.format(**style) for name, text in SHARED_HELP.items()})
     sections.append(("EXAMPLES", f"    {C.GREEN}{spec['example']}{C.RESET}"))
     sections.append(("FILE PATHS", custom["paths"].format(**style)))
     if "how" in custom:
@@ -1373,7 +1649,8 @@ def overview_help():
     # what each step touches outside this computer; only the writers are loud
     touches = {"pull": "reads Airtable", "check": "reads ArchivesSpace",
                "fill": "reads ArchivesSpace", "import": "writes ArchivesSpace",
-               "update": "writes ArchivesSpace", "writeback": "writes Airtable"}
+               "update": "writes ArchivesSpace", "writeback": "writes Airtable",
+               "rename": "writes ArchivesSpace"}
     width = max(len(f"jpc-{v}") for v in ORDER)
     title_width = max(len(COMMANDS[v]["title"]) for v in ORDER)
     hint = shlex.quote(str(ROOT / "jpc-shell-hint.zsh"))
@@ -1382,23 +1659,33 @@ def overview_help():
                 else f"{C.DIM}{touches[v]}{C.RESET}")
              for v in ORDER]
 
+    create = [("jpc-pull --view NAME", "save the batch's Airtable view"),
+              ("jpc-check --file PULL", "optional: which already exist"),
+              ("jpc-fill --file PULL", "parents; ready and review CSVs"),
+              ("jpc-import --file READY --dry-run", "check every row, show the PLAN"),
+              ("jpc-import --file READY", "PLAN again, type yes to write"),
+              ("jpc-writeback --report REPORT --run", "record the results in Airtable")]
+    update = [("jpc-pull --view NAME", "view with the fields to change"),
+              ("jpc-update --file PULL --dry-run", "show each change in the PLAN"),
+              ("jpc-update --file PULL", "PLAN again, type yes to write")]
+    digitized = [("jpc-rename --directory BATCH --dry-run", "check every folder"),
+                 ("jpc-rename --directory BATCH", "PLAN, type yes to write"),
+                 ("DAMS ingest", "outside these tools"),
+                 ("MADS check", f"see {C.GREEN}jpc-rename --help{C.RESET}")]
+    step_width = max(len(cmd) for cmd, _ in create + update + digitized)
+
     def steps(rows):
-        return "\n".join(f"      {n}. {C.GREEN}{cmd:<36}{C.RESET}  {note}"
+        # a jpc- command is green (type it); a step outside them is not
+        return "\n".join(f"      {n}. "
+                         + (f"{C.GREEN}{cmd:<{step_width}}{C.RESET}" if cmd.startswith("jpc-")
+                            else f"{cmd:<{step_width}}")
+                         + f"  {note}"
                          for n, (cmd, note) in enumerate(rows, 1))
-    create = steps([("jpc-pull --view NAME", "save the batch's Airtable view"),
-                    ("jpc-check --file PULL", "optional: which already exist"),
-                    ("jpc-fill --file PULL", "parents; ready and review CSVs"),
-                    ("jpc-import --file READY --dry-run", "check every row, show the PLAN"),
-                    ("jpc-import --file READY", "PLAN again, type yes to write"),
-                    ("jpc-writeback --report REPORT --run", "record the results in Airtable")])
-    update = steps([("jpc-pull --view NAME", "view with the fields to change"),
-                    ("jpc-update --file PULL --dry-run", "show each change in the PLAN"),
-                    ("jpc-update --file PULL", "PLAN again, type yes to write")])
     return launcher_help_screen("jpc - one short command per workflow step", [
         ("DESCRIPTION", f"""    The jpc- commands carry the JPCA ArchivesSpace <-> Airtable workflow,
-    one step per command. Each runs one existing Python tool with that
-    step's fixed flags filled in; the tools keep all their own checks,
-    PLANs and yes prompts.
+    from new records to digitized folders, one step per command. Each runs
+    one existing Python tool with that step's fixed flags filled in; the
+    tools keep all their own checks, PLANs and yes prompts.
 
     Every command has its own detailed help: {C.GREEN}jpc-STEP --help{C.RESET}"""),
         ("USAGE", f"    {C.GREEN}jpc-STEP --INPUT VALUE [options]{C.RESET}\n"
@@ -1407,27 +1694,35 @@ def overview_help():
         ("COMMANDS", "in workflow order", "\n".join(lines) + f"""
 
     Only the steps that write change anything outside this computer, and
-    each shows its changes and asks for yes before writing."""),
-        ("ENVIRONMENT", f"""    jpc-check, jpc-fill, jpc-import and jpc-update talk to ArchivesSpace.
-    They use {C.RED}{C.BOLD}PRODUCTION{C.RESET} unless you add --env sandbox - on EACH command:
-    every one defaults to production on its own. The other two, jpc-pull
-    and jpc-writeback, work on Airtable only and take no --env.
+    each shows its changes and asks for yes before writing. jpc-rename
+    also renames folders on disk."""),
+        ("ENVIRONMENT", f"""    jpc-check, jpc-fill, jpc-import, jpc-update and jpc-rename talk to
+    ArchivesSpace. They use {C.RED}{C.BOLD}PRODUCTION{C.RESET} unless you add --env sandbox - on
+    EACH command: every one defaults to production on its own. jpc-pull
+    and jpc-writeback work on Airtable only and take no --env.
 
     If the requested environment is not configured, the command stops
     (exit 1); it never switches to another environment."""),
         ("WORKFLOWS", f"""    These workflows use production. For sandbox work, add --env sandbox
-    to every ArchivesSpace command and stop before jpc-writeback.
+    to every ArchivesSpace command and stop before jpc-writeback or DAMS
+    ingest. For sandbox rename runs, use disposable copies: the folders are
+    renamed in either environment.
 
     {C.BOLD}Create new item records{C.RESET}
-{create}
+{steps(create)}
 
     {C.BOLD}Update existing item records{C.RESET}
-{update}
+{steps(update)}
+
+    {C.BOLD}After digitization{C.RESET}
+{steps(digitized)}
+      For optical-disc batches, add --mp4 to both jpc-rename commands.
 
     NAME    the Airtable view's exact name
     PULL    the path from "Saved pulled CSV:"
     READY   the path from "Saved ready CSV:"
     REPORT  the JSON path from "Saved import report:"
+    BATCH   the folder holding the digitized JPC_AV_xxxxx folders
 
     Each command's --help explains its step in detail."""),
         ("SETUP", f"""    Install once into each Python environment you use - any name works;
@@ -1592,6 +1887,7 @@ fill = _entry("fill")
 import_ = _entry("import")
 update = _entry("update")
 writeback = _entry("writeback")
+rename = _entry("rename")
 
 
 if __name__ == "__main__":
