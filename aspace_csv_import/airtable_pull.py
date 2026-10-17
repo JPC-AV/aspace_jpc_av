@@ -55,11 +55,9 @@ RATE_LIMIT_RETRIES = 3
 
 # Token: airtable_pat_read_only in creds.py (repo root), else
 # AIRTABLE_PAT_READ_ONLY in the shell.
-try:
-    from creds import airtable_pat_read_only
-except ImportError:
-    airtable_pat_read_only = ""
-AIRTABLE_PAT_READ_ONLY = airtable_pat_read_only or os.environ.get("AIRTABLE_PAT_READ_ONLY", "")
+import creds_loader  # noqa: E402
+AIRTABLE_PAT_READ_ONLY = (creds_loader.setting("airtable_pat_read_only", "")
+                          or os.environ.get("AIRTABLE_PAT_READ_ONLY", ""))
 
 RUN_COMMAND = " ".join([os.path.basename(sys.executable)]
                        + [shlex.quote(a) for a in sys.argv])
@@ -316,8 +314,9 @@ def main():
                      mode="read Airtable, save a local file")
 
     if not AIRTABLE_PAT_READ_ONLY:
-        print_status("error", "No Airtable token - add airtable_pat_read_only = \"pat...\" to creds.py "
-                              "(or export AIRTABLE_PAT_READ_ONLY)")
+        print_status("error", creds_loader.problem()
+                     or "No Airtable token - add airtable_pat_read_only = \"pat...\" to creds.py "
+                        "(or export AIRTABLE_PAT_READ_ONLY)")
         sys.exit(1)
 
     now = datetime.now()
@@ -368,11 +367,13 @@ def main():
                                 f"fine for --update-only (it changes only the columns present); "
                                 f"--create-records needs all of them")
     print_saved([("pulled CSV", out_path)])
+    pulled = os.path.relpath(out_path)
     print_next_step([
-        f"Creating records:  python3 {_script('aspace_csv_export.py')} --fill-parents "
-        f"{shlex.quote(os.path.relpath(out_path))} --env production",
-        f"Updating records:  python3 {_script('aspace_csv_import.py')} --update-only -n -f "
-        f"{shlex.quote(os.path.relpath(out_path))} --env production",
+        "Creating records:  " + shlex.join(["python3", _script("aspace_csv_export.py"),
+                                            "--fill-parents", pulled, "--env", "production"]),
+        "Updating records:  " + shlex.join(["python3", _script("aspace_csv_import.py"),
+                                            "--update-only", "-n", "-f", pulled,
+                                            "--env", "production"]),
     ])
 
 

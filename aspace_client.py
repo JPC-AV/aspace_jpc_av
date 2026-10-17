@@ -97,13 +97,11 @@ except ImportError:  # stubbed test environments
 #     scripts require an explicit --env every run. Forgetting it is a hard
 #     error, never a silent target choice.
 # ---------------------------------------------------------------------------
-try:
-    import creds as _creds
-except ImportError:
-    _creds = None
+import creds_loader  # noqa: E402 - creds.py loads through it, never as a traceback
+_creds, _creds_problem = creds_loader.load()
 
 ENVIRONMENTS = {}
-CONFIG_ERROR = None  # a creds.py problem found while loading; reported by the tools
+CONFIG_ERROR = _creds_problem  # a creds.py problem found while loading; reported by the tools
 _MISSING = object()
 if _creds is not None:
     declared = getattr(_creds, "environments", _MISSING)

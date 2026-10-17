@@ -74,10 +74,11 @@ On create, each of the two note columns becomes:
 
 with `type` `phystech` for the PhysTech column.
 
-Under `--update-only`, a changed cell replaces the **first text paragraph of
-the first note of that type that carries text**. Everything else survives:
-the note's `label`, `publish` and `persistent_id`, any further text
-paragraphs, non-text subnotes (the Duration defined list the rename tool
+Under `--update-only`, a changed cell replaces the **first non-empty text
+subnote of the first note of that type that carries text** - all of that
+subnote's content, however many paragraphs it holds. Everything else
+survives: the note's `label`, `publish` and `persistent_id`, its other text
+subnotes, its non-text subnotes (the Duration defined list the rename tool
 adds), and any additional same-type notes. A blank cell changes nothing.
 
 ## Fixed Values on Create

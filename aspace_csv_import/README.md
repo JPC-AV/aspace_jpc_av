@@ -486,8 +486,8 @@ When using `--update-only`:
 - ✅ Title
 - ✅ Dates (merged by label — a supplied date replaces only the same-label date; others are preserved)
 - ✅ Extents (format type — on records with zero or one extent, and only the type changes; everything else on the extent is kept; multi-extent records are never collapsed, and changing one errors the row)
-- ✅ Scope & Contents notes (the first note that carries text: its first text paragraph is replaced; other paragraphs and extra same-type notes preserved)
-- ✅ PhysTech notes (same rule; the Duration defined list and extra same-type notes preserved)
+- ✅ Scope & Contents notes (in the first note that carries text, its first non-empty text subnote is replaced in full, however many paragraphs it holds; the note's other text subnotes and extra same-type notes preserved)
+- ✅ PhysTech notes (same rule; other text subnotes, the Duration defined list and extra same-type notes preserved)
 
 What it preserves:
 - ❌ Component ID
@@ -795,10 +795,10 @@ ref_ids needed.
    If Airtable changes after the pull, pull again and repeat the dry run.
 
 `check_extent_types.py` remains available for finding the valid format
-names. To remove a note, clear the cell in Airtable
-*and* remove the text in the staff interface (only that paragraph - a
-PhysTech note can also hold the Duration list); blank cells never clear
-anything.
+names. To remove a note's text, clear the cell in Airtable
+*and* remove that text in the staff interface - only the text subnote the
+import manages, since a note can hold other text subnotes and a PhysTech
+note can also hold the Duration list; blank cells never clear anything.
 
 Every row is resolved and preflighted before anything is written — if any
 catalog number matches zero or multiple records, or a row would hit a guard

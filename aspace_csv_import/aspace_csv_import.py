@@ -134,10 +134,8 @@ import requests  # after aspace_client: its friendly missing-package guard runs 
 # creds.py precisely, at the moment it matters.)
 
 # Import optional logs_dir (may not exist in older creds.py files)
-try:
-    from creds import logs_dir
-except ImportError:
-    logs_dir = ""
+import creds_loader  # noqa: E402
+logs_dir = creds_loader.setting("logs_dir", "")
 
 # CSV File Configuration
 CSV_FILE = "JPCA-AV_SOURCE-ASpace_CSV_export.csv"  # Input CSV file
@@ -1131,9 +1129,11 @@ def update_archival_object(row: Dict, client: ArchivesSpaceClient,
     importer manages - dates merge by label; the extent is replaced only on
     records with at most one extent (multi-extent records are never collapsed;
     an actual extent change on one errors the row); for each managed note type
-    the first TEXT-BEARING note's first paragraph is replaced while its other subnotes (e.g. the
-    Duration defined list added by aspace-rename-directories.py) and any
-    additional same-type notes are preserved. A blank CSV cell leaves the
+    the first TEXT-BEARING note's first non-empty text subnote is replaced in
+    full (however many paragraphs its content holds) while its other subnotes
+    (further text subnotes, the Duration defined list added by
+    aspace-rename-directories.py) and any additional same-type notes are
+    preserved. A blank CSV cell leaves the
     existing value untouched. This import can never clear a field - deletions
     are done in ArchivesSpace directly. detect_changes() applies the same
     rules so reported changes match applied changes.
@@ -1293,9 +1293,10 @@ def update_archival_object(row: Dict, client: ArchivesSpaceClient,
             if note_type in replacements and i == target_index.get(note_type):
                 new_note = replacements.pop(note_type)
                 # Replace ONLY the first text subnote (the one detection
-                # compared), in place. Every other subnote survives in its
-                # original order: additional text paragraphs someone added
-                # in the UI, and the Duration defined list.
+                # compared), in place - all of its content. Every other
+                # subnote survives in its original order: further text
+                # subnotes someone added in the UI, and the Duration
+                # defined list.
                 new_text = [sn for sn in new_note.get("subnotes", [])
                             if sn.get('jsonmodel_type') == 'note_text']
                 merged_subnotes = []

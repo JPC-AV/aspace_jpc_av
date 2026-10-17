@@ -60,10 +60,8 @@ CATALOG_RE = col.CATALOG_NUMBER_RE  # the shared contract (sheet_rules)
 
 # Reports directory: same convention as the other tools - a custom logs_dir
 # gets a per-script subfolder.
-try:
-    from creds import logs_dir
-except ImportError:
-    logs_dir = ""
+import creds_loader  # noqa: E402
+logs_dir = creds_loader.setting("logs_dir", "")
 DEFAULT_OUTPUT_DIR = os.path.expanduser("~/aspace_mads_reports")
 OUTPUT_DIR = os.path.join(logs_dir, "mads_reports") if logs_dir else DEFAULT_OUTPUT_DIR
 
@@ -204,6 +202,10 @@ def main():
     args = parser.parse_args()
     if args.no_color:
         Colors.disable()
+    # MADS needs no credentials; a broken creds.py only costs the logs_dir setting
+    creds_problem = creds_loader.problem()
+    if creds_problem:
+        print_status("warning", f"{creds_problem} Using the default reports folder.")
 
     from aspace_csv_export import read_catalog_list  # late import: avoids cycle
     numbers, problem = read_catalog_list(args.file)

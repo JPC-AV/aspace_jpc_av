@@ -31,10 +31,8 @@ from console import (Colors, print_status, print_run_header, print_result,  # sh
                      styled_parser)
 
 # Import optional logs_dir (may not exist in older creds.py files)
-try:
-    from creds import logs_dir
-except ImportError:
-    logs_dir = ""
+import creds_loader  # noqa: E402
+logs_dir = creds_loader.setting("logs_dir", "")
 
 # Output Configuration - a custom logs_dir gets a per-script subfolder so the
 # import/export/rename tools sharing one creds setting don't interleave files.

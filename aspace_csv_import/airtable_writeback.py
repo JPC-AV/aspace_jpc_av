@@ -49,11 +49,9 @@ TRACKING_LABEL = "((( ASpace_tracking )))"
 
 PATCH_BATCH = 10  # Airtable's per-request record limit
 
-try:
-    from creds import airtable_pat_write
-except ImportError:
-    airtable_pat_write = ""
-AIRTABLE_PAT_WRITE = airtable_pat_write or os.environ.get("AIRTABLE_PAT_WRITE", "")
+import creds_loader  # noqa: E402 - beside aspace_client at the repo root
+AIRTABLE_PAT_WRITE = (creds_loader.setting("airtable_pat_write", "")
+                      or os.environ.get("AIRTABLE_PAT_WRITE", ""))
 
 REF_ID_RE = re.compile(r"[0-9a-f]{32}")
 
@@ -144,7 +142,8 @@ def load_report(path, exclude=()):
 
     repo_id = str((aspace_client.ENVIRONMENTS.get("production") or {}).get("repo_id") or "")
     if not repo_id:
-        raise PullError("creds.py has no production environment - cannot check record URIs")
+        raise PullError(aspace_client.CONFIG_ERROR
+                        or "creds.py has no production environment - cannot check record URIs")
     uri_re = re.compile(rf"/repositories/{re.escape(repo_id)}/archival_objects/[0-9]+")
 
     records = {}
@@ -574,11 +573,13 @@ def main():
                            else "preview - nothing is written to Airtable"))
 
     if not pull.AIRTABLE_PAT_READ_ONLY:
-        print_status("error", "No read token - add airtable_pat_read_only to creds.py")
+        print_status("error", creds_loader.problem()
+                     or "No read token - add airtable_pat_read_only to creds.py")
         sys.exit(1)
     if args.run and not AIRTABLE_PAT_WRITE:
-        print_status("error", "No write token - add airtable_pat_write to creds.py "
-                              "(data.records:write on this base)")
+        print_status("error", creds_loader.problem()
+                     or "No write token - add airtable_pat_write to creds.py "
+                        "(data.records:write on this base)")
         sys.exit(1)
 
     try:  # Ctrl-C while reading: nothing has been written yet

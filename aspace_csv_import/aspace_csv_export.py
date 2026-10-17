@@ -118,10 +118,8 @@ assert set(EXPORT_COLUMNS) - set(col.REQUIRED_COLUMNS) == set(col.EXPORT_AUDIT_C
 from check_mads import MADS_URL_PREFIX, check_many, summarize, clobber_problem  # noqa: E402
 
 # Import optional logs_dir (same convention as the importer)
-try:
-    from creds import logs_dir
-except ImportError:
-    logs_dir = ""
+import creds_loader  # noqa: E402
+logs_dir = creds_loader.setting("logs_dir", "")
 # A custom logs_dir gets a per-script subfolder (matching the importer/rename
 # convention) so the tools sharing one creds setting don't interleave files.
 DEFAULT_OUTPUT_DIR = os.path.expanduser("~/aspace_import_reports")
