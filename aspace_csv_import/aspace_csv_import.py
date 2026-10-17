@@ -43,18 +43,29 @@ CLI_OPTIONS = [
     ("--env NAME", "", "Target environment from creds.py (required when several are configured)"),
     ("--no-color", "", "Disable colored output"),
 ]
-# Human-readable labels for the internal duplicate_mode tokens (which are
-# what the JSON report summaries record).
+# Human-readable labels for the internal duplicate_mode tokens. The JSON
+# report summaries record the mode as report_mode() spells it instead.
 MODE_LABELS = {
     'create': 'create-records (abort if any record already exists)',
-    'skip': 'create-records --skip-duplicates (create new, skip existing)',
+    'skip': 'create-records --keep-going (skip existing, refuse problem rows, create the rest)',
     'update-only': 'update-only (never creates)',
 }
+
+
+def report_mode(duplicate_mode: str) -> Dict:
+    """The mode as the JSON report summaries record it. Create runs say
+    whether --keep-going was given; update-only runs carry no keep_going,
+    which does not apply to them. (Reports saved before --keep-going
+    replaced --skip-duplicates record "duplicate_mode" instead - no tool
+    reads either field back.)"""
+    if duplicate_mode == 'update-only':
+        return {"mode": "update-only"}
+    return {"mode": "create-records", "keep_going": duplicate_mode == 'skip'}
 
 MODE_OPTIONS = [
     ("--create-records", "(pick one)", "Create records; aborts before writing if ANY row already exists"),
     ("--update-only", "(pick one)", "Update existing records (narrow or full CSV); never creates"),
-    ("--skip-duplicates", "", "With --create-records: create new rows, skip existing ones"),
+    ("--keep-going", "", "With --create-records: skip existing rows, refuse problem rows, create the rest"),
 ]
 
 
@@ -81,7 +92,9 @@ def get_colored_help():
          f"""    {", ".join(col.REQUIRED_COLUMNS[:5])},
     {", ".join(col.REQUIRED_COLUMNS[5:])}
     {C.DIM}Other columns are ignored. A blank ASpace Parent RefID column can be filled first:{C.RESET}
-    {C.GREEN}${C.RESET} python3 aspace_csv_export.py --fill-parents FILE --env production   # writes FILE_ready.csv + FILE_review.csv"""),
+    {C.GREEN}${C.RESET} python3 aspace_csv_export.py --fill-parents FILE --env production
+    Writes jpc-fill_FILE_parent_ref-id_ready_for_ASpace_import.csv
+    and jpc-fill_FILE_needs_human_review.csv beside FILE."""),
         ("EXAMPLES", f"""    {C.GREEN}${C.RESET} python3 aspace_csv_import.py --create-records -f data.csv --dry-run
     {C.GREEN}${C.RESET} python3 aspace_csv_import.py --create-records -f data.csv
     {C.GREEN}${C.RESET} python3 aspace_csv_import.py --update-only -f data.csv"""),
@@ -330,7 +343,7 @@ def validate_csv_before_import(filename: str, update_only: bool = False) -> Tupl
 
                 # A held row is refused in the plan with its hold reason; its
                 # content (parent, dates, title) is not checked here, so one
-                # held row with a blank parent cannot stop a --skip-duplicates
+                # held row with a blank parent cannot stop a --keep-going
                 # run before the plan exists. Structural checks above still apply.
                 if col.hold_problem(row):
                     continue
@@ -1466,7 +1479,7 @@ def process_csv_row(row: Dict, row_num: int, client: ArchivesSpaceClient,
             return result
 
         # An existing record is never touched by a create-mode run: skipped
-        # (--skip-duplicates) or halts the run (strict --create-records, where
+        # (--keep-going) or halts the run (strict --create-records, where
         # the preflight already said everything was new - reaching this means
         # the record appeared since). Updating existing records is
         # --update-only's job - it refuses to create, so a typo'd catalog
@@ -1698,7 +1711,7 @@ def process_csv_file_update_only(filename: str, client: ArchivesSpaceClient,
         "total_rows": 0, "created": 0, "updated": 0, "unchanged": 0,
         "failed": 0, "skipped": 0, "aborted": 0,
         "start_time": datetime.now().isoformat(), "end_time": None,
-        "dry_run": dry_run, "duplicate_mode": "update-only",
+        "dry_run": dry_run, **report_mode("update-only"),
         "environment": aspace_client.ACTIVE_ENV,
         "command": RUN_COMMAND,
     }
@@ -1935,7 +1948,7 @@ def _preflight_create_row(row_num: int, row: Dict, client: ArchivesSpaceClient,
             plan[row_num] = {"action": "refuse", "catalog": catalog_number, "reason": reason}
 
     if not catalog_number:
-        if allow_existing:  # --skip-duplicates has always skipped these
+        if allow_existing:  # --keep-going has always skipped these
             if plan is not None:
                 plan[row_num] = {"action": "skip", "catalog": f"row {row_num}",
                                  "reason": "Missing catalog number"}
@@ -1949,7 +1962,7 @@ def _preflight_create_row(row_num: int, row: Dict, client: ArchivesSpaceClient,
     held = col.hold_problem(row)
     if held:
         # Strict create stops the batch on this, as on any problem row;
-        # --skip-duplicates refuses just this row.
+        # --keep-going refuses just this row.
         refuse(held)
         return
     count, existing_uri = client.check_component_unique_id(catalog_number)
@@ -2021,7 +2034,7 @@ def process_csv_file(filename: str, client: ArchivesSpaceClient,
     exists, extent type valid, container indicator unambiguous; if any row
     fails, the entire run aborts with no writes. (Runtime API failures
     during phase 2 can still leave a partial create - those are surfaced
-    in the report and the non-zero exit.) duplicate_mode 'skip' (--skip-duplicates): the
+    in the report and the non-zero exit.) duplicate_mode 'skip' (--keep-going): the
     same checks sort every row into create / skip (already exists) / refused,
     without stopping the run; only the creates are written.
 
@@ -2047,7 +2060,7 @@ def process_csv_file(filename: str, client: ArchivesSpaceClient,
         "start_time": datetime.now().isoformat(),
         "end_time": None,
         "dry_run": dry_run,
-        "duplicate_mode": duplicate_mode,
+        **report_mode(duplicate_mode),
         "environment": aspace_client.ACTIVE_ENV,
         "command": RUN_COMMAND,
     }
@@ -2067,7 +2080,7 @@ def process_csv_file(filename: str, client: ArchivesSpaceClient,
     # --- Phase 1: check every row and build the plan. No writes happen here,
     # so an abort means NOTHING was written - fix the sheet and rerun safely.
     # Mirror of --update-only's resolve phase. Strict create aborts on any
-    # problem; --skip-duplicates refuses just those rows.
+    # problem; --keep-going refuses just those rows.
     print_status("info", f"Checking {len(rows)} row(s) before writing anything "
                          f"(catalog number new, parent exists, format valid, "
                          f"container unambiguous)...")
@@ -2101,9 +2114,10 @@ def process_csv_file(filename: str, client: ArchivesSpaceClient,
                                      indent=1)
             if any('already exists' in m for n, r, m in problems):
                 print(f"\n  Use --update-only instead of --create-records to change already\n"
-                      f"  existing records with new csv metadata, or add --skip-duplicates to\n"
-                      f"  --create-records to create only the new rows on the csv - or, better\n"
-                      f"  yet, go back and clean up your data before trying to import. 🙂")
+                      f"  existing records with new csv metadata, or add --keep-going to\n"
+                      f"  --create-records to skip the existing rows (and refuse any other\n"
+                      f"  problem rows) and create the rest - or, better yet, go back and\n"
+                      f"  clean up your data before trying to import. 🙂")
             for row_num, row in enumerate(rows, 1):
                 if row_num in problem_rows:
                     msg = next(m for n, r, m in problems if n == row_num)
@@ -2337,7 +2351,7 @@ def generate_reports(results: List[Dict], summary: Dict) -> bool:
             tmp_path = RECORDS_REPORT + '.tmp'
             with open(tmp_path, 'w', encoding='utf-8') as f:
                 json.dump({"summary": {k: summary.get(k) for k in
-                                       ('command', 'environment', 'duplicate_mode',
+                                       ('command', 'environment', 'mode', 'keep_going',
                                         'dry_run', 'start_time',
                                         'snapshots_expected', 'snapshots_captured',
                                         'snapshots_missing',
@@ -2505,7 +2519,7 @@ def print_next_step(summary: Dict, results: List[Dict] = None) -> None:
     production reports only) and runs that created nothing get no
     write-back suggestion."""
     created = summary.get("created", 0)
-    if (summary.get("dry_run") or summary.get("duplicate_mode") == "update-only"
+    if (summary.get("dry_run") or summary.get("mode") == "update-only"
             or summary.get("environment") != "production"
             or not created or not summary.get("report_file")):
         return
@@ -2619,7 +2633,7 @@ def build_parser() -> argparse.ArgumentParser:
         help=argparse.SUPPRESS
     )
     parser.add_argument(
-        '--skip-duplicates',
+        '--keep-going',
         action='store_true',
         help=argparse.SUPPRESS
     )
@@ -2641,8 +2655,8 @@ def recorded_command(args: argparse.Namespace) -> str:
         parts.append('--create-records')
     if args.update_only:
         parts.append('--update-only')
-    if args.skip_duplicates:
-        parts.append('--skip-duplicates')
+    if args.keep_going:
+        parts.append('--keep-going')
     if args.dry_run:
         parts.append('--dry-run')
     if args.env:
@@ -2675,9 +2689,9 @@ def main():
         # first time someone runs the script bare.
         parser.error("a mode is required: --create-records (make new records) "
                      "or --update-only (change existing records)")
-    if args.skip_duplicates and not args.create_records:
-        parser.error("--skip-duplicates only applies to --create-records "
-                     "(--update-only never creates, so there is nothing to skip)")
+    if args.keep_going and not args.create_records:
+        parser.error("--keep-going only applies to --create-records "
+                     "(--update-only stops before writing if any row fails its checks)")
     
     # Handle color disable
     if args.no_color:
@@ -2729,7 +2743,7 @@ def main():
     
     if args.update_only:
         duplicate_mode = 'update-only'
-    elif args.skip_duplicates:
+    elif args.keep_going:
         duplicate_mode = 'skip'
     else:
         duplicate_mode = 'create'

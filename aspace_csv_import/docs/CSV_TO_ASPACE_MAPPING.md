@@ -22,7 +22,7 @@ accepts a narrow sheet: `CATALOG_NUMBER` plus any of the columns marked
 
 | CSV column | ArchivesSpace field | `--create-records` | `--update-only` |
 |---|---|---|---|
-| CATALOG_NUMBER | `component_id`; `top_container.indicator` | Must match `JPC_AV_<digits>`. A record with this component_id already existing aborts the run before any write (or, with `--skip-duplicates`, skips just that row). The AV Case top container with this indicator is **reused** if exactly one exists, **created** if none, and the row is refused if several share it. | The matching key. Never changed. |
+| CATALOG_NUMBER | `component_id`; `top_container.indicator` | Must match `JPC_AV_<digits>`. A record with this component_id already existing aborts the run before any write (or, with `--keep-going`, skips just that row). The AV Case top container with this indicator is **reused** if exactly one exists, **created** if none, and the row is refused if several share it. | The matching key. Never changed. |
 | ASpace Title | `title` | Blank falls back to the catalog number. | Mutable. Blank leaves the stored title alone. |
 | Creation or Recording Date | `dates[]`, label `creation` | Single date; see *Dates* below. | Mutable; see *Dates*. |
 | Edit Date | `dates[]`, label `Edited` | Same. | Same. |

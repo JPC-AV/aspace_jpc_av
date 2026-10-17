@@ -156,7 +156,7 @@ their own checks, PLANs and `yes` prompts. `jpc` lists them;
 | `jpc-pull --view NAME` | `airtable_pull.py NAME` |
 | `jpc-check --file FILE [--output PATH]` | `aspace_csv_export.py --check FILE --env production` |
 | `jpc-fill --file FILE` | `aspace_csv_export.py --fill-parents FILE --env production` |
-| `jpc-import --file FILE [--dry-run] [--skip-duplicates]` | `aspace_csv_import.py --create-records --file FILE --env production` |
+| `jpc-import --file FILE [--dry-run] [--keep-going]` | `aspace_csv_import.py --create-records --file FILE --env production` |
 | `jpc-update --file FILE [--dry-run]` | `aspace_csv_import.py --update-only --file FILE --env production` |
 | `jpc-writeback --report REPORT.json [--run] [--exclude-catalog NUM]...` | `airtable_writeback.py REPORT.json` |
 
@@ -193,7 +193,7 @@ See [aspace_csv_import/README.md](aspace_csv_import/README.md) for full document
 
 ### aspace_csv_export
 
-The reverse of the importer: exports AV records to an import-shaped CSV with audit columns (ref ID, Warnings, Level, Depth, Path, URI, staff link, MADS URL, created/modified) for round-trip editing with `--update-only` or as an audit report. Rows come out in tree order (`--list` keeps list order), so `--level all` reads like the ArchivesSpace tree. `--check FILE` prints which catalog numbers are in ArchivesSpace and, given an Airtable pull, whether its parent and Item Record Created agree with ArchivesSpace. `--fill-parents FILE` fills a sheet's empty parent ref IDs from its `EJS Episode` and `ASpace File Type` columns, writing `FILE_ready.csv` and `FILE_review.csv` beside it. Read-only.
+The reverse of the importer: exports AV records to an import-shaped CSV with audit columns (ref ID, Warnings, Level, Depth, Path, URI, staff link, MADS URL, created/modified) for round-trip editing with `--update-only` or as an audit report. Rows come out in tree order (`--list` keeps list order), so `--level all` reads like the ArchivesSpace tree. `--check FILE` prints which catalog numbers are in ArchivesSpace and, given an Airtable pull, whether its parent and Item Record Created agree with ArchivesSpace. `--fill-parents FILE` fills a sheet's empty parent ref IDs from its `EJS Episode` and `ASpace File Type` columns, writing `jpc-fill_FILE_parent_ref-id_ready_for_ASpace_import.csv` and `jpc-fill_FILE_needs_human_review.csv` beside it (`FILE` is the input name without `.csv`). Read-only.
 
 ```bash
 cd aspace_csv_import

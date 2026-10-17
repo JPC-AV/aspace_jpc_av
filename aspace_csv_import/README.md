@@ -17,7 +17,7 @@ This script imports item-level archival objects from CSV files into ArchivesSpac
 - [Modes](#modes)
   - [The plan and the yes prompt](#the-plan-and-the-yes-prompt)
   - [Create (--create-records)](#create---create-records)
-  - [Create, skipping existing (--skip-duplicates)](#create-skipping-existing---skip-duplicates)
+  - [Create, without stopping for problem rows (--keep-going)](#create-without-stopping-for-problem-rows---keep-going)
   - [Update (--update-only)](#update---update-only)
   - [Update-only (narrow CSV)](#update-only-narrow-csv)
 - [Output](#output)
@@ -175,7 +175,7 @@ hold columns are read by every tool (see Holds below).
 **Holds.** A row whose `ASpace Hold` is `checked` is never processed: the
 fill sends it to the review file; strict `--create-records` and
 `--update-only` stop the whole batch before writing anything (like any
-problem row); `--skip-duplicates` refuses just that row; the Airtable
+problem row); `--keep-going` refuses just that row; the Airtable
 write-back leaves it alone (it reads the hold live from Airtable, so an item
 held after it was created is protected too); `--check` still lists it,
 marked. `airtable_pull.py` always includes `ASpace Hold` and `ASpace Issue`,
@@ -229,7 +229,7 @@ Options:
   -f FILE, --file FILE  CSV file to import
   -u USERNAME           ArchivesSpace username
   -p PASSWORD           ArchivesSpace password
-  --skip-duplicates     With --create-records: create new rows, skip existing ones
+  --keep-going          With --create-records: skip existing rows, refuse problem rows, create the rest
   --env NAME            Target environment from creds.py (required when several are configured)
   --no-color            Disable colored output
 ```
@@ -241,7 +241,7 @@ existing ones. Every mode checks every row before writing anything. Strict
 `--create-records` and `--update-only` abort on any problem, and their aborts
 are mirror images - create aborts if a catalog number EXISTS, update-only
 aborts if one DOESN'T. An abort means nothing was written, so fixing the
-sheet and rerunning is safe. `--skip-duplicates` sorts rows into create /
+sheet and rerunning is safe. `--keep-going` sorts rows into create /
 skip / refused instead of aborting. In every mode a lookup that fails or
 matches multiple records is refused: an unverifiable answer is never
 permission to write. (A runtime API failure mid-run can still leave earlier
@@ -293,9 +293,9 @@ python aspace_csv_import.py --create-records -f file.csv
   problem row, with links)
 - A clean, careful run: no silent skips hiding a surprise
 
-### Create, skipping existing (--skip-duplicates)
+### Create, without stopping for problem rows (--keep-going)
 ```bash
-python aspace_csv_import.py --create-records --skip-duplicates -f file.csv
+python aspace_csv_import.py --create-records --keep-going -f file.csv
 ```
 - For deliberate recovery (a batch that was partly created), not routine
   mixed sheets - the routine fix is an Airtable view that leaves out items
@@ -303,8 +303,17 @@ python aspace_csv_import.py --create-records --skip-duplicates -f file.csv
 - Checks every row like strict create, but sorts them into create / skip /
   refused instead of aborting; the plan shows all three before you confirm
 - Existing records are never touched (changing them is --update-only's job)
+- A problem found in the CSV check (before connecting) still stops the
+  whole run, as in strict create
 - Rows are then created one at a time, so an earlier row can be created
-  before a later one fails at runtime
+  before a later one fails at runtime. In either create mode a row that
+  fails while being written is reported and the run moves on; created item
+  records are not rolled back
+- A record that appears in ArchivesSpace after the checks stops a strict
+  run at that row. With `--keep-going`, exactly one existing record means
+  that row is skipped; more than one means it is refused
+- Formerly `--skip-duplicates` (renamed because it does more than skip
+  duplicates; the old name is no longer accepted)
 
 ### Update (--update-only)
 ```bash
@@ -319,7 +328,7 @@ python aspace_csv_import.py --update-only -f file.csv
 - The plan shows each changing record's current and new values in full;
   unchanged records are counted
 - Mixed sheet with genuinely new records? Run
-  `--create-records --skip-duplicates` first (new rows created, existing
+  `--create-records --keep-going` first (new rows created, existing
   skipped), wait a minute for the search index, then --update-only for
   the changes
 
@@ -512,7 +521,7 @@ and any report can be matched to the run that wrote it):
 
 - `csv_import_<stamp>.log` - detailed log: target, the exact command, every lookup and write
 - `import_report_<stamp>.csv` - the receipt: one row per input row with status, message, URI, ref ID, staff link, and every mapped column; row 1 is a `# command | target | time` provenance line, like the exports
-- `import_report_<stamp>.json` - the same receipt plus a summary block (counts, mode, environment, command, snapshot completeness) and per-row change details
+- `import_report_<stamp>.json` - the same receipt plus a summary block (counts, mode, environment, command, snapshot completeness) and per-row change details. The mode is `"mode": "create-records"` with `"keep_going": true` or `false`, or `"mode": "update-only"` (no `keep_going` - it does not apply); the records file's summary records the same. Reports saved before `--keep-going` replaced `--skip-duplicates` record `"duplicate_mode"` (`create`, `skip` or `update-only`) instead; the write-back reads both alike
 - `import_records_<stamp>.json` - the records as ArchivesSpace holds them after the run, read back after each write (archival object plus its top container), keyed by catalog number
 
 The summary names the JSON report (`Report: import_report_<stamp>.json`):
@@ -646,9 +655,11 @@ do not block filling; this is not a resource-wide subseries naming policy.
 A value already in the sheet is never replaced. `Raw` rows are always left
 for a person, because a tape in a multi-tape set goes under that set's own
 file record. The sheet itself is never edited: the fill writes two new files
-beside it, `your_file_ready.csv` (the parent-ready rows - the file the rest
-of the workflow uses) and `your_file_review.csv` (the rows left for a person,
-with a `Fix in` column saying where to look first). It refuses to run if
+beside it, `jpc-fill_your_file_parent_ref-id_ready_for_ASpace_import.csv`
+(the parent-ready rows - the file the rest of the workflow uses) and
+`jpc-fill_your_file_needs_human_review.csv` (rows needing human review,
+with a `Fix in` column saying where to look first). Here `your_file` is the
+input filename without `.csv`. It refuses to run if
 either already exists, and `-o` does not apply. Exit code 2 means some rows
 are in the review file - expected, and both files are written.
 `--list` accepts a plain text file (one number per line) or any CSV with a
@@ -705,7 +716,9 @@ environment is configured; use `--env sandbox` for a trial run.
    ```bash
    python aspace_csv_export.py --fill-parents __airtable_exports__/VIEW_NAME_<stamp>.csv --env production
    ```
-   Writes `..._ready.csv` and `..._review.csv` beside the pull (see
+   Writes `jpc-fill_<pull-name>_parent_ref-id_ready_for_ASpace_import.csv` and
+   `jpc-fill_<pull-name>_needs_human_review.csv` beside the pull, where
+   `<pull-name>` is its filename without `.csv` (see
    [aspace_csv_export.py](#aspace_csv_exportpy)). Every later step uses the
    **ready** file. Review rows are fixed in Airtable - or, when `Fix in`
    says so and Airtable's values are right, in the ArchivesSpace hierarchy -
@@ -723,13 +736,13 @@ environment is configured; use `--env sandbox` for a trial run.
 4. **Dry run** - checks every row (new catalog number, parent exists, valid
    format, unambiguous container) and prints the PLAN; writes nothing
    ```bash
-   python aspace_csv_import.py --create-records -n -f __airtable_exports__/VIEW_NAME_<stamp>_ready.csv --env production
+   python aspace_csv_import.py --create-records -n -f __airtable_exports__/jpc-fill_VIEW_NAME_<stamp>_parent_ref-id_ready_for_ASpace_import.csv --env production
    ```
    Read the plan: titles, where each item goes, dates, formats, notes.
 
 5. **Run import** - the same file and flags, without `-n`
    ```bash
-   python aspace_csv_import.py --create-records -f __airtable_exports__/VIEW_NAME_<stamp>_ready.csv --env production
+   python aspace_csv_import.py --create-records -f __airtable_exports__/jpc-fill_VIEW_NAME_<stamp>_parent_ref-id_ready_for_ASpace_import.csv --env production
    ```
    It shows the plan again and writes only after you type `yes`. When it
    finishes, it prints the exact command for step 6.

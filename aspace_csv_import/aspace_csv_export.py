@@ -1035,11 +1035,11 @@ def write_export_csv(rows, path, extra_headers=(), provenance=None):
 
 
 def fill_output_paths(sheet_path):
-    """(ready, review): <sheet>_ready.csv and <sheet>_review.csv beside the
-    sheet. The pulled file itself is never touched."""
-    stem = os.path.join(os.path.dirname(sheet_path) or ".",
-                        os.path.splitext(os.path.basename(sheet_path))[0])
-    return f"{stem}_ready.csv", f"{stem}_review.csv"
+    """The ready and human-review CSV paths beside the input sheet."""
+    directory = os.path.dirname(sheet_path) or "."
+    stem = os.path.splitext(os.path.basename(sheet_path))[0]
+    return (os.path.join(directory, f"jpc-fill_{stem}_parent_ref-id_ready_for_ASpace_import.csv"),
+            os.path.join(directory, f"jpc-fill_{stem}_needs_human_review.csv"))
 
 
 def fix_in(note):
@@ -1555,7 +1555,8 @@ SELECT_OPTIONS = [
 FILL_OPTIONS = [
     ("--fill-parents FILE", "", "Fill blank ASpace Parent RefID cells from EJS Episode + ASpace File Type"),
     ("", "", "(keep EJS Episode filled - a blank cell falls back to the title, which must then follow the pattern)"),
-    ("", "", "Writes FILE_ready.csv (import this) and FILE_review.csv (rows needing a person) beside FILE;"),
+    ("", "", "Writes jpc-fill_FILE_parent_ref-id_ready_for_ASpace_import.csv"),
+    ("", "", "and jpc-fill_FILE_needs_human_review.csv beside FILE (FILE's name without .csv);"),
     ("", "", "never overwrites either - FILE itself is left untouched"),
 ]
 EXPORT_CLI_OPTIONS = [
@@ -1592,7 +1593,9 @@ def get_colored_help():
     {C.GREEN}${C.RESET} python3 aspace_csv_import/aspace_csv_export.py --check batch.csv --env production
     {C.GREEN}${C.RESET} python3 aspace_csv_import/aspace_csv_export.py --fill-parents batch.csv --env production"""),
         ("OUTPUT", f"""    Exports: {C.CYAN}{OUTPUT_DIR}/{C.RESET} (or -o)
-    --fill-parents: FILE_ready.csv and FILE_review.csv beside FILE
+    --fill-parents: two CSVs beside FILE, using its name without .csv:
+      jpc-fill_FILE_parent_ref-id_ready_for_ASpace_import.csv
+      jpc-fill_FILE_needs_human_review.csv
     --check: on screen only (a CSV too with -o)
     {C.DIM}The reports folder can be changed by setting logs_dir in creds.py{C.RESET}"""),
         ("EXIT", f"""    {C.GREEN}0{C.RESET}  done
@@ -1648,7 +1651,7 @@ def main():
         parser.error("--check only looks catalog numbers up - it cannot be combined "
                      "with --list, --fill-parents, --parent, --level or --mads-live")
     if args.fill_file and args.output:
-        parser.error("--fill-parents always writes FILE_ready.csv and FILE_review.csv "
+        parser.error("--fill-parents always writes its ready and human-review CSVs "
                      "beside FILE - -o does not apply")
 
     # Environment selection: same contract as every other tool - auto with
