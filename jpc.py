@@ -17,7 +17,8 @@ refused however it is spelled - prints it, and hands the terminal to the
 tool (same Python; Ctrl-C and the exit code are the tool's own).
 
 Installed as commands by `python -m pip install -e .` in the repo root,
-inside the JPC_AV environment (see pyproject.toml). Standard library plus
+into each Python environment that should have them (see pyproject.toml);
+jpc-shell-hint.zsh is the optional zsh hint. Standard library plus
 console.py only, so the help screens work even when a package is missing.
 """
 
@@ -1375,6 +1376,7 @@ def overview_help():
                "update": "writes ArchivesSpace", "writeback": "writes Airtable"}
     width = max(len(f"jpc-{v}") for v in ORDER)
     title_width = max(len(COMMANDS[v]["title"]) for v in ORDER)
+    hint = shlex.quote(str(ROOT / "jpc-shell-hint.zsh"))
     lines = [f"    {C.GREEN}{'jpc-' + v:<{width}}{C.RESET}  {COMMANDS[v]['title']:<{title_width}}   "
              + (f"{C.YELLOW}{C.BOLD}{touches[v]}{C.RESET}" if touches[v].startswith("writes")
                 else f"{C.DIM}{touches[v]}{C.RESET}")
@@ -1428,10 +1430,15 @@ def overview_help():
     REPORT  the JSON path from "Saved import report:"
 
     Each command's --help explains its step in detail."""),
-        ("SETUP", f"""    Once per machine, with the JPC_AV environment active, in the repo folder:
+        ("SETUP", f"""    Install once into each Python environment you use - any name works;
+    JPC_AV is only an example. Activate it, then in the repo folder run
         {C.GREEN}python -m pip install -e .{C.RESET}
-    "command not found": the JPC_AV environment is not active, or this
-    one-time install has not been done yet."""),
+
+    "command not found": the environment that has the commands is not
+    active, or they are not installed in the active one yet.
+
+    Optional - a hint in zsh that says which: add this line to ~/.zshrc
+        {C.GREEN}[ -f {hint} ] && source {hint}{C.RESET}"""),
         ("EXIT", f"""    Each command exits with its tool's own code - see its --help.
     {C.YELLOW}2{C.RESET} when a jpc- command refuses the command line, before the tool runs."""),
     ])
@@ -1451,8 +1458,8 @@ def missing_package():
     """The friendly message when the environment is active but lacks a
     package the tools need (an inactive environment has no jpc commands)."""
     return ("the required package 'requests' is not installed in this Python.\n"
-            "       Activate the JPC_AV environment (conda activate JPC_AV), and if it is\n"
-            "       active, run: python -m pip install -e . in the repo folder")
+            "       With the environment these commands belong to active, run in the\n"
+            "       repo folder: python -m pip install -e .")
 
 
 def configured_environments():

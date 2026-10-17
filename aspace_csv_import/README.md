@@ -756,8 +756,8 @@ environment is configured; use `--env sandbox` for a trial run.
    Reads Airtable, lists every change row by row - each tape's parent
    (`(blank) -> ref` or `already set`) and `ASpace Item Record Created`
    (`No -> Yes` or `already Yes`) - and writes only after you type `yes`.
-   Without `--run` it only previews. `--exclude-catalog NUM` leaves out a
-   record deleted since the import.
+   Without `--run` it only previews. `--exclude-catalog JPC_AV_xxxxx`
+   leaves out a record deleted since the import.
 
 `check_extent_types.py` remains available for finding the valid format
 names; the dry run already checks every format.

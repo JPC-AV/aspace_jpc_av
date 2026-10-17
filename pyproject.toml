@@ -1,7 +1,8 @@
-# Installs the jpc- commands into the active Python environment.
+# Installs the jpc- commands into the active Python environment - once
+# for each environment that should have them.
 #
-#   conda activate JPC_AV
-#   cd ~/github/jpc/aspace_jpc_av
+#   conda activate YOUR-ENVIRONMENT      (any name - JPC_AV is just an example)
+#   cd ~/github/jpc/aspace_jpc_av        (your checkout)
 #   python -m pip install -e .
 #
 # EDITABLE (-e) is required: the commands run the tools from this folder,

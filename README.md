@@ -79,28 +79,76 @@ Setting `logs_dir` in `creds.py` moves them all under one parent, each tool in i
 
 ## Setup
 
-### 1. Install dependencies
+For each person, in this order. Step 3 is once **per Python environment**:
+the `jpc-` commands exist only in the environment they were installed into -
+whichever one you choose. Its name does not matter.
+
+### 1. Get the tools
 
 ```bash
-pip install -r requirements.txt
+mkdir -p ~/github/jpc
 ```
 
-### 2. Install the `jpc-` commands
+```bash
+cd ~/github/jpc && git clone https://github.com/JPC-AV/aspace_jpc_av.git
+```
 
-Once per machine, with the JPC_AV environment active, from this folder:
+The `&&` runs the clone only if the `cd` worked.
+
+The checkout can live anywhere; the examples below use
+`~/github/jpc/aspace_jpc_av` - use your own path. Later, `git pull` in that
+folder brings the tools up to date.
+
+### 2. Choose a Python environment
+
+Any Python 3.8 or newer environment works - one you already use (for
+example the Conda environment from AV-Spex), a new one, or a plain one
+inside the checkout:
+
+```bash
+conda activate YOUR-ENVIRONMENT
+```
+
+or, without Conda, from the checkout folder:
+
+```bash
+python3 -m venv jpca_aspace
+source jpca_aspace/bin/activate
+```
+
+The Terminal prompt then starts with the environment's name in
+parentheses, such as `(JPC_AV)` or `(jpca_aspace)`.
+
+**The name does not matter.** The commands work in any environment,
+whatever it is called: `JPC_AV`, `jpca_aspace` and `YOUR-ENVIRONMENT` in
+these instructions are only examples. Use any environment you like - what
+matters is that you install the commands into it (step 3) and activate it
+before using them. (The optional hint in step 5 does not go by name either:
+it looks inside the environments Conda lists, and the checkout's
+`jpca_aspace`, for the commands themselves.)
+
+### 3. Install the `jpc-` commands into that environment
+
+With the environment active, go to the checkout folder and install:
+
+```bash
+cd ~/github/jpc/aspace_jpc_av
+```
 
 ```bash
 python -m pip install -e .
 ```
 
-This puts `jpc`, `jpc-pull`, `jpc-check`, `jpc-fill`, `jpc-import`,
-`jpc-update` and `jpc-writeback` into the environment: they exist whenever
-`(JPC_AV)` is active. The `-e` (editable) matters - the commands run the
-tools in this folder, so `git pull` keeps them current; reinstall only when a
-command is added or renamed. **"command not found" means the JPC_AV
-environment is not active, or this one-time install has not been done.**
+This installs `jpc`, `jpc-pull`, `jpc-check`, `jpc-fill`, `jpc-import`,
+`jpc-update` and `jpc-writeback`, and the one package the tools need
+(`requests`), into the **active environment only**, whatever its name. The
+commands exist whenever that environment is active; another environment
+needs its own install. The `-e` (editable) matters: the commands run the tools in this
+folder, so `git pull` keeps them current - reinstall only when a command is
+added or renamed. (`pip install -r requirements.txt` installs just
+`requests`, for running the tools directly without the commands.)
 
-### 3. Configure credentials
+### 4. Configure credentials
 
 **Important:** The repository does not contain a `creds.py` file for security reasons. You must create one locally.
 
@@ -129,6 +177,10 @@ environments = {
 }
 ```
 
+New setups use this `environments` block. A legacy flat `creds.py`
+(top-level `baseURL`/`user`/etc.) still works and is treated as a single
+`production` environment, but the block makes each target explicit.
+
 How the scripts pick the target **when run directly** (the `jpc-` commands
 default to production instead - see [Commands](#commands)):
 
@@ -139,10 +191,57 @@ default to production instead - see [Commands](#commands)):
   flag is a hard error, never a silent write to the wrong instance. Every run
   prints and logs a `Target:` line naming the instance it touched.
 
-(Legacy flat `creds.py` files — top-level `baseURL`/`user`/etc. — still work
-and are treated as a single `production` environment.)
-
 Ask your ArchivesSpace administrator if you don't know these values.
+
+### 5. Optional: the zsh hint
+
+One line in `~/.zshrc` makes a `jpc` command that is not found say why -
+which environment has the commands, or how to install them. It finds that
+environment by looking for the commands inside the environments it checks,
+not by name:
+
+```bash
+[ -f ~/github/jpc/aspace_jpc_av/jpc-shell-hint.zsh ] && source ~/github/jpc/aspace_jpc_av/jpc-shell-hint.zsh
+```
+
+Use your own checkout's path; the bare `jpc` command prints the exact line.
+The `[ -f ... ] &&` part skips the line when the file is not there - for
+example while the checkout is on an older branch - so a new Terminal never
+opens with an error.
+The hint acts only when `jpc` or a `jpc-...` command is not found. Only
+then does it look - at the environments Conda lists and at the checkout's
+`jpca_aspace` - and it never activates, installs or runs anything. If
+`~/.zshrc` already defines a `command_not_found_handler`, that one stays
+and the hint stays off.
+
+### 6. Check the setup
+
+Open a new Terminal, go to a folder outside the checkout (`cd ~`), activate
+your environment, then:
+
+```bash
+jpc
+```
+
+```bash
+jpc-check --help
+```
+
+`jpc` lists the commands and `jpc-check --help` shows its help screen.
+
+### What's wrong?
+
+- **`command not found: jpc-...`** - the environment that has the
+  commands is not active (the prompt shows which one is), or they are not
+  installed in the active environment yet (step 3). With the hint on, the
+  message says which, and gives the command to run.
+- **`the required package 'requests' is not installed`** - repeat step 3
+  with the environment these commands belong to active.
+- **`production is not set up on this computer`** - for sandbox work, add
+  `--env sandbox`; for production work, configure production access: a
+  `production` entry in `creds.py` (step 4).
+- **`the sandbox is not set up on this computer`** - add a `sandbox` entry
+  to `creds.py` (step 4).
 
 ## Commands
 
@@ -158,7 +257,7 @@ their own checks, PLANs and `yes` prompts. `jpc` lists them;
 | `jpc-fill --file FILE` | `aspace_csv_export.py --fill-parents FILE --env production` |
 | `jpc-import --file FILE [--dry-run] [--keep-going]` | `aspace_csv_import.py --create-records --file FILE --env production` |
 | `jpc-update --file FILE [--dry-run]` | `aspace_csv_import.py --update-only --file FILE --env production` |
-| `jpc-writeback --report REPORT.json [--run] [--exclude-catalog NUM]...` | `airtable_writeback.py REPORT.json` |
+| `jpc-writeback --report REPORT.json [--run] [--exclude-catalog JPC_AV_xxxxx]...` | `airtable_writeback.py REPORT.json` |
 
 - **Production by default** for the commands that talk to ArchivesSpace,
   shown before anything runs; add `--env sandbox` for the sandbox. (The tools
