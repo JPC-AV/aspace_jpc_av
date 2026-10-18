@@ -48,16 +48,17 @@ This script imports item-level archival objects from CSV files into ArchivesSpac
 
 ## Prerequisites
 
-- Python 3.8 or higher
 - Access to ArchivesSpace with appropriate permissions
-- Required Python packages:
-  ```bash
-  pip install requests
-  ```
+- Python, the `requests` package and `creds.py` - see the root README's
+  [Setup](../README.md#setup)
 
 ## Installation
 
-1. Clone the repository (the tools depend on files at two levels):
+Getting the tools, the Python environment, `requests` and `creds.py` are
+covered once, in the root README's [Setup](../README.md#setup). Two things
+are specific to the tools in this folder:
+
+1. They depend on files at two levels:
 
    **Repository root** (`aspace_jpc_av/`):
    - `aspace_client.py` - the shared ArchivesSpace client every tool imports (required)
@@ -66,22 +67,14 @@ This script imports item-level archival objects from CSV files into ArchivesSpac
 
    **This folder** (`aspace_jpc_av/aspace_csv_import/`):
    - `aspace_csv_import.py` - Main import script
-   - `aspace_csv_export.py` - Export to an import-shaped CSV (round trip, audit columns, `--mads-live`); `--check` (which numbers are already in ArchivesSpace); `--fill-parents`
+   - `aspace_csv_export.py` - Export to an import-shaped CSV (round trip, audit columns, `--mads-live`); `--check` (which JPC_AV_xxxxx are already in ArchivesSpace); `--fill-parents`
    - `airtable_pull.py` - Save an Airtable view of `<<< ASpace_import >>>` as a CSV (read-only)
    - `airtable_writeback.py` - Record a production create run's results in Airtable
    - `check_mads.py` - MADS liveness checker (public URLs; never touches ArchivesSpace)
    - `check_extent_types.py` - Extent type checker
    - `sheet_rules.py` - The sheet contract: column names and the shared validation rules (imported by the others)
 
-2. Set up credentials **at the repository root**:
-   ```bash
-   cd aspace_jpc_av
-   cp creds_template.py creds.py
-   # Edit creds.py with your username and password (see Authentication below)
-   ```
-   `creds.py` is already listed in `.gitignore`.
-
-3. Run the tools **from this folder** - every command in this document assumes it:
+2. Run the tools **from this folder** - every command in this document assumes it:
    ```bash
    cd aspace_csv_import
    ```
@@ -96,27 +89,11 @@ This script imports item-level archival objects from CSV files into ArchivesSpac
 
 ### Method 1: Credentials File (Preferred)
 
-Copy the template and add your credentials. Both files live at the
-**repository root**, one level above this folder:
-```bash
-cp ../creds_template.py ../creds.py
-```
-
-Edit `../creds.py` - credentials live inside the `environments` dict, one
-entry per ArchivesSpace instance (the template ships with the sandbox
-filled in and production commented out):
-```python
-environments = {
-    "sandbox": {
-        "baseURL": "https://api-jpcsb.as.atlas-sys.com",
-        "user": "your_username",
-        "password": "your_password",
-        "repo_id": "2",
-        "resource_id": "7",
-        "staff_url": "https://staff-jpcsb.as.atlas-sys.com",
-    },
-}
-```
+`creds.py` lives at the **repository root**, one level above this folder
+(`../creds.py`). The root README's
+[Setup, step 4](../README.md#4-configure-credentials) shows how to create it
+from `creds_template.py`: credentials live in its `environments` dict, one
+entry per ArchivesSpace instance.
 
 With one environment configured it is selected automatically; with several,
 every run must say which with `--env NAME` (there is no default - a
@@ -197,11 +174,10 @@ Hold` ticked, or `ASpace Issue` not empty) is the team's list of open items.
 
 ## Quick Start
 
-```bash
-# Set up credentials (one time) - at the repository root, one level up
-cp ../creds_template.py ../creds.py
-# Edit ../creds.py with your username and password (see Authentication)
+One-time setup, including `creds.py`, is in the root README's
+[Setup](../README.md#setup). Then, from this folder:
 
+```bash
 # Run commands (with creds.py configured):
 python aspace_csv_import.py --create-records -n -f your_file.csv   # Dry run
 python aspace_csv_import.py --create-records -f your_file.csv      # Create records
@@ -220,7 +196,9 @@ python aspace_csv_import.py --env sandbox --create-records -n -f your_file.csv
 
 ```
 Mode (required - choose one):
-  --create-records      Create records; aborts before writing if ANY row already exists
+  --create-records      Create records. Without --keep-going, any preflight problem
+                        stops the run before writing. Once writing starts, a failed
+                        row is reported; records already created stay
   --update-only         Update existing records (narrow or full CSV); never creates
 
 Options:
@@ -585,9 +563,9 @@ Every number lands on exactly one line, the first that applies:
 | Marked Yes, not found in ArchivesSpace | Airtable says the record was created; no record has the number |
 | In ArchivesSpace, parent differs | Airtable's parent is not the record's parent in ArchivesSpace (including a parent in Airtable for a top-level record) |
 | In ArchivesSpace, Airtable incomplete | the Airtable parent is blank while ArchivesSpace has one, or the item is not marked Yes. (A blank parent for a top-level record agrees.) |
-| In ArchivesSpace, compared fields agree | the compared columns match |
+| In ArchivesSpace, compared fields agree | the compared columns match. If the file has all four of `ASpace Parent RefID`, `((( ASpace Item Record Created )))`, `ASpace Hold` and `ASpace Issue` (spelled exactly), an item with no hold and no issue is counted on screen, not listed; a held item (an unreadable hold included) or one with an issue is always listed. `-o` lists every one |
 | In ArchivesSpace | the record exists (nothing was compared) |
-| Not found by catalog number | no record has the number - not a verdict that it is new |
+| Not found by JPC_AV_xxxxx | no record has the number - not a verdict that it is new |
 
 Each line needing review lists every fact that applies (a parent that differs
 *and* a missing Yes both show). Holds (`[on hold: ...]`) and open issues on
@@ -672,15 +650,29 @@ Check which catalog numbers are live in MADS (the public DAMS delivery).
 Public URLs only - ArchivesSpace is never contacted.
 ```bash
 python check_mads.py numbers.txt          # or any CSV with a CATALOG_NUMBER column
+python check_mads.py --directory /Volumes/AV_DRIVE/batch   # a batch folder's items
 ```
+With `--directory`, the JPC_AV_xxxxx come from the item folders directly
+inside the batch folder, named `JPC_AV_<digits>` or, after the rename tool,
+`JPC_AV_<digits>_refid_<RefID>`; each is checked once. The whole folder is
+read before anything is checked. A JPC_AV_xxxxx found in more than one
+folder is checked once, and all its folders are listed for review. Symlinks
+(not followed) and `JPC_AV_` names that are not item folders are listed for
+review and not checked; other entries are ignored. It
+checks the items those folders stand for - a folder being there does not
+prove the item was delivered to or ingested by DAMS. (In a list file, a
+repeated JPC_AV_xxxxx is simply checked once, without a note.)
+
 Writes `CATALOG_NUMBER, MADS URL, MADS live, Checked` to `~/aspace_mads_reports/`
 by default (`<logs_dir>/mads_reports/` when `logs_dir` is set).
 `MADS live` is `Yes`, `No`, `check failed`, or `invalid catalog number` -
 the last two are never evidence of absence.
-Exit 0: every number got a definite Yes or No. Exit 2: some checks failed or
-numbers were invalid (re-run for those). Exit 1: nothing was checked, or the
-checks ran but the report could not be saved - RESULT still shows the counts,
-and the report is listed as NOT saved.
+Exit 0: every number got a definite Yes or No, and nothing needs review.
+Exit 2: some checks failed or numbers were invalid (re-run for those), or
+folders are listed for review. Exit 1: the input could not be read, no item
+folders were found, or the report would overwrite the input - nothing
+checked; or the checks ran but the report could not be saved - RESULT still
+shows the counts, and the report is listed as NOT saved.
 
 ## Recommended Workflow
 
@@ -823,6 +815,28 @@ aborts with no writes.
 | "Invalid extent type" | Check Original Format matches ASpace dropdown exactly |
 
 ## Version History
+
+- **v3.5** (2026): `jpc-mads`, and next steps as `jpc-` commands
+  - New `jpc-mads` command: which items are live in MADS, from a list
+    (`--file`) or a batch folder's item folders (`--directory`);
+    `check_mads.py` gains `--directory`, and `jpc-rename`'s help points to
+    the check after DAMS ingest
+  - A tool started by its `jpc-` command prints its NEXT STEP as a `jpc-`
+    command (pull, import, write-back preview); run directly, it prints the
+    long command as before
+  - `--check`: labels name JPC_AV_xxxxx ("JPC_AV_xxxxx checked", "Not found
+    by JPC_AV_xxxxx", also in the CSV's Outcome), not found is shown in
+    cyan, and agreeing items with no hold or issue are counted, not listed,
+    when the file has all four tracking columns (`-o` lists every one)
+  - Strict create's Mode line and help are worded around preflight
+  - Export `--list` reads and checks its list before logging in
+  - The rename log is `rename_YYYYMMDD_HHMMSS_PID.log`, like the other
+    reports
+  - The importer's missing `-f` error adds "a CSV path needs -f in front of
+    it: -f FILE"
+  - After pulling: run `python -m pip install -e .` once in each environment
+    that has the commands (this adds `jpc-mads`), then open a new Terminal;
+    `python -m pip show jpc-av-tools` then reports Version 3.5
 
 - **v3.3** (2026): `ASpace Issue`
   - The hold's reason field is renamed `ASpace Issue` and now records any

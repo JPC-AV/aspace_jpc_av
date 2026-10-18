@@ -63,6 +63,7 @@ from datetime import datetime
 from pathlib import Path
 
 import sheet_rules as col  # single source of truth for CSV header names
+from sheet_rules import read_catalog_list  # noqa: E402,F401 - shared with check_mads
 
 # Add parent directory to path for the shared client and creds.py import
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -392,52 +393,6 @@ APPROXIMATE_ORDER_NOTE = "no position in ASpace (this record or an ancestor) - t
 
 def _add_warning(row, text):
     row["Warnings"] = "; ".join(w for w in (row.get("Warnings", ""), text) if w)
-
-
-def read_catalog_list(path):
-    """Catalog numbers from a list file, order kept, duplicates dropped.
-
-    Two shapes are accepted: plain text (one JPC_AV_xxxxx per line, blanks
-    ignored) or a CSV with a CATALOG_NUMBER column - so an old import sheet
-    or report can be fed straight back in. Returns (numbers, problem).
-    """
-    try:
-        with col.open_csv(path) as f:
-            pos = f.tell()
-            headers = csv.DictReader(f, strict=True).fieldnames or []
-            f.seek(pos)
-            if col.CATALOG in headers:
-                # CSV-shaped: the exact header must be present once - two
-                # CATALOG_NUMBER columns would silently select the last.
-                duplicates = col.duplicate_headers(headers)
-                if duplicates:
-                    return None, (f"{path}: duplicate column header(s): "
-                                  f"{'; '.join(duplicates)} - remove the stale duplicate(s)")
-                numbers = []
-                for row_num, r in enumerate(csv.DictReader(f, strict=True), 1):
-                    overflow = col.overflow_problem(r, row_num)
-                    if overflow:
-                        return None, f"{path}: {overflow}"
-                    numbers.append((r.get(col.CATALOG) or '').strip())
-            else:
-                numbers = [line.strip().strip(',') for line in f
-                           if not line.startswith('#')]
-    except UnicodeDecodeError as e:
-        return None, (f"could not read {path}: not UTF-8 text (byte {e.start}: {e.reason}) "
-                      f"- save the file as UTF-8 CSV")
-    except csv.Error as e:
-        return None, f"could not parse {path} as CSV: {e}"
-    except OSError as e:
-        return None, f"could not read {path}: {e}"
-    seen = set()
-    ordered = []
-    for n in numbers:
-        if n and n not in seen:
-            seen.add(n)
-            ordered.append(n)
-    if not ordered:
-        return None, f"no catalog numbers found in {path}"
-    return ordered, None
 
 
 def export_by_list(client, catalog_numbers):
@@ -1198,6 +1153,10 @@ def run_fill_parents(sheet_path, ready_path, review_path):
 # The Airtable columns --check compares, when the file has them.
 COMPARED_COLUMNS = (col.PARENT_REFID, col.CREATED_LOOKUP)
 
+# An agreeing number is counted instead of listed on screen only when the
+# file has all of these, each spelled exactly (see counted_only).
+COUNT_ONLY_COLUMNS = COMPARED_COLUMNS + (col.HOLD, col.ISSUE)
+
 # Every number lands on exactly ONE line, the first that applies in this
 # order; everything else that applies is kept in its Detail.
 CHECK_LINES = [
@@ -1210,7 +1169,7 @@ CHECK_LINES = [
     ("incomplete", "In ArchivesSpace, Airtable incomplete", "attention"),
     ("agrees", "In ArchivesSpace, compared fields agree", "ok"),
     ("found", "In ArchivesSpace", "ok"),
-    ("not_found", "Not found by catalog number", "neutral"),
+    ("not_found", "Not found by JPC_AV_xxxxx", "info"),
 ]
 CHECK_LABELS = {key: label for key, label, _ in CHECK_LINES}
 REVIEW_KEYS = {"cannot", "ambiguous", "conflict", "not_item", "yes_missing",
@@ -1421,20 +1380,35 @@ def check_markers(rows):
     return holds + [f"issue: {i}" for i in issues]
 
 
-def print_check_result(outcomes):
+def counted_only(outcome, columns):
+    """Whether the screen counts this number instead of listing it: its line
+    is "compared fields agree", the file has every COUNT_ONLY_COLUMNS column
+    (`columns`: which ones read_check_input found, spelled exactly), and none
+    of its rows is held - an unreadable hold included - or carries issue
+    text. Screen only: the outcome, its line and the CSV never change."""
+    return (outcome["key"] == "agrees"
+            and all((columns or {}).get(name) for name in COUNT_ONLY_COLUMNS)
+            and not any(row["hold"] or row["issue"] for row in outcome["rows"]))
+
+
+def print_check_result(outcomes, columns=None):
     """RESULT (every number on one line), then each line's numbers - review
-    lines first. Returns the exit code: 2 if anything needs review or could
-    not be checked, else 0 (numbers not found are a definite answer)."""
+    lines first; an agreeing number with nothing to note is counted, not
+    listed (counted_only). Returns the exit code: 2 if anything needs review
+    or could not be checked, else 0 (numbers not found are a definite
+    answer)."""
     counts = {key: sum(1 for o in outcomes if o["key"] == key) for key, _, _ in CHECK_LINES}
-    print_result([("Numbers checked", len(outcomes), "neutral", True)]
+    print_result([("JPC_AV_xxxxx checked", len(outcomes), "neutral", True)]
                  + [(label, counts[key], tone) for key, label, tone in CHECK_LINES])
     for key, label, tone in CHECK_LINES:
         group = [o for o in outcomes if o["key"] == key]
         if not group:
             continue
-        color = {"ok": Colors.GREEN, "bad": Colors.RED, "neutral": ""}.get(tone, Colors.YELLOW)
+        color = {"ok": Colors.GREEN, "bad": Colors.RED, "info": Colors.CYAN,
+                 "neutral": ""}.get(tone, Colors.YELLOW)
         print(f"\n  {color}{Colors.BOLD}{label} ({len(group)}){Colors.RESET}")
-        for o in group:
+        listed = [o for o in group if not counted_only(o, columns)]
+        for o in listed:
             # the first fact on the number's line; for a line that needs
             # review, every further fact on a line of its own beneath it
             first = "" if key == "not_found" else o["facts"][0]
@@ -1443,6 +1417,10 @@ def print_check_result(outcomes):
             if key in REVIEW_KEYS:
                 for fact in o["facts"][1:]:
                     print(f"{'':20}{fact}")
+        unlisted = len(group) - len(listed)
+        if unlisted:
+            print(f"      {'and ' if listed else ''}{unlisted}{' more' if listed else ''} "
+                  f"with no hold or issue (not listed; --output lists all)")
     print(f"\n  {Colors.DIM}\"In ArchivesSpace\" means a record with that catalog number exists; "
           f"only the listed Airtable columns were compared, no other metadata.{Colors.RESET}")
     return 2 if any(o["key"] in REVIEW_KEYS for o in outcomes) else 0
@@ -1523,7 +1501,7 @@ def run_check(list_path, csv_path=None, source=None):
         key, facts = classify(number, found[number], rows, has)
         outcomes.append({"number": number, "key": key, "facts": facts, "rows": rows,
                          "found": found[number], "marks": check_markers(rows)})
-    code = print_check_result(outcomes)
+    code = print_check_result(outcomes, has)
     if csv_path:
         provenance = (f"{RUN_COMMAND} | target: {aspace_client.ACTIVE_ENV} | "
                       f"{datetime.now().strftime('%Y-%m-%d %H:%M')}")
@@ -1706,6 +1684,11 @@ def main():
                  f"level {args.level}" + (f", children of {args.parent}" if args.parent else ""))
     print_run_header("Export ArchivesSpace records to CSV (read-only)", target=source,
                      input=selection, mode="read ArchivesSpace, save a CSV")
+    if args.list_file:
+        numbers, problem = read_catalog_list(args.list_file)  # before any network work
+        if numbers is None:
+            print_status("error", problem)
+            sys.exit(1)
 
     client = ASpaceClient()
     print_status("info", f"Connecting to {aspace_client.ASPACE_URL}...")
@@ -1718,10 +1701,6 @@ def main():
     anomalies = 0
     try:
         if args.list_file:
-            numbers, problem = read_catalog_list(args.list_file)
-            if numbers is None:
-                print_status("error", problem)
-                sys.exit(1)
             print_status("info", f"Looking up {len(numbers)} listed catalog number(s)...")
             rows, problems = export_by_list(client, numbers)
         else:

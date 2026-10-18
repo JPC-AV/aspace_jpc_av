@@ -8,6 +8,7 @@ The jpc- commands: one short command per workflow step.
     jpc-update --file FILE        update records (PLAN, then type yes)
     jpc-writeback --report JSON   record a create run's results in Airtable
     jpc-rename --directory PATH   record runtimes, rename folders (PLAN, then type yes)
+    jpc-mads --directory BATCH    which items are live in MADS (or --file FILE)
     jpc / jpc --help              this list
 
 Each command runs exactly one existing tool with that step's fixed flags
@@ -155,9 +156,13 @@ DIRECT_ONLY = "on the direct command only - see RUNS in jpc-rename --help"
 
 
 def refusal_note(flag):
-    """The closing lines of every EXIT section; flag is the command's input."""
-    return (f"\n\n    A launcher refusal stops before the tool runs: a missing {flag},"
-            "\n    an unsupported flag, or a value starting with '-'.")
+    """The closing lines of every EXIT section; flag is the command's input
+    ("--file or --directory" for a command with two)."""
+    lead = f"    A launcher refusal stops before the tool runs: a missing {flag},"
+    if len(lead) <= 79:
+        return f"\n\n{lead}\n    an unsupported flag, or a value starting with '-'."
+    return ("\n\n    A launcher refusal stops before the tool runs: a missing"
+            f"\n    {flag}, an unsupported flag, or a value starting with '-'.")
 
 
 # Each command: the tool it runs, its one named input, the flags the tool
@@ -359,13 +364,19 @@ COMMANDS = {
       by themselves establish that an item is ready to import.
 
         • {ok}{bold}In ArchivesSpace, compared fields agree{reset}
-            The compared columns match.
+            The compared columns match. If the file has ASpace Parent RefID,
+            ((( ASpace Item Record Created ))), ASpace Hold and ASpace Issue,
+            all four spelled exactly, an item here with no hold and no issue
+            is counted, not listed; --output lists every one. A held item
+            (an unreadable hold included) or one with an issue is always
+            listed, and with any of the four columns missing or misspelled,
+            every item is.
 
         • {ok}{bold}In ArchivesSpace{reset}
             The record exists; nothing was compared (a plain list, or a file
             with neither of the two compared columns).
 
-        • {bold}Not found by catalog number{reset}
+        • {cyan}{bold}Not found by JPC_AV_xxxxx{reset}
             No record carries the JPC_AV_xxxxx - not a verdict that the item
             is new.
 
@@ -378,7 +389,10 @@ COMMANDS = {
       The opening lines say what was compared, with what - including the
       pull's view and time, read from the pull's first line ("unknown" for
       any other file). RESULT counts each line; then each line's
-      JPC_AV_xxxxx, the ones needing review first.
+      JPC_AV_xxxxx, the ones needing review first. Agreeing items with no
+      hold and no issue are counted, not listed - only when the file has
+      all four columns named under "In ArchivesSpace, compared fields
+      agree" (HOW IT WORKS).
 
     With --output PATH, also a CSV:
       {cyan}PATH{reset}
@@ -699,7 +713,7 @@ COMMANDS = {
 
       Replace {bold}REPORT{reset} with the import report's full path from the
       "Saved import report:" line printed near the end of the run. (The run
-      also prints the full write-back command under NEXT STEP.)
+      also prints this command, with its report path, under NEXT STEP.)
 
       Every change is listed, row by row; Airtable is written only after
       you type yes.
@@ -1184,7 +1198,7 @@ COMMANDS = {
       This works when your current folder is the one containing batch.""",
                 paths_with_spaces("'/Volumes/AV DRIVE/batch'"),
                 """    {bold}Log{reset}
-      A run saves a timestamped log, {cyan}rename_YYYYMMDD_HHMMSS.log{reset}, in
+      A run saves a timestamped log, {cyan}rename_YYYYMMDD_HHMMSS_PID.log{reset}, in
       ~/aspace_rename_reports/, or in rename_reports/ inside the logs_dir
       folder set in creds.py - dry runs and cancelled runs too. A run that
       stops at an argument or creds.py problem saves none. The run prints
@@ -1286,9 +1300,10 @@ COMMANDS = {
     disk (see HOW IT WORKS). It saves no report file - the log is the
     run's record:
 
-      • {cyan}rename_YYYYMMDD_HHMMSS.log{reset}
+      • {cyan}rename_YYYYMMDD_HHMMSS_PID.log{reset}
         Every message, timestamped (see FILE PATHS for when one is saved).
-        {bold}YYYYMMDD_HHMMSS{reset} is the run's date and time.
+
+{run_stamp}
 
     After folder processing, RESULT shows:
 
@@ -1355,20 +1370,15 @@ COMMANDS = {
          MADS, the public DAMS delivery, publishes each item within about a
          day.
 
-      2. The MADS check - which items are live in MADS. From the tools
-         repository folder (there is no jpc- command for it yet):
+      2. The MADS check, once DAMS ingest has had time to publish (about a
+         day) - which items are live in MADS. Run it yourself, on the same
+         batch folder:
 
-           {command}cd {repo}{reset}
-           {command}python3 aspace_csv_import/check_mads.py FILE{reset}
+           {command}jpc-mads --directory PATH{reset}
 
-         FILE is a list of the batch's JPC_AV_xxxxx - not the media folder
-         and not the rename log. Make a plain text file with one
-         JPC_AV_xxxxx per line (the folder names without _refid_...), or
-         use any CSV with a CATALOG_NUMBER column, such as a jpc-pull CSV.
-
-         It reads only the public MADS pages, never ArchivesSpace, and saves
-         mads_check_<stamp>.csv in the MADS reports folder: Yes, No, check
-         failed or invalid catalog number for each item.""",
+         It checks the items the folder's JPC_AV_xxxxx folders stand for,
+         renamed or not, and saves a report; a folder being there does not
+         prove the item reached DAMS. Details: {command}jpc-mads --help{reset}""",
             "runs": """    jpc-rename runs the Python tool aspace-rename-directories.py for you.
     You do not need to run it separately.
 
@@ -1394,8 +1404,140 @@ COMMANDS = {
                     folder reached.""",
         },
     },
+    "mads": {
+        "title": "check which items are live in MADS",
+        "summary": ("Check which JPC_AV_xxxxx are live in MADS, the public DAMS delivery - "
+                    "from a list or from a batch folder's item folders - and save a report "
+                    "(read-only)"),
+        "script": "aspace_csv_import/check_mads.py",
+        "input": ("--file", "FILE", "A list of JPC_AV_xxxxx: a plain text file, one per line, "
+                  "or any CSV with a CATALOG_NUMBER column, such as a jpc-pull CSV"),
+        "base": lambda value: [value],
+        # the other input: a batch folder (exactly one of the two is given)
+        "or_input": ("--directory", "BATCH", "A batch folder: the JPC_AV_xxxxx of the item "
+                     "folders directly inside it, renamed or not (see HOW IT WORKS)",
+                     lambda value: ["--directory", value]),
+        "extras": {"--output": "PATH", "--no-color": None},
+        # MADS always saves its report; --output only chooses where
+        "extra_help": {"--output": "Where to save the report; by default a timestamped file in "
+                                   "the MADS reports folder"},
+        "no_env": "it checks the public MADS site only - there is no environment to choose",
+        "elsewhere": {"-d": "use --directory"},
+        "aspace": False,
+        "example": "jpc-mads --directory /Volumes/AV_DRIVE/batch",
+        "help": {
+            "environment": """    Reads only the public MADS site - never ArchivesSpace or Airtable - so
+    --env is not supported. creds.py is read only for logs_dir (where the
+    report is saved); without it, the default folder is used.""",
+            "paths": help_blocks(
+                """    {bold}Full path{reset}
+      Give --directory the batch folder that holds the JPC_AV_xxxxx folders,
+      or --file the list. Dragging a folder or file from Finder into
+      Terminal gives its full path; a full path works from any folder.
+
+      Example: {cyan}/Volumes/AV_DRIVE/batch{reset}""",
+                """    {bold}Short path{reset}
+      A name or relative path is read from your current folder.
+
+      Example: {cyan}batch{reset}
+      This works when your current folder is the one containing batch.""",
+                paths_with_spaces("'/Volumes/AV DRIVE/batch'"),
+                """    {bold}Save folder{reset}
+      The report is saved in ~/aspace_mads_reports/, or in mads_reports/
+      inside the logs_dir folder set in creds.py - unless --output PATH says
+      where. The run prints its path at the end ("Saved MADS report:")."""),
+            "how": """    {bold}What it checks{reset}
+{jpc_av_definition}
+
+      For each JPC_AV_xxxxx it reads the item's public MADS page and records
+      one answer:
+
+        • Yes - live in MADS.
+        • No - not in MADS.
+        • check failed - the check itself errored (network or an odd
+          response). Not evidence that the item is missing.
+        • invalid catalog number - not JPC_AV_ followed by digits; never
+          looked up. Not evidence either.
+
+      MADS publishes an item within about a day of DAMS ingest, so a recent
+      ingest can still read No.
+
+    {bold}From a list (--file){reset}
+      A plain text file with one JPC_AV_xxxxx per line, or any CSV with a
+      CATALOG_NUMBER column - a jpc-pull CSV works as it is. A JPC_AV_xxxxx
+      listed twice is checked once.
+
+    {bold}From a batch folder (--directory){reset}
+      Only the folders directly inside BATCH count, named JPC_AV_xxxxx or,
+      after jpc-rename, JPC_AV_xxxxx_refid_<RefID>. The whole folder is read
+      before anything is checked. Each JPC_AV_xxxxx is checked once: one
+      found in several folders is checked once, and all its folders are
+      listed for review. Symlinks (not followed) and JPC_AV_ names that are
+      not item folders are listed for review and not checked; anything else
+      is ignored.
+
+      It checks the items those folders stand for - a folder being there
+      does not prove the item was delivered to or ingested by DAMS.""",
+            "output": """    When the checks finish, one report is saved:
+
+      • {cyan}mads_check_YYYYMMDD_HHMMSS_PID.csv{reset}
+        CATALOG_NUMBER, MADS URL, MADS live and Checked for each JPC_AV_xxxxx.
+        With --output PATH it is saved at PATH instead.
+
+{run_stamp}
+
+    RESULT counts Live in MADS, Not in MADS, Check failed and Invalid
+    catalog number - and, with --directory, the folders listed for review
+    (In more than one folder, Skipped symlinks, Not recognized), each named
+    beneath it.
+
+    If the report cannot be saved, RESULT still shows the answers and the
+    report is listed as NOT saved. When nothing is checked - unreadable
+    input, no item folders - no report is saved.
+
+    jpc-mads never changes ArchivesSpace, Airtable or the folders.""",
+            "next_steps": """    {bold}By answer{reset}
+      What to do about each answer that is not Yes:
+
+        • No - if the DAMS ingest was recent, wait a day and run the check
+          again. Still No: look into that item's DAMS ingest, outside these
+          tools.
+        • check failed - run the same command again for those items.
+        • invalid catalog number - correct the list.
+
+    {bold}Folders listed for review{reset}
+      Fix the batch folder - a second folder for the same item, a symlink, a
+      name that is not JPC_AV_xxxxx or JPC_AV_xxxxx_refid_<RefID> - then run
+      the check again.""",
+            "runs": """    jpc-mads runs the Python tool check_mads.py for you. You do not need
+    to run it separately.
+
+    {bold}Equivalent direct commands{reset}
+      {command}python3 aspace_csv_import/check_mads.py FILE{reset}
+      {command}python3 aspace_csv_import/check_mads.py --directory BATCH{reset}
+      Replace FILE or BATCH with the path; quote paths with spaces.
+
+    {bold}Underlying tool's help{reset}
+      {command}python3 aspace_csv_import/check_mads.py --help{reset}
+      This describes the Python tool's direct-use options. jpc-mads accepts
+      only the flags listed in OPTIONS above.""",
+            "exit": """    {ok}{bold}0{reset}    Done       Every JPC_AV_xxxxx got a definite Yes or No, and no
+                    folder is listed for review.
+    {bad}{bold}1{reset}    Stopped    The input could not be read, no item folders were
+                    found, or the report would overwrite the input - nothing
+                    checked. Or the checks ran but the report could not be
+                    saved (RESULT shows the answers; listed as NOT saved).
+    {warn}{bold}2{reset}    Review     Some checks failed (run again for those), some catalog
+                    numbers were invalid, or folders are listed for review.
+                    Also: an argument was rejected.
+    {warn}{bold}130{reset}  Stopped    Interrupted with Ctrl-C. Shutdown may wait for submitted
+                    checks to finish, and Python prints a traceback. Depending
+                    on when it stopped, the report may already be saved; an
+                    interruption during saving can leave a .tmp file.""",
+        },
+    },
 }
-ORDER = ["pull", "check", "fill", "import", "update", "writeback", "rename"]
+ORDER = ["pull", "check", "fill", "import", "update", "writeback", "rename", "mads"]
 
 # Where a refused flag belongs instead - said in the refusal.
 ELSEWHERE = {
@@ -1417,18 +1559,28 @@ class Refused(Exception):
     """A command line the launcher will not run; the message says why."""
 
 
+def input_flags(verb):
+    """The command's inputs as (flag, metavar, help, base): its one input,
+    or - for a command with an "or_input" - both, of which exactly one is
+    given. base builds that input's part of the tool's arguments."""
+    spec = COMMANDS[verb]
+    return [spec["input"] + (spec["base"],)] + ([spec["or_input"]] if "or_input" in spec else [])
+
+
 def parse(verb, args):
-    """(input value, env, extras) from a command's arguments, or Refused.
+    """(input value, env, extras, input flag) from a command's arguments,
+    or Refused.
 
     Only exact, long spellings on the command's allowlist are accepted:
     anything else - an abbreviation, an attached value (--file=x), a
     repeated flag, a short form - is refused, so nothing can quietly
-    replace the operation or the input the command owns."""
+    replace the operation or the input the command owns. A command with
+    two inputs takes exactly one of them."""
     spec = COMMANDS[verb]
-    input_flag, metavar, _ = spec["input"]
+    inputs = {flag: metavar for flag, metavar, _, _ in input_flags(verb)}
     extras_allowed = spec["extras"]
     repeatable = spec.get("repeatable", set())
-    value, env, extras, seen = None, None, [], set()
+    value, chosen, env, extras, seen = None, None, None, [], set()
 
     def take(flag, i, metavar):
         if i + 1 >= len(args):
@@ -1443,10 +1595,12 @@ def parse(verb, args):
     i = 0
     while i < len(args):
         arg = args[i]
-        if arg == input_flag:
-            if value is not None:
-                raise Refused(f"{input_flag} was given twice - give one {metavar}")
-            value = take(arg, i, metavar)
+        if arg in inputs:
+            if chosen == arg:
+                raise Refused(f"{arg} was given twice - give one {inputs[arg]}")
+            if chosen is not None:
+                raise Refused(f"give {' or '.join(inputs)}, not both")
+            value, chosen = take(arg, i, inputs[arg]), arg
             i += 2
         elif arg == "--env" and spec["aspace"]:
             if env is not None:
@@ -1469,8 +1623,9 @@ def parse(verb, args):
         else:
             raise Refused(_refusal(verb, arg))
     if value is None:
-        raise Refused(f"jpc-{verb} needs {input_flag} {metavar}")
-    return value, env, extras
+        raise Refused(f"jpc-{verb} needs "
+                      + " or ".join(f"{flag} {metavar}" for flag, metavar in inputs.items()))
+    return value, env, extras, chosen
 
 
 def shown(arg):
@@ -1490,10 +1645,11 @@ def _refusal(verb, arg):
     allowed = allowed_flags(verb)
     name = arg.split("=", 1)[0] if arg.startswith("--") else arg[:2]
     if arg == "--env":
-        return f"--env is not used by jpc-{verb} (it reads and writes Airtable only)"
+        reason = spec.get("no_env", "it reads and writes Airtable only")
+        return f"--env is not used by jpc-{verb} ({reason})"
     if not arg.startswith("-"):
-        flag, metavar, _ = spec["input"]
-        return (f"unexpected {arg!r} - give the input as {flag} {metavar}, "
+        wanted = " or ".join(f"{flag} {metavar}" for flag, metavar, _, _ in input_flags(verb))
+        return (f"unexpected {arg!r} - give the input as {wanted}, "
                 f"and flags only from: {', '.join(allowed)}")
     hint = spec.get("elsewhere", {}).get(name) or ELSEWHERE.get(name)
     if "=" in arg:
@@ -1505,16 +1661,18 @@ def _refusal(verb, arg):
 
 def allowed_flags(verb):
     spec = COMMANDS[verb]
-    flags = [spec["input"][0]] + list(spec["extras"])
+    flags = [flag for flag, _, _, _ in input_flags(verb)] + list(spec["extras"])
     return flags + (["--env"] if spec["aspace"] else [])
 
 
-def build(verb, value, env, extras):
+def build(verb, value, env, extras, flag=None):
     """The exact argument list the tool gets: the running Python, the
-    script (found beside this file), its fixed flags, --env once for the
+    script (found beside this file), its fixed flags for the input given
+    (flag; the command's one input when None), --env once for the
     ArchivesSpace tools, then the extras in the order given."""
     spec = COMMANDS[verb]
-    argv = [sys.executable, str(ROOT / spec["script"])] + spec["base"](value)
+    base = {f: b for f, _, _, b in input_flags(verb)}.get(flag, spec["base"])
+    argv = [sys.executable, str(ROOT / spec["script"])] + base(value)
     if spec["aspace"]:
         argv += ["--env", env or "production"]
     return argv + extras
@@ -1524,8 +1682,8 @@ def usage_parts(verb):
     """The usage line's pieces: the command with its input, then one
     [option] each."""
     spec = COMMANDS[verb]
-    flag, metavar, _ = spec["input"]
-    parts = [f"jpc-{verb} {flag} {metavar}"]
+    inputs = [f"{flag} {metavar}" for flag, metavar, _, _ in input_flags(verb)]
+    parts = [f"jpc-{verb} " + (inputs[0] if len(inputs) == 1 else f"({' | '.join(inputs)})")]
     for extra, meta in spec["extras"].items():
         parts.append(f"[{extra}{' ' + meta if meta else ''}]"
                      + ("..." if extra in spec.get("repeatable", ()) else ""))
@@ -1575,7 +1733,8 @@ def launcher_options(options):
     C = Colors
     lines = []
     for flag, note, description in options:
-        label = f" {C.YELLOW if note == '(required)' else C.DIM}{note}{C.RESET}" if note else ""
+        label = (f" {C.YELLOW if note.startswith('(required') else C.DIM}{note}{C.RESET}"
+                 if note else "")
         lines.append(f"    {C.BOLD}{C.CYAN}{flag}{C.RESET}{label}")
         # a line break written into the description is kept as written
         lines.extend(textwrap.fill(part, width=78, initial_indent="      ",
@@ -1591,8 +1750,13 @@ def command_help(verb):
     C = Colors
     spec = COMMANDS[verb]
     custom = spec.get("help", {})
-    flag, metavar, input_help = spec["input"]
-    options = [(f"{flag} {metavar}", "(required)", input_help)]
+    inputs = input_flags(verb)
+    flag = " or ".join(f for f, _, _, _ in inputs)          # for the EXIT refusal note
+    if len(inputs) == 1:
+        options = [(f"{inputs[0][0]} {inputs[0][1]}", "(required)", inputs[0][2])]
+    else:
+        options = [(f"{f} {m}", f"(required: this or {other})", text)
+                   for (f, m, text, _), other in zip(inputs, [inputs[1][0], inputs[0][0]])]
     extra_help = {**EXTRA_HELP, **spec.get("extra_help", {})}
     options += [(f"{extra}{' ' + meta if meta else ''}", "(optional)", extra_help[extra])
                 for extra, meta in spec["extras"].items()]
@@ -1650,7 +1814,7 @@ def overview_help():
     touches = {"pull": "reads Airtable", "check": "reads ArchivesSpace",
                "fill": "reads ArchivesSpace", "import": "writes ArchivesSpace",
                "update": "writes ArchivesSpace", "writeback": "writes Airtable",
-               "rename": "writes ArchivesSpace"}
+               "rename": "writes ArchivesSpace", "mads": "reads public MADS"}
     width = max(len(f"jpc-{v}") for v in ORDER)
     title_width = max(len(COMMANDS[v]["title"]) for v in ORDER)
     hint = shlex.quote(str(ROOT / "jpc-shell-hint.zsh"))
@@ -1671,7 +1835,7 @@ def overview_help():
     digitized = [("jpc-rename --directory BATCH --dry-run", "check every folder"),
                  ("jpc-rename --directory BATCH", "PLAN, type yes to write"),
                  ("DAMS ingest", "outside these tools"),
-                 ("MADS check", f"see {C.GREEN}jpc-rename --help{C.RESET}")]
+                 ("jpc-mads --directory BATCH", "which items are live in MADS")]
     step_width = max(len(cmd) for cmd, _ in create + update + digitized)
 
     def steps(rows):
@@ -1699,7 +1863,8 @@ def overview_help():
         ("ENVIRONMENT", f"""    jpc-check, jpc-fill, jpc-import, jpc-update and jpc-rename talk to
     ArchivesSpace. They use {C.RED}{C.BOLD}PRODUCTION{C.RESET} unless you add --env sandbox - on
     EACH command: every one defaults to production on its own. jpc-pull
-    and jpc-writeback work on Airtable only and take no --env.
+    and jpc-writeback work on Airtable only, and jpc-mads reads only the
+    public MADS site; none of these takes --env.
 
     If the requested environment is not configured, the command stops
     (exit 1); it never switches to another environment."""),
@@ -1820,16 +1985,21 @@ def refuse(verb, message):
     return 2
 
 
-def run(verb, args, execute=os.execv):
+def run(verb, args, execute=os.execve):
     """One jpc- command end to end. Returns an exit code for refusals and
-    help; on success it never returns - the tool replaces this process."""
+    help; on success it never returns - the tool replaces this process.
+
+    The tool gets a copy of this environment plus JPC_STARTED_BY=jpc-VERB
+    (replacing any inherited value), so it can print its next step as a
+    jpc- command. Presentation only; this process's environment is never
+    changed."""
     if "--no-color" in args:
         Colors.disable()
     if "--help" in args or "-h" in args:
         print(command_help(verb))
         return 0
     try:
-        value, env, extras = parse(verb, args)
+        value, env, extras, input_flag = parse(verb, args)
     except Refused as e:
         return refuse(verb, str(e))
     if not requests_available():
@@ -1840,7 +2010,7 @@ def run(verb, args, execute=os.execv):
         if stop:
             print(stop, file=sys.stderr)
             return 1
-    argv = build(verb, value, env, extras)
+    argv = build(verb, value, env, extras, input_flag)
     C = Colors
     if COMMANDS[verb]["aspace"]:
         label = (f"{C.RED}{C.BOLD}PRODUCTION{C.RESET} (jpc default - add --env sandbox for the sandbox)"
@@ -1848,7 +2018,8 @@ def run(verb, args, execute=os.execv):
         print(f"Environment: {label}")
     print(f"{C.DIM}Running: {shlex.join(argv)}{C.RESET}", flush=True)
     sys.stderr.flush()
-    execute(argv[0], argv)
+    tool_env = dict(os.environ, JPC_STARTED_BY=f"jpc-{verb}")
+    execute(argv[0], argv, tool_env)
     return 0  # only reached when a test replaces execute
 
 
@@ -1888,6 +2059,7 @@ import_ = _entry("import")
 update = _entry("update")
 writeback = _entry("writeback")
 rename = _entry("rename")
+mads = _entry("mads")
 
 
 if __name__ == "__main__":

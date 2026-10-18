@@ -32,7 +32,7 @@ typeset -g _JPC_HINT_REPO=${${(%):-%x}:A:h}
 # jpc.py (a test compares them). One list, for both recognizing a name and
 # finding an install.
 typeset -ga _JPC_HINT_COMMANDS=(jpc jpc-pull jpc-check jpc-fill jpc-import jpc-update
-                                jpc-writeback jpc-rename)
+                                jpc-writeback jpc-rename jpc-mads)
 
 command_not_found_handler() {
   emulate -L zsh

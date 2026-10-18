@@ -286,3 +286,51 @@ def open_csv(source):
         if not line.startswith('#'):
             f.seek(pos)
             return f
+
+
+def read_catalog_list(path):
+    """Catalog numbers from a list file, order kept, duplicates dropped.
+
+    Two shapes are accepted: plain text (one JPC_AV_xxxxx per line, blanks
+    ignored) or a CSV with a CATALOG_NUMBER column - so an old import sheet
+    or report can be fed straight back in. Returns (numbers, problem).
+    Shared by the exporter (--list, --check) and check_mads.py.
+    """
+    import csv
+    try:
+        with open_csv(path) as f:
+            pos = f.tell()
+            headers = csv.DictReader(f, strict=True).fieldnames or []
+            f.seek(pos)
+            if CATALOG in headers:
+                # CSV-shaped: the exact header must be present once - two
+                # CATALOG_NUMBER columns would silently select the last.
+                duplicates = duplicate_headers(headers)
+                if duplicates:
+                    return None, (f"{path}: duplicate column header(s): "
+                                  f"{'; '.join(duplicates)} - remove the stale duplicate(s)")
+                numbers = []
+                for row_num, r in enumerate(csv.DictReader(f, strict=True), 1):
+                    overflow = overflow_problem(r, row_num)
+                    if overflow:
+                        return None, f"{path}: {overflow}"
+                    numbers.append((r.get(CATALOG) or '').strip())
+            else:
+                numbers = [line.strip().strip(',') for line in f
+                           if not line.startswith('#')]
+    except UnicodeDecodeError as e:
+        return None, (f"could not read {path}: not UTF-8 text (byte {e.start}: {e.reason}) "
+                      f"- save the file as UTF-8 CSV")
+    except csv.Error as e:
+        return None, f"could not parse {path} as CSV: {e}"
+    except OSError as e:
+        return None, f"could not read {path}: {e}"
+    seen = set()
+    ordered = []
+    for n in numbers:
+        if n and n not in seen:
+            seen.add(n)
+            ordered.append(n)
+    if not ordered:
+        return None, f"no catalog numbers found in {path}"
+    return ordered, None

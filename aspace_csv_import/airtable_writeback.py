@@ -57,7 +57,8 @@ REF_ID_RE = re.compile(r"[0-9a-f]{32}")
 
 from console import (Colors, print_status, print_run_header,  # shared display  # noqa: E402
                      print_result, print_saved, print_next_step, render_options,
-                     help_screen, styled_parser, progress_count, close_progress)
+                     help_screen, styled_parser, progress_count, close_progress,
+                     started_by)
 PullError = pull.PullError
 
 
@@ -560,6 +561,23 @@ def build_parser():
     return parser
 
 
+def run_suggestion(args, recorded):
+    """The command that writes what this preview showed: the same report,
+    every exclusion in order, --no-color if given, and --run. Started by
+    jpc-writeback: as that command. Otherwise - or when a value cannot go to
+    the launcher as it is (starting with "-") - the recorded command plus
+    --run. `recorded` stays the run's own record (outcome-file provenance)."""
+    values = [args.report] + list(args.exclude_catalog)
+    if started_by("jpc-writeback") and not any(v.startswith("-") for v in values):
+        parts = ["jpc-writeback", "--report", args.report]
+        for number in args.exclude_catalog:
+            parts += ["--exclude-catalog", number]
+        if args.no_color:
+            parts.append("--no-color")
+        return shlex.join(parts + ["--run"])
+    return f"{recorded} --run"
+
+
 def main():
     parser = build_parser()
     args = parser.parse_args()
@@ -617,8 +635,8 @@ def main():
     print_changes(plan)
     if not args.run:
         if pending:
-            # the exact command plus --run, so the exclusions carry over
-            print_next_step([f"{command} --run",
+            # the same report and exclusions, plus --run
+            print_next_step([run_suggestion(args, command),
                              f"{Colors.DIM}(shows this plan again and asks before writing){Colors.RESET}"])
         sys.exit(2 if to_review else 0)
 

@@ -159,9 +159,72 @@ same_file = col.same_file
 clobber_problem = col.clobber_problem
 
 
+# An item folder in a batch: the delivered name JPC_AV_<digits>, or that name
+# plus _refid_<RefID> after the rename tool (a RefID is 32 lowercase hex
+# characters - the rename tool's own rule). The JPC_AV_xxxxx is group 1.
+ITEM_FOLDER_RE = re.compile(r"(JPC_AV_[0-9]+)(?:_refid_[0-9a-f]{32})?")
+
+
+def read_batch_folders(batch):
+    """The JPC_AV_xxxxx that a batch folder's item folders stand for, and
+    what in it needs a person: (numbers, review, problem).
+
+    Only BATCH's immediate entries are looked at, in name order, and all of
+    them are read before anything is checked: an entry that cannot be
+    examined stops the run instead of leaving a partial selection. An item
+    folder is a real directory named like ITEM_FOLDER_RE. Other entries
+    named JPC_AV_... are reported, never checked: symlinks (not followed,
+    dangling ones too) and names or files that are not item folders. Every
+    other entry is ignored. A JPC_AV_xxxxx found in several folders is
+    checked once and reported - two folders for one item is a batch-layout
+    problem, unlike a repeated line in a list.
+
+    numbers: each eligible JPC_AV_xxxxx once, in folder-name order.
+    review: {"duplicates": {JPC_AV_xxxxx: [folder, ...]}, "symlinks": [...],
+    "unrecognized": [...]}. problem: why BATCH could not be read."""
+    folders = {}
+    symlinks, unrecognized = [], []
+    try:
+        with os.scandir(batch) as listing:
+            entries = sorted(listing, key=lambda entry: entry.name)
+        for entry in entries:
+            if not entry.name.startswith("JPC_AV_"):
+                continue
+            if entry.is_symlink():               # before is_dir: never followed
+                symlinks.append(entry.name)
+                continue
+            match = ITEM_FOLDER_RE.fullmatch(entry.name)
+            if not match or not entry.is_dir(follow_symlinks=False):
+                unrecognized.append(entry.name)
+                continue
+            folders.setdefault(match.group(1), []).append(entry.name)
+    except OSError as e:
+        return None, None, f"could not read the folder {batch}: {e}"
+    review = {"duplicates": {number: names for number, names in folders.items()
+                             if len(names) > 1},
+              "symlinks": symlinks, "unrecognized": unrecognized}
+    return list(folders), review, None
+
+
+def print_folder_review(review):
+    """What in the batch folder needs a person - listed, never merged away."""
+    if review["duplicates"]:
+        print_status("warning", "The same JPC_AV_xxxxx is in more than one folder - checked "
+                                "once; check the batch layout:")
+        for number, names in review["duplicates"].items():
+            print_status("warning", f"{number}: {', '.join(names)}", indent=1)
+    if review["symlinks"]:
+        print_status("warning", f"Skipped (symlink, not followed): "
+                                f"{', '.join(review['symlinks'])}")
+    if review["unrecognized"]:
+        print_status("warning", f"Not recognized (named JPC_AV_ but not an item folder - check "
+                                f"the name): {', '.join(review['unrecognized'])}")
+
+
 TITLE = "Check which items are live in MADS (read-only)"
 ARGUMENTS = [("FILE", "", "A plain text list of catalog numbers, or any CSV with a CATALOG_NUMBER column")]
-OPTIONS = [("-o, --output PATH", "", f"Report path (default: timestamped file in the reports folder)"),
+OPTIONS = [("--directory BATCH", "", "Instead of FILE: the item folders in BATCH (see DIRECTORY MODE)"),
+           ("-o, --output PATH", "", f"Report path (default: timestamped file in the reports folder)"),
            ("--no-color", "", "Disable colored output")]
 
 
@@ -170,29 +233,44 @@ def get_colored_help():
     C = Colors
     return help_screen(TITLE, [
         ("DESCRIPTION", """    Checks each catalog number's public MADS page (the Smithsonian DAMS
-    delivery) and saves the answer as a CSV. Public URLs only - ArchivesSpace
-    is never contacted, so no --env is needed."""),
-        ("USAGE", f"    {C.GREEN}${C.RESET} python3 aspace_csv_import/check_mads.py FILE [-o PATH]"),
+    delivery) and saves the answer as a CSV. The JPC_AV_xxxxx come from a
+    list FILE, or from a batch folder's item folders (--directory). Public
+    URLs only - ArchivesSpace is never contacted, so no --env is needed."""),
+        ("USAGE", f"""    {C.GREEN}${C.RESET} python3 aspace_csv_import/check_mads.py FILE [-o PATH]
+    {C.GREEN}${C.RESET} python3 aspace_csv_import/check_mads.py --directory BATCH [-o PATH]"""),
         ("ARGUMENTS", render_options(ARGUMENTS)),
         ("OPTIONS", render_options(OPTIONS)),
+        ("DIRECTORY MODE", f"""    Only the folders directly inside BATCH count, named JPC_AV_<digits> or
+    JPC_AV_<digits>_refid_<RefID> (renamed). Each JPC_AV_xxxxx is checked once:
+    one found in several folders is checked once, and all its folders are
+    listed for review. Symlinks (not followed) and JPC_AV_ names that are not
+    item folders are listed for review and not checked. The whole folder is
+    read before anything is checked.
+    It checks the items these folders stand for - a folder being there does
+    not prove the item was delivered to or ingested by DAMS."""),
         ("EXAMPLES", f"""    {C.GREEN}${C.RESET} python3 aspace_csv_import/check_mads.py delivered.txt
-    {C.GREEN}${C.RESET} python3 aspace_csv_import/check_mads.py batch.csv -o batch_mads.csv"""),
+    {C.GREEN}${C.RESET} python3 aspace_csv_import/check_mads.py batch.csv -o batch_mads.csv
+    {C.GREEN}${C.RESET} python3 aspace_csv_import/check_mads.py --directory /Volumes/AV_DRIVE/batch"""),
         ("OUTPUT", f"""    {C.CYAN}{OUTPUT_DIR}/{C.RESET}
     mads_check_<stamp>.csv: CATALOG_NUMBER, MADS URL, MADS live, Checked
     MADS live is Yes, No, check failed, or invalid catalog number - the last
     two are never evidence that an item is missing"""),
-        ("EXIT", f"""    {C.GREEN}0{C.RESET}  every number got a definite Yes or No
-    {C.YELLOW}2{C.RESET}  some checks failed or numbers were invalid (re-run for those), or a bad argument
-    {C.RED}1{C.RESET}  nothing checked: the list could not be read, or the report would overwrite it;
-       or the checks ran (RESULT shows them) but the report could not be saved"""),
+        ("EXIT", f"""    {C.GREEN}0{C.RESET}  every number got a definite Yes or No, and nothing needs review
+    {C.YELLOW}2{C.RESET}  some checks failed or numbers were invalid (re-run for those); or folders
+       are listed for review (--directory); or a bad argument
+    {C.RED}1{C.RESET}  the input could not be read, no eligible item folders were found, or the
+       report would overwrite the input - nothing checked; or the checks ran
+       (RESULT shows them) but the report could not be saved"""),
     ])
 
 
 def build_parser():
     """The command-line parser (module-level so tests can check it against -h)."""
-    parser = styled_parser(["FILE [-o PATH] [--no-color]"], get_colored_help,
+    parser = styled_parser(["FILE [-o PATH] [--no-color]",
+                            "--directory BATCH [-o PATH] [--no-color]"], get_colored_help,
                            [ARGUMENTS, OPTIONS])
-    parser.add_argument("file", metavar="FILE")
+    parser.add_argument("file", metavar="FILE", nargs="?")
+    parser.add_argument("--directory", metavar="BATCH")
     parser.add_argument("-o", "--output", metavar="PATH")
     parser.add_argument("--no-color", action="store_true")
     return parser
@@ -203,27 +281,51 @@ def main():
     args = parser.parse_args()
     if args.no_color:
         Colors.disable()
+    if (args.file is None) == (args.directory is None):
+        parser.error("give FILE or --directory BATCH, not both" if args.file is not None
+                     else "needs FILE or --directory BATCH")
+    if args.directory is not None and not args.directory.strip():
+        # e.g. --directory "$BATCH" with BATCH unset: never fall back to FILE mode
+        parser.error("--directory needs a folder path (it was empty)")
     # MADS needs no credentials; a broken creds.py only costs the logs_dir setting
     creds_problem = creds_loader.problem()
     if creds_problem:
         print_status("warning", f"{creds_problem} Using the default reports folder.")
 
-    from aspace_csv_export import read_catalog_list  # late import: avoids cycle
-    numbers, problem = read_catalog_list(args.file)
-    if numbers is None:
-        print_status("error", problem)
-        sys.exit(1)
+    review = None
+    if args.directory is not None:
+        # the whole folder is read, and its problems collected, before any request
+        numbers, review, problem = read_batch_folders(args.directory)
+        if numbers is None:
+            print_status("error", problem)
+            sys.exit(1)
+        if not numbers:
+            print_folder_review(review)          # why nothing was eligible, first
+            print_status("error", f"no JPC_AV_xxxxx item folders in {args.directory} - "
+                                  f"nothing checked")
+            sys.exit(1)
+    else:
+        numbers, problem = col.read_catalog_list(args.file)
+        if numbers is None:
+            print_status("error", problem)
+            sys.exit(1)
 
     stamp = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{os.getpid()}"
     out_path = col.resolve_output_path(args.output, OUTPUT_DIR, f"mads_check_{stamp}.csv")
-    problem = clobber_problem(args.file, out_path)
+    problem = clobber_problem(args.file, out_path) if args.file is not None else None
     if problem:
         print_status("error", problem)
         sys.exit(1)
 
+    if args.directory is not None:
+        source = f"{args.directory} ({len(numbers)} JPC_AV_xxxxx from its item folders)"
+        note = ("checks the items these folders stand for - a folder does not prove "
+                "delivery or DAMS ingest")
+    else:
+        source, note = f"{args.file} ({len(numbers)} catalog number(s))", None
     print_run_header(TITLE, target="the public MADS site (read-only) - answers saved to a local CSV",
-                     input=f"{args.file} ({len(numbers)} catalog number(s))",
-                     mode="check only - ArchivesSpace is never contacted")
+                     input=source, mode="check only - ArchivesSpace is never contacted",
+                     extra=[("Note", note)])
     results = check_many(numbers)
 
     # Written to a staging file, then moved into place in one step, so a
@@ -250,10 +352,14 @@ def main():
 
     live, not_live, failed = summarize(results)
     invalid = [c for c, s in results.items() if s == "invalid catalog number"]
+    review = review or {"duplicates": {}, "symlinks": [], "unrecognized": []}
     print_result([("Live in MADS", live, "ok", True),
                   ("Not in MADS", not_live, "neutral", True),
                   ("Check failed", failed - len(invalid), "unknown"),
-                  ("Invalid catalog number", len(invalid), "bad")])
+                  ("Invalid catalog number", len(invalid), "bad"),
+                  ("In more than one folder", len(review["duplicates"]), "attention"),
+                  ("Skipped symlinks", len(review["symlinks"]), "attention"),
+                  ("Not recognized", len(review["unrecognized"]), "attention")])
     if failed:
         print()
         if invalid:
@@ -263,6 +369,10 @@ def main():
             print_status("warning", "'Check failed' means the check itself errored "
                                     "(network or an odd response) - NOT that the item is "
                                     "absent; re-run for those")
+    folders_to_review = any(review.values())
+    if folders_to_review:
+        print()
+        print_folder_review(review)
     if save_error is not None:
         print_saved([], failed=[("MADS report", out_path)])
         print_status("error", f"The checks completed (above), but the report could not be "
@@ -271,7 +381,7 @@ def main():
         sys.exit(1)
     print_saved([("MADS report", out_path)])
     print()
-    sys.exit(2 if failed else 0)
+    sys.exit(2 if failed or folders_to_review else 0)
 
 
 if __name__ == "__main__":

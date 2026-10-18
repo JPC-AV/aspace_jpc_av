@@ -42,7 +42,9 @@ logs_dir = creds_loader.setting("logs_dir", "")
 # flag leaves no file behind.
 DEFAULT_OUTPUT_DIR = os.path.expanduser("~/aspace_rename_reports")
 OUTPUT_DIR = os.path.join(logs_dir, "rename_reports") if logs_dir else DEFAULT_OUTPUT_DIR
-LOG_FILE = f"{OUTPUT_DIR}/rename_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+# Timestamp + PID: two runs started in the same second must not share a log
+# (the file handler appends, so both runs would write into one file).
+LOG_FILE = f"{OUTPUT_DIR}/rename_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{os.getpid()}.log"
 LOG_FORMAT = "%(asctime)s [%(levelname)s] %(message)s"
 
 # The log file only: screen blocks drawn with the shared helpers (the run

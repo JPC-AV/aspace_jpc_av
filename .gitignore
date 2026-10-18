@@ -11,6 +11,10 @@ aspace_csv_import/tests/
 aspace_rename_directories/tests/
 __tests__/
 
+# Local tracker of open/closed items and ideas (shared by the owner, Claude
+# and Codex; not pushed)
+TRACKER.md
+
 # Local source data (Airtable exports staged for import)
 __airtable_exports__/
 

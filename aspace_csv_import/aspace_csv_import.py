@@ -22,6 +22,7 @@ from console import (Colors, print_status, print_header,  # shared display helpe
                      print_section, render_options, print_run_header, print_result,
                      print_saved, help_screen, styled_parser)
 from console import print_next_step as show_next_step
+from console import started_by
 
 # ==============================
 # TERMINAL COLORS
@@ -46,7 +47,7 @@ CLI_OPTIONS = [
 # Human-readable labels for the internal duplicate_mode tokens. The JSON
 # report summaries record the mode as report_mode() spells it instead.
 MODE_LABELS = {
-    'create': 'create-records (abort if any record already exists)',
+    'create': 'create-records (any preflight problem stops the run before writing)',
     'skip': 'create-records --keep-going (skip existing, refuse problem rows, create the rest)',
     'update-only': 'update-only (never creates)',
 }
@@ -63,7 +64,10 @@ def report_mode(duplicate_mode: str) -> Dict:
     return {"mode": "create-records", "keep_going": duplicate_mode == 'skip'}
 
 MODE_OPTIONS = [
-    ("--create-records", "(pick one)", "Create records; aborts before writing if ANY row already exists"),
+    ("--create-records", "(pick one)", "Create records. Without --keep-going, any preflight problem stops"),
+    # continuation lines, padded to the description column
+    ("", "", "            the run before writing. Once writing starts, a failed row is reported;"),
+    ("", "", "            records already created stay"),
     ("--update-only", "(pick one)", "Update existing records (narrow or full CSV); never creates"),
     ("--keep-going", "", "With --create-records: skip existing rows, refuse problem rows, create the rest"),
 ]
@@ -2551,7 +2555,12 @@ def print_next_step(summary: Dict, results: List[Dict] = None) -> None:
             lines.append(f"Check these in ArchivesSpace before rerunning - they may exist: "
                          f"{', '.join(unknown)}")
         lines.append("")
-    lines.append(f"python3 {_shlex.quote(script)} {_shlex.quote(summary['report_file'])} --run")
+    report = summary['report_file']
+    if started_by("jpc-import") and not report.startswith("-"):
+        # started by jpc-import: the write-back as its jpc- command
+        lines.append(_shlex.join(["jpc-writeback", "--report", report, "--run"]))
+    else:
+        lines.append(f"python3 {_shlex.quote(script)} {_shlex.quote(report)} --run")
     show_next_step(lines, title="NEXT STEP - record the results in Airtable")
 
 
@@ -2638,6 +2647,17 @@ def build_parser() -> argparse.ArgumentParser:
         action='store_true',
         help=argparse.SUPPRESS
     )
+
+    # The easy mistake: a CSV path typed without -f. argparse only says -f is
+    # missing; say what to type. Generic on purpose: nothing typed is echoed
+    # back (a stray value could be a password).
+    plain_error = parser.error
+
+    def error(message):
+        if message.startswith("the following arguments are required: ") and "-f/--file" in message:
+            message += "\n       a CSV path needs -f in front of it: -f FILE"
+        plain_error(message)
+    parser.error = error
     return parser
 
 

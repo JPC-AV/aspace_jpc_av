@@ -8,7 +8,7 @@ This repository contains the tools for the Johnson Publishing Company Archive (J
 
 1. **aspace_csv_import** — Creates and updates item-level archival objects from CSV metadata
 2. **aspace_csv_export** — Exports AV records to an import-shaped CSV (round trip / audit), optionally checking MADS
-3. **check_mads** — Reports which items are live in MADS, the public DAMS delivery
+3. **check_mads** (`jpc-mads`) — Reports which items are live in MADS, the public DAMS delivery
 4. **aspace_rename_directories** — Processes digitized video folders: records each runtime in ArchivesSpace and adds the record's ref ID to the folder name
 
 ## Directory Structure
@@ -51,7 +51,7 @@ More detailed descriptions of each file and usage in directory-specific README.m
 |------|------------------|-------------|
 | `aspace_client.py` | Backend | Shared API client: credentials loading, one keep-alive session, login/logout, retries, verified lookups, and scope-locked writes. Both main scripts build on it. |
 | `console.py` | Backend | Shared terminal display for every tool: the -h layout, argument-error screen, run header, RESULT block, saved-file lines and colors (`--no-color`). |
-| `jpc.py` | Run via the `jpc-` commands | The short commands for each workflow step (`jpc-pull`, `jpc-check`, `jpc-fill`, `jpc-import`, `jpc-update`, `jpc-writeback`, `jpc-rename`). Each runs one tool with that step's fixed flags; `jpc` lists them. |
+| `jpc.py` | Run via the `jpc-` commands | The short commands for each workflow step (`jpc-pull`, `jpc-check`, `jpc-fill`, `jpc-import`, `jpc-update`, `jpc-writeback`, `jpc-rename`, `jpc-mads`). Each runs one tool with that step's fixed flags; `jpc` lists them. |
 | `pyproject.toml` | One-time setup | Installs the `jpc-` commands into the active environment. |
 | `creds_template.py` | Reference only | Template showing required credential format. Do not edit directly. |
 | `creds.py` | User creates/edits | Your local credentials file. You create this from the template. |
@@ -60,7 +60,7 @@ More detailed descriptions of each file and usage in directory-specific README.m
 | `aspace_csv_export.py` | Run via command line | Exports AV records to an import-shaped CSV in tree order with hierarchy and audit columns; `--mads-live` checks MADS; `--check` says which catalog numbers are in ArchivesSpace and whether an Airtable pull agrees; `--fill-parents` fills parent ref IDs. Read-only. |
 | `airtable_pull.py` | Run via command line | Saves one Airtable view of `<<< ASpace_import >>>` as a CSV. Read-only. |
 | `airtable_writeback.py` | Run via command line | After a production create run, records each created item's parent and `ASpace Item Record Created` = Yes in Airtable, after you confirm. |
-| `check_mads.py` | Run via command line | Checks which catalog numbers are live in MADS (public URLs only). |
+| `check_mads.py` | Run via command line | Checks which catalog numbers are live in MADS (public URLs only), from a list or a batch folder. Everyday runs: `jpc-mads`. |
 | `check_extent_types.py` | Run via command line | Troubleshooting: lists valid extent types in your ASpace instance. The import's dry run already checks formats. |
 | `sheet_rules.py` | Backend | The sheet contract: column names and the validation rules every tool applies. |
 | `docs/*.md` | Reference | Field-mapping contract, a worked example, and the unmapped-column analysis. |
@@ -140,7 +140,7 @@ python -m pip install -e .
 ```
 
 This installs `jpc`, `jpc-pull`, `jpc-check`, `jpc-fill`, `jpc-import`,
-`jpc-update`, `jpc-writeback` and `jpc-rename`, and the one package the tools need
+`jpc-update`, `jpc-writeback`, `jpc-rename` and `jpc-mads`, and the one package the tools need
 (`requests`), into the **active environment only**, whatever its name. The
 commands exist whenever that environment is active; another environment
 needs its own install. The `-e` (editable) matters: the commands run the tools in this
@@ -148,8 +148,9 @@ folder, so `git pull` keeps them current - reinstall only when a command is
 added or renamed. (`pip install -r requirements.txt` installs just
 `requests`, for running the tools directly without the commands.)
 
-**After a pull that adds a command** - `jpc-rename` is the newest - run the
-install again, once in each environment that has the commands. The
+**After a pull that adds a command** - `jpc-rename` and `jpc-mads` are the
+newest - run the install again, once in each environment that has the
+commands. The
 reinstall is what creates the new command: until then the shell answers
 "command not found" (with the hint on, it says to reinstall).
 
@@ -269,6 +270,7 @@ their own checks, PLANs and `yes` prompts. `jpc` lists them;
 | `jpc-update --file FILE [--dry-run]` | `aspace_csv_import.py --update-only --file FILE --env production` |
 | `jpc-writeback --report REPORT.json [--run] [--exclude-catalog JPC_AV_xxxxx]...` | `airtable_writeback.py REPORT.json` |
 | `jpc-rename --directory PATH [--dry-run] [--mp4]` | `aspace-rename-directories.py -d PATH --env production` |
+| `jpc-mads (--file FILE \| --directory BATCH) [--output PATH]` | `check_mads.py FILE` or `check_mads.py --directory BATCH` |
 
 - **Production by default** for the commands that talk to ArchivesSpace,
   shown before anything runs; add `--env sandbox` for the sandbox. (Direct
@@ -276,7 +278,7 @@ their own checks, PLANs and `yes` prompts. `jpc` lists them;
   command decides on its own, so a sandbox trial needs `--env sandbox` on
   **every** step - and a sandbox import never goes on to `jpc-writeback`
   (the write-back accepts production reports only). The Airtable commands
-  take no `--env`.
+  and `jpc-mads` (public MADS only) take no `--env`.
 - **`jpc-rename` renames the real folders in either environment.**
   `--env sandbox` changes only which ArchivesSpace it reads and writes; the
   folders on disk are renamed all the same, with the sandbox records' ref
@@ -292,10 +294,10 @@ their own checks, PLANs and `yes` prompts. `jpc` lists them;
   username or password, a flag for another step - is refused before anything
   runs, and the message says what to use instead.
 - Each command prints the exact tool command it runs, then hands over: the
-  tool's prompts, Ctrl-C and exit code are its own. The tools' own NEXT STEP
-  lines keep printing the long commands, which always work too.
-- Export and the MADS check have no `jpc-` command yet; run those tools
-  directly.
+  tool's prompts, Ctrl-C and exit code are its own. A tool started this way
+  prints its next step as a `jpc-` command; run directly, it prints the long
+  command, which always works too.
+- Export has no `jpc-` command yet; run it directly.
 
 ## Scripts
 
@@ -331,12 +333,13 @@ python3 airtable_writeback.py <reports>/import_report_<stamp>.json --run
 
 ### check_mads
 
-Reports which catalog numbers are live in MADS (the public DAMS delivery). Public URLs only; ArchivesSpace is never contacted.
+Reports which catalog numbers are live in MADS (the public DAMS delivery). Public URLs only; ArchivesSpace is never contacted, so it takes no `--env`. It reads either a list of JPC_AV_xxxxx or a batch folder (the item folders directly inside it, renamed or not) - one or the other - and saves a report of Yes / No / check failed / invalid catalog number. A folder being there does not prove the item was delivered to or ingested by DAMS.
 
 ```bash
-cd aspace_csv_import
-python3 check_mads.py numbers.txt
+jpc-mads --directory /Volumes/AV_DRIVE/batch
 ```
+
+`jpc-mads` (see [Commands](#commands)) is the everyday run; `jpc-mads --help` has the details.
 
 All of these are documented in [aspace_csv_import/README.md](aspace_csv_import/README.md).
 
@@ -356,9 +359,10 @@ Typical usage order:
 
 1. **CSV Import** — Create archival objects from catalog metadata (validate, check parents and formats, dry run, real run)
 2. **Directory Processing** (`jpc-rename`) — After digitization: a dry run, then the real run (PLAN, then `yes`) records each runtime and gives each folder its ref ID
-3. **DAMS ingest** — Outside these tools; MADS publishes the item within about a day
-4. **Export / MADS check** — Any time: pull records to a CSV for auditing or round-trip edits, and see which items are live in MADS
+3. **DAMS ingest** — Run by the operator, outside these tools; MADS publishes the item within about a day
+4. **MADS check** (`jpc-mads`) — After ingest: `jpc-mads --directory BATCH` on the same batch folder (or `--file` a list) shows which items are live in MADS
+5. **Export** — Any time: pull records to a CSV for auditing or round-trip edits
 
 ## Environments
 
-Every ArchivesSpace tool supports sandbox and production (`check_mads.py` talks only to the public MADS site and takes no environment). `creds.py` holds an `environments` dict with one entry per instance. When running the tools directly: with one configured it is selected automatically, with several every run must pass `--env NAME` (there is no default). The `jpc-` commands differ: they use production unless `--env sandbox` is given, and show the environment before anything runs (see [Commands](#commands)). The environment is chosen once per run, before anything connects.
+Every ArchivesSpace tool supports sandbox and production (`check_mads.py` and `jpc-mads` talk only to the public MADS site and take no environment). `creds.py` holds an `environments` dict with one entry per instance. When running the tools directly: with one configured it is selected automatically, with several every run must pass `--env NAME` (there is no default). The `jpc-` commands differ: they use production unless `--env sandbox` is given, and show the environment before anything runs (see [Commands](#commands)). The environment is chosen once per run, before anything connects.

@@ -28,7 +28,7 @@ import sheet_rules as col  # single source of truth for CSV header names
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from console import (Colors, print_status, print_header,  # shared display helpers
                      print_run_header, print_result, print_saved, print_next_step,
-                     render_options, help_screen, styled_parser)
+                     render_options, help_screen, styled_parser, started_by)
 
 # ==============================
 # CONFIGURATION
@@ -367,14 +367,24 @@ def main():
                                 f"fine for --update-only (it changes only the columns present); "
                                 f"--create-records needs all of them")
     print_saved([("pulled CSV", out_path)])
-    pulled = os.path.relpath(out_path)
-    print_next_step([
-        "Creating records:  " + shlex.join(["python3", _script("aspace_csv_export.py"),
-                                            "--fill-parents", pulled, "--env", "production"]),
-        "Updating records:  " + shlex.join(["python3", _script("aspace_csv_import.py"),
-                                            "--update-only", "-n", "-f", pulled,
-                                            "--env", "production"]),
-    ])
+    print_next_step(next_step_lines(os.path.relpath(out_path)))
+
+
+def next_step_lines(pulled):
+    """The two commands that take the pulled CSV further. Started by
+    jpc-pull: as jpc- commands (production is their default, as --env
+    production is here). Otherwise, or when the path cannot go to the
+    launcher as it is (a value starting with "-"), the direct commands."""
+    if started_by("jpc-pull") and not pulled.startswith("-"):
+        create = ["jpc-fill", "--file", pulled]
+        update = ["jpc-update", "--file", pulled, "--dry-run"]
+    else:
+        create = ["python3", _script("aspace_csv_export.py"), "--fill-parents", pulled,
+                  "--env", "production"]
+        update = ["python3", _script("aspace_csv_import.py"), "--update-only", "-n", "-f",
+                  pulled, "--env", "production"]
+    return ["Creating records:  " + shlex.join(create),
+            "Updating records:  " + shlex.join(update)]
 
 
 if __name__ == "__main__":

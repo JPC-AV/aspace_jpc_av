@@ -171,6 +171,7 @@ TONES = {
     "bad": "RED",          # invalid data, definite rejection
     "unknown": "YELLOW",   # an outcome nobody can vouch for - always named "unknown"
     "neutral": "",         # totals, unchanged
+    "info": "CYAN",        # an answer that needs no action - neither good nor bad
 }
 
 
@@ -201,7 +202,7 @@ def print_result(rows, title="RESULT"):
     for row in shown:
         label, count, tone = row[0], row[1], row[2]
         color = getattr(Colors, TONES.get(tone, ""), "") if TONES.get(tone) else ""
-        bold = Colors.BOLD if tone in ("ok", "attention", "bad", "unknown") and count else ""
+        bold = Colors.BOLD if tone in ("ok", "attention", "bad", "unknown", "info") and count else ""
         print(f"  {color}{bold}{label:<{width}}  {count:>6}{Colors.RESET}")
 
 
@@ -220,6 +221,16 @@ def print_saved(files, failed=()):
     print()
     for label, path, color in files:
         print(f"  {color}{label:<{width}}{Colors.RESET if color else ''}  {os.path.abspath(path)}")
+
+
+def started_by(*commands):
+    """The jpc- command that started this tool - the launcher's
+    JPC_STARTED_BY marker - when it is one of `commands`, the tool's own;
+    otherwise None (a direct run, or any other value). Presentation only:
+    it decides how a printed next step is written, nothing else."""
+    import os
+    marker = os.environ.get("JPC_STARTED_BY")
+    return marker if marker in commands else None
 
 
 def print_next_step(lines, title="NEXT STEP"):
