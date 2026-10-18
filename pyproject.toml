@@ -11,7 +11,7 @@
 # logs (no package discovery in this multi-folder repo).
 
 [build-system]
-requires = ["setuptools>=64"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -19,8 +19,13 @@ name = "jpc-av-tools"
 version = "3.5"
 description = "jpc- commands for the JPC AV ArchivesSpace workflow"
 authors = [{ name = "Bleakley McDowell" }, { email = "bleakleym@gmail.com" }]
-requires-python = ">=3.8"
+requires-python = ">=3.9"
 dependencies = ["requests>=2.32.4"]
+license = "Unlicense"
+license-files = ["LICENSE"]
+
+[project.urls]
+Homepage = "https://github.com/JPC-AV/aspace_jpc_av"
 
 [project.scripts]
 jpc = "jpc:main"

@@ -101,7 +101,7 @@ folder brings the tools up to date.
 
 ### 2. Choose a Python environment
 
-Any Python 3.8 or newer environment works - one you already use (for
+Any Python 3.9 or newer environment works - one you already use (for
 example the Conda environment from AV-Spex), a new one, or a plain one
 inside the checkout:
 
