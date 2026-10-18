@@ -240,6 +240,76 @@ def _url_refusal(env_name: str, field_name: str, kind: str, value) -> str:
 URL_REFUSED = "the ArchivesSpace URL is not usable (not shown) - check baseURL in creds.py"
 
 
+# The ArchivesSpace target an import report records: the server URL, the
+# repository and the resource the run used. The write-back compares it with
+# creds.py's production entry - a check that recorded settings agree, not
+# proof that the records still exist or that the entry really is production.
+TARGET_FIELDS = ("schema", "base_url", "repo_id", "resource_id")
+TARGET_SCHEMA = 1
+_DIGITS_RE = re.compile(r"[0-9]+")
+
+
+def _configured_id(value) -> Optional[int]:
+    """A configured repo_id/resource_id as a positive int, or None. creds.py
+    gives a decimal string ("2") or an int; nothing else is converted."""
+    if type(value) is int:
+        return value if value > 0 else None
+    if isinstance(value, str) and _DIGITS_RE.fullmatch(value):
+        return int(value) or None
+    return None
+
+
+def target_problem(target) -> Optional[str]:
+    """The invalid part of a recorded target block - its name, never its
+    value - or None. Strict, so a report's values are never coerced: exactly
+    the four fields; schema the integer 1; base_url passes url_problem; the
+    IDs positive integers (a bool, float or string is refused)."""
+    if not isinstance(target, dict):
+        return "target"
+    if set(target) != set(TARGET_FIELDS):
+        return "target fields"
+    if type(target["schema"]) is not int or target["schema"] != TARGET_SCHEMA:
+        return "schema"
+    if url_problem(target["base_url"]) is not None:
+        return "base_url"
+    for field_name in ("repo_id", "resource_id"):
+        if type(target[field_name]) is not int or target[field_name] <= 0:
+            return field_name
+    return None
+
+
+def make_target(base_url, repo_id, resource_id) -> Dict:
+    """The target block for configured values (creds.py's ID strings become
+    integers). Raises ValueError naming the invalid field, never its value."""
+    target = {"schema": TARGET_SCHEMA, "base_url": base_url,
+              "repo_id": _configured_id(repo_id), "resource_id": _configured_id(resource_id)}
+    problem = target_problem(target)
+    if problem:
+        raise ValueError(problem)
+    return target
+
+
+def configured_target(name: str) -> Dict:
+    """The target creds.py's `name` entry describes, read from the
+    configuration only - nothing is selected or contacted. Raises
+    ValueError with a message that never shows a value."""
+    env = ENVIRONMENTS.get(name)
+    if not isinstance(env, dict):
+        raise ValueError(CONFIG_ERROR
+                         or f"creds.py has no {name} environment (see creds_template.py)")
+    base_url = env.get("baseURL")
+    if base_url is None or base_url == "":
+        raise ValueError(f"Environment {name!r}: baseURL is missing - see creds_template.py")
+    kind = url_problem(base_url)
+    if kind:
+        raise ValueError(_url_refusal(name, "baseURL", kind, base_url))
+    try:
+        return make_target(base_url, env.get("repo_id"), env.get("resource_id"))
+    except ValueError as e:
+        raise ValueError(f"Environment {name!r}: {e} must be a positive whole number "
+                         f"- see creds_template.py") from None
+
+
 def select_environment(name: str) -> None:
     """Activate one configured environment. Raises ValueError for an unknown
     name - callers surface that as a CLI error, nothing defaults.

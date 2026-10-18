@@ -499,12 +499,16 @@ and any report can be matched to the run that wrote it):
 
 - `csv_import_<stamp>.log` - detailed log: target, the exact command, every lookup and write
 - `import_report_<stamp>.csv` - the receipt: one row per input row with status, message, URI, ref ID, staff link, and every mapped column; row 1 is a `# command | target | time` provenance line, like the exports
-- `import_report_<stamp>.json` - the same receipt plus a summary block (counts, mode, environment, command, snapshot completeness) and per-row change details. The mode is `"mode": "create-records"` with `"keep_going": true` or `false`, or `"mode": "update-only"` (no `keep_going` - it does not apply); the records file's summary records the same. Reports saved before `--keep-going` replaced `--skip-duplicates` record `"duplicate_mode"` (`create`, `skip` or `update-only`) instead; the write-back reads both alike
-- `import_records_<stamp>.json` - the records as ArchivesSpace holds them after the run, read back after each write (archival object plus its top container), keyed by catalog number
+- `import_report_<stamp>.json` - the same receipt plus a summary block (counts, mode, environment, ArchivesSpace target, start time, command, snapshot completeness) and per-row change details. The mode is `"mode": "create-records"` with `"keep_going": true` or `false`, or `"mode": "update-only"` (no `keep_going` - it does not apply). The target, `"target": {"schema": 1, "base_url": "https://...", "repo_id": 2, "resource_id": 7}`, is the server URL, repository and resource the run used, captured once before anything is written; the records file's summary records the same mode, target and start time
+- `import_records_<stamp>.json` - the records as ArchivesSpace holds them after the run, read back after each write (archival object plus its top container), keyed by catalog number; the write-back needs it for a report with created rows and reads it only from the path the report records
 
 The summary names the JSON report (`Report: import_report_<stamp>.json`):
-that is the file `airtable_writeback.py` reads. Change details in the
-receipts carry full note text.
+that is the file `airtable_writeback.py` reads. It accepts only a real
+production create report whose target matches creds.py's production entry,
+with its records file from the same run - a check that recorded settings
+agree; it does not contact ArchivesSpace, so it cannot show that the records
+still exist or that the production entry really is production. Change
+details in the receipts carry full note text.
 
 When comparing two records files (before and after an update, say), ignore
 `lock_version`, `system_mtime` and `user_mtime` on the nested dates, extents
@@ -815,6 +819,31 @@ aborts with no writes.
 | "Invalid extent type" | Check Original Format matches ASpace dropdown exactly |
 
 ## Version History
+
+- **v3.6** (2026): import reports record their ArchivesSpace target
+  - Import reports and records files record the run's ArchivesSpace target
+    (server URL, repository, resource), captured once before anything is
+    written, with the run's start time
+  - The write-back accepts only a real production create report whose
+    target matches creds.py's production entry and whose records file -
+    read only from the path the report records - is from the same run;
+    anything else stops before Airtable is read. Reports saved before 3.6
+    record no target and are not accepted. A snapshot that does not match
+    its record, or is outside the target resource, sends only that row to
+    review. The check compares recorded settings; it does not contact
+    ArchivesSpace, so it cannot show that the records still exist or that
+    the production entry really is production
+  - When a production create run's records file cannot be saved, the
+    importer says the write-back cannot use the report and how to record
+    the created items by hand
+  - Already released since 3.5: the importer's and extent checker's
+    argument errors no longer repeat typed values, and the rename wording
+    for Failed is corrected; a `baseURL` or `staff_url` holding a user
+    name, password, `?` or `#` is refused before anything is shown,
+    logged or sent, and never printed
+  - After pulling: nothing to reinstall - an editable install
+    (`python -m pip install -e .`) runs the updated code. Reinstalling only
+    refreshes the version `python -m pip show jpc-av-tools` reports
 
 - **v3.5** (2026): `jpc-mads`, and next steps as `jpc-` commands
   - New `jpc-mads` command: which items are live in MADS, from a list

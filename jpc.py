@@ -980,8 +980,11 @@ COMMANDS = {
       airtable_pat_write       the writes - needed only with --run
                                (AIRTABLE_PAT_WRITE)
 
-    creds.py also needs a production entry: its repo_id is used to check
-    the record URIs in the report.""",
+    creds.py also needs a production entry. The report must record the
+    same server URL (baseURL), repo_id and resource_id as that entry - a
+    check that recorded settings agree: ArchivesSpace is not contacted, so
+    it cannot show that the records still exist or that the entry really
+    is production.""",
             "paths": help_blocks(
                 """    {bold}Full path{reset}
       Give --report the import report that jpc-import saved - the .json
@@ -1015,16 +1018,21 @@ COMMANDS = {
 
     {bold}Checks before anything is written{reset}
       First the report: it must be the .json report of a real (not dry-run)
-      production create run. A dry-run or sandbox report, or the .csv
-      receipt, stops the run (exit 1) with nothing written.
+      production create run. A dry-run, sandbox or update-only report, or
+      the .csv receipt, stops the run (exit 1) with nothing written. So does
+      a report whose recorded ArchivesSpace target (server URL, repository,
+      resource) differs from creds.py's production entry, or one with
+      created rows whose records file - read only from the path the report
+      recorded - is missing or from another run.
 
       Then Airtable is read again - three tables, about a minute each - so
       the plan uses Airtable as it is now. A created row is written only if
       all of these hold; otherwise it is listed for review and left alone:
 
         • The report has a valid JPC_AV_xxxxx and parent RefID for it,
-          only once, with a production record URI and a read-back snapshot
-          of the record (from the import's records file).
+          only once, with a production record URI and a matching read-back
+          snapshot of the record in the report's resource (from the
+          import's records file).
         • Exactly one JPCA-AV_SOURCE row (the table CATALOG_NUMBER links
           to) is named with the JPC_AV_xxxxx, and exactly one
           <<< ASpace_import >>> row and one ((( ASpace_tracking ))) row link
@@ -1114,10 +1122,10 @@ COMMANDS = {
         • JPCA-AV_SOURCE row(s) named it, row(s) link to it, or a row links
           several items - fix those records in Airtable, then run the same
           command again.
-        • no read-back snapshot, or not a production archival object -
-          confirm the record in ArchivesSpace, then update Airtable by
-          hand: see "JPC_AV_xxxxx already in ArchivesSpace" in
-          {command}jpc-check --help{reset}.
+        • no matching read-back snapshot, a snapshot outside the report's
+          resource, or not a production archival object - confirm the
+          record in ArchivesSpace, then update Airtable by hand: see
+          "JPC_AV_xxxxx already in ArchivesSpace" in {command}jpc-check --help{reset}.
 
     {bold}Check the result (optional){reset}
       Pull a view of <<< ASpace_import >>> that shows ASpace Parent RefID

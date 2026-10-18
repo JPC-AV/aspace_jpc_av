@@ -56,12 +56,20 @@ MODE_LABELS = {
 def report_mode(duplicate_mode: str) -> Dict:
     """The mode as the JSON report summaries record it. Create runs say
     whether --keep-going was given; update-only runs carry no keep_going,
-    which does not apply to them. (Reports saved before --keep-going
-    replaced --skip-duplicates record "duplicate_mode" instead - no tool
-    reads either field back.)"""
+    which does not apply to them. The write-back accepts only reports
+    whose mode is "create-records"."""
     if duplicate_mode == 'update-only':
         return {"mode": "update-only"}
     return {"mode": "create-records", "keep_going": duplicate_mode == 'skip'}
+
+def run_target(client) -> Dict:
+    """This run's ArchivesSpace target: the server URL `client` uses and the
+    selected repository and resource. Raises ValueError naming an invalid
+    field. main() captures it once, before anything is written; a direct
+    call of a processing function captures it when its summary starts."""
+    return aspace_client.make_target(client.base_url, aspace_client.REPO_ID,
+                                     aspace_client.RESOURCE_ID)
+
 
 MODE_OPTIONS = [
     ("--create-records", "(pick one)", "Create records. Without --keep-going, any preflight problem stops"),
@@ -1702,7 +1710,8 @@ def print_update_plan(rows: List[Dict], plan: Dict) -> int:
 
 def process_csv_file_update_only(filename: str, client: ArchivesSpaceClient,
                                  dry_run: bool = False,
-                                 state: Dict = None, confirm=None) -> Tuple[List[Dict], Dict]:
+                                 state: Dict = None, confirm=None,
+                                 target: Dict = None) -> Tuple[List[Dict], Dict]:
     """Process a (possibly narrow) CSV in strict update-only mode.
 
     Never creates records. Phase 1 resolves EVERY catalog number to exactly one
@@ -1718,6 +1727,7 @@ def process_csv_file_update_only(filename: str, client: ArchivesSpaceClient,
         "start_time": datetime.now().isoformat(), "end_time": None,
         "dry_run": dry_run, **report_mode("update-only"),
         "environment": aspace_client.ACTIVE_ENV,
+        "target": target if target is not None else run_target(client),
         "command": RUN_COMMAND,
     }
     if state is not None:
@@ -2031,7 +2041,8 @@ def _preflight_create_row(row_num: int, row: Dict, client: ArchivesSpaceClient,
 
 def process_csv_file(filename: str, client: ArchivesSpaceClient,
                     dry_run: bool = False, duplicate_mode: str = 'create',
-                    state: Dict = None, confirm=None) -> Tuple[List[Dict], Dict]:
+                    state: Dict = None, confirm=None,
+                    target: Dict = None) -> Tuple[List[Dict], Dict]:
     """Process entire CSV file in create mode and return results.
 
     duplicate_mode 'create' (strict, the default): phase 1 preflights EVERY
@@ -2067,6 +2078,7 @@ def process_csv_file(filename: str, client: ArchivesSpaceClient,
         "dry_run": dry_run,
         **report_mode(duplicate_mode),
         "environment": aspace_client.ACTIVE_ENV,
+        "target": target if target is not None else run_target(client),
         "command": RUN_COMMAND,
     }
     if state is not None:
@@ -2356,8 +2368,8 @@ def generate_reports(results: List[Dict], summary: Dict) -> bool:
             tmp_path = RECORDS_REPORT + '.tmp'
             with open(tmp_path, 'w', encoding='utf-8') as f:
                 json.dump({"summary": {k: summary.get(k) for k in
-                                       ('command', 'environment', 'mode', 'keep_going',
-                                        'dry_run', 'start_time',
+                                       ('command', 'environment', 'target', 'mode',
+                                        'keep_going', 'dry_run', 'start_time',
                                         'snapshots_expected', 'snapshots_captured',
                                         'snapshots_missing',
                                         'containers_expected', 'containers_captured',
@@ -2499,8 +2511,17 @@ def report_failure_messages(summary: Dict, partial: bool = False) -> List[str]:
         messages.append(f"The receipt CSV could not be saved - the import report (JSON) lists "
                         f"every {'reached ' if partial else ''}row's outcome (see log)")
     if "records file" in failed:
-        messages.append("The records file could not be saved - the Airtable write-back will "
-                        "send every created row to review (see log)")
+        # Only a run the write-back would take (a real production create that
+        # created records - see print_next_step) has anything to record by hand.
+        if (not summary.get("dry_run") and summary.get("mode") == "create-records"
+                and summary.get("environment") == "production" and summary.get("created")):
+            messages.append("The records file could not be saved - the Airtable write-back "
+                            "cannot use this report. Confirm each created record in "
+                            "ArchivesSpace and record it in Airtable by hand: see "
+                            "\"JPC_AV_xxxxx already in ArchivesSpace\" in jpc-check --help "
+                            "(see log)")
+        else:
+            messages.append("The records file could not be saved (see log)")
     if partial and not {"import report", "receipt CSV"} <= failed:
         messages.append("The saved receipts cover only the rows reached before the run "
                         "stopped - check those records in ArchivesSpace before rerunning")
@@ -2857,6 +2878,18 @@ def main():
         print_status("error", f"Could not log in: {client.login_problem}")
         sys.exit(1)
     print_status("success", "Authenticated")
+
+    # The run's ArchivesSpace target, captured ONCE before anything is
+    # written: the server URL this client uses and the selected repository
+    # and resource. The receipt, the records file and any partial report
+    # carry this same block; the write-back checks it.
+    try:
+        target = run_target(client)
+    except ValueError as e:
+        print_status("error", f"Cannot record this run's ArchivesSpace target ({e} is not "
+                              f"valid) - nothing was written")
+        client.logout()
+        sys.exit(1)
     
     # Load extent types (fail closed: abort if the live controlled vocabulary
     # cannot be retrieved, rather than silently trusting a stale local list).
@@ -2886,11 +2919,12 @@ def main():
     try:
         if args.update_only:
             results, summary = process_csv_file_update_only(csv_source, client, args.dry_run,
-                                                            state=state, confirm=ask_to_write)
+                                                            state=state, confirm=ask_to_write,
+                                                            target=target)
         else:
             results, summary = process_csv_file(csv_source, client, args.dry_run,
                                                 duplicate_mode, state=state,
-                                                confirm=ask_to_write)
+                                                confirm=ask_to_write, target=target)
     except KeyboardInterrupt:
         results = state.get("results")
         summary = state.get("summary")

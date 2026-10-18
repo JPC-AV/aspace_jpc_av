@@ -90,8 +90,17 @@ def get_colored_help():
     The parent is written and confirmed first; {CREATED_VALUE} is set only after.
 
     Rows the run skipped, updated or refused are left alone. A row whose
-    Airtable parent already differs, that matches no row or several, or that
-    is on hold in Airtable now, is listed for review and not touched."""),
+    Airtable parent already differs, that matches no row or several, that is
+    on hold in Airtable now, or whose read-back snapshot is missing, does not
+    match or is outside the report's resource, is listed for review and not
+    touched.
+
+    Before Airtable is read, the report must be a real production create run
+    whose recorded ArchivesSpace target (server URL, repository, resource)
+    matches creds.py's production entry, with its records file from the same
+    run - otherwise nothing is read or written. ArchivesSpace is not
+    contacted: this shows that recorded settings agree, not that the records
+    still exist or that the production entry really is production."""),
         ("USAGE", f"""    {C.GREEN}${C.RESET} python3 aspace_csv_import/airtable_writeback.py REPORT.json          {C.DIM}# preview{C.RESET}
     {C.GREEN}${C.RESET} python3 aspace_csv_import/airtable_writeback.py REPORT.json --run    {C.DIM}# shows the plan, asks, writes{C.RESET}"""),
         ("ARGUMENTS", render_options(ARGUMENTS)),
@@ -115,8 +124,97 @@ def get_colored_help():
 # IMPORT REPORT
 # ==============================
 
+# A run's start time exactly as the importer records it (datetime's
+# isoformat(): date AND time, microseconds as 6 digits or none), so a
+# missing, empty or date-only value never counts as a match - and no
+# Python version's looser parser decides what is accepted.
+START_TIME_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{6})?")
+TARGET_LABELS = {"base_url": "server URL (base_url)", "repo_id": "repository (repo_id)",
+                 "resource_id": "resource (resource_id)"}
+NOTHING_DONE = "nothing was read from or written to Airtable"
+CONSISTENCY = ("The check compares recorded settings with creds.py; ArchivesSpace is not "
+               "contacted, so it cannot show that the records exist now or that the entry "
+               "really is production.")
+
+
+def valid_start_time(value):
+    """True for YYYY-MM-DDTHH:MM:SS[.ffffff] naming a real moment."""
+    if not isinstance(value, str) or not START_TIME_RE.fullmatch(value):
+        return False
+    try:
+        datetime.fromisoformat(value)
+    except ValueError:
+        return False
+    return True
+
+
+def run_problems(summary):
+    """The fields of one summary - the report's or its records file's, each
+    checked on its own before anything is compared - that do not describe a
+    real production create run. Strict types: in Python True == 1 and
+    False == 0, so equality alone would accept a masquerading value."""
+    problems = []
+    if summary.get("environment") != "production":
+        problems.append("environment")
+    if summary.get("dry_run") is not False:
+        problems.append("dry_run")
+    if summary.get("mode") != "create-records":
+        problems.append("mode")
+    if not valid_start_time(summary.get("start_time")):
+        problems.append("start_time")
+    problem = aspace_client.target_problem(summary.get("target"))
+    if problem:
+        problems.append(problem if problem.startswith("target") else f"target {problem}")
+    return problems
+
+
+def read_json(path, what, after=""):
+    """A JSON file, or a PullError naming it and the operating system's
+    reason - never the parser's own text, which can quote the file."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except OSError as e:
+        raise PullError(f"could not read {what}: {e.strerror or 'unreadable'}{after}")
+    except ValueError:
+        raise PullError(f"could not read {what} as JSON{after}")
+
+
+def load_records(summary):
+    """The records file a report with created rows requires: only the path
+    the report recorded, checked on its own and then against the report's
+    run and target. Anything wrong stops the whole report."""
+    rec_path = summary.get("records_file")
+    if not isinstance(rec_path, str) or not rec_path:
+        raise PullError(f"this report has created rows but names no records file "
+                        f"(records_file); the write-back needs it to check each created "
+                        f"record - {NOTHING_DONE}")
+    data = read_json(rec_path, "the records file this report names (records_file)",
+                     f" - the write-back reads it only from the path the report recorded; "
+                     f"{NOTHING_DONE}")
+    rec_summary = data.get("summary") if isinstance(data, dict) else None
+    records = data.get("records") if isinstance(data, dict) else None
+    if not isinstance(rec_summary, dict) or not isinstance(records, dict):
+        raise PullError(f"the file this report names as its records file is not a records "
+                        f"file (summary, records) - {NOTHING_DONE}")
+    problems = run_problems(rec_summary)
+    if problems:
+        raise PullError(f"the records file does not describe a real production create run "
+                        f"({', '.join(problems)}) - {NOTHING_DONE}")
+    differ = [k for k in ("start_time", "target") if rec_summary[k] != summary[k]]
+    if differ:
+        raise PullError(f"the records file is from a different run than this report "
+                        f"(differs: {', '.join(differ)}) - {NOTHING_DONE}")
+    return records
+
+
 def load_report(path, exclude=()):
     """(candidates, review, counts, excluded) from a real production import report.
+
+    Before anything else - before any Airtable read - the report and, when it
+    has created rows, its records file must each describe a real production
+    create run with a valid ArchivesSpace target, agree with each other, and
+    match creds.py's production entry; otherwise the whole report stops.
 
     candidates: [{catalog, parent, uri}] for rows the run created and read
     back. review: [(catalog, note)] for created rows that cannot be written
@@ -124,39 +222,50 @@ def load_report(path, exclude=()):
     --exclude-catalog numbers, each of which must be a created row in the
     report - they are dropped before any Airtable planning.
     """
-    try:
-        with open(path, encoding="utf-8") as f:
-            report = json.load(f)
-    except (OSError, ValueError) as e:
-        raise PullError(f"could not read {path} as a JSON import report: {e}")
+    report = read_json(path, path, " - use the import_report_<stamp>.json file")
     summary = report.get("summary") if isinstance(report, dict) else None
     results = report.get("results") if isinstance(report, dict) else None
     if not isinstance(summary, dict) or not isinstance(results, list):
         raise PullError(f"{path} is not an import report (no summary/results) - "
                         f"use import_report_<stamp>.json, not the CSV")
-    if summary.get("dry_run") is not False:
+    if summary.get("dry_run") is True:
         raise PullError("this report is from a dry run (-n) - nothing was created; "
                         "use the report from the real run")
-    if summary.get("environment") != "production":
-        raise PullError(f"this report is from the {summary.get('environment')!r} environment "
-                        f"- only production runs are written back")
-
-    repo_id = str((aspace_client.ENVIRONMENTS.get("production") or {}).get("repo_id") or "")
-    if not repo_id:
-        raise PullError(aspace_client.CONFIG_ERROR
-                        or "creds.py has no production environment - cannot check record URIs")
-    uri_re = re.compile(rf"/repositories/{re.escape(repo_id)}/archival_objects/[0-9]+")
-
-    records = {}
-    records_file = summary.get("records_file")
-    if records_file:
-        try:
-            with open(records_file, encoding="utf-8") as f:
-                records = (json.load(f) or {}).get("records") or {}
-        except (OSError, ValueError, AttributeError):
-            records = {}  # every created row then goes to review below
+    environment = summary.get("environment")
+    if environment != "production":
+        named = (f"the {environment!r} environment" if isinstance(environment, str)
+                 and re.fullmatch(r"[A-Za-z0-9_-]{1,40}", environment)
+                 else "an environment other than production")
+        raise PullError(f"this report is from {named} - only production runs are written back")
+    if summary.get("mode") == "update-only":
+        raise PullError("this report is from an update-only run - only create runs "
+                        "(--create-records) are written back")
+    if "target" not in summary:
+        raise PullError(f"this report does not record which ArchivesSpace server, repository "
+                        f"and resource it was made against, so it cannot be checked against "
+                        f"creds.py - {NOTHING_DONE}")
+    problems = run_problems(summary)
+    if problems:
+        raise PullError(f"this report does not describe a real production create run "
+                        f"({', '.join(problems)}) - {NOTHING_DONE}")
+    target = summary["target"]
+    try:  # creds.py's production entry, read only: nothing is selected or contacted
+        production = aspace_client.configured_target("production")
+    except ValueError as e:
+        raise PullError(str(e))
+    differ = [TARGET_LABELS[k] for k in TARGET_LABELS if target[k] != production[k]]
+    if differ:
+        raise PullError(f"this report's ArchivesSpace target does not match creds.py's "
+                        f"production entry (differs: {', '.join(differ)}) - {NOTHING_DONE}. "
+                        f"{CONSISTENCY}")
 
     created = [r for r in results if isinstance(r, dict) and r.get("status") == "created"]
+    # Required whenever the run created rows - even if every one is excluded
+    # below; a report with none needs no records file.
+    records = load_records(summary) if created else {}
+    uri_re = re.compile(rf"/repositories/{target['repo_id']}/archival_objects/[0-9]+")
+    resource_uri = f"/repositories/{target['repo_id']}/resources/{target['resource_id']}"
+
     counts = {}
     for r in results:
         if isinstance(r, dict) and r.get("status") != "created":
@@ -179,8 +288,9 @@ def load_report(path, exclude=()):
         catalog = (r.get(col.CATALOG) or "").strip()
         parent = (r.get(col.PARENT_REFID) or "").strip()
         uri = (r.get("uri") or "").strip()
-        snap = records.get(catalog) if isinstance(records, dict) else None
+        snap = records.get(catalog)
         obj = snap.get("archival_object") if isinstance(snap, dict) else None
+        resource = obj.get("resource") if isinstance(obj, dict) else None
         if not col.valid_catalog_number(catalog):
             review.append((catalog or f"row {r.get('row_number')}", "no valid catalog number"))
         elif seen[r.get(col.CATALOG)] > 1:
@@ -189,9 +299,13 @@ def load_report(path, exclude=()):
             review.append((catalog, f"no valid parent ref ID in the report ({parent!r})"))
         elif not uri_re.fullmatch(uri):
             review.append((catalog, f"record URI {uri!r} is not a production archival object"))
-        elif not (isinstance(obj, dict) and snap.get("uri") == uri
-                  and obj.get("component_id") == catalog):
+        elif not isinstance(obj, dict):
             review.append((catalog, "no read-back snapshot of the created record"))
+        elif not (snap.get("uri") == uri and obj.get("uri") == uri
+                  and obj.get("component_id") == catalog):
+            review.append((catalog, "the read-back snapshot does not match the created record"))
+        elif not (isinstance(resource, dict) and resource.get("ref") == resource_uri):
+            review.append((catalog, "the read-back snapshot is not in the report's resource"))
         else:
             candidates.append({"catalog": catalog, "parent": parent, "uri": uri,
                                "title": (r.get(col.TITLE) or "").strip()})
