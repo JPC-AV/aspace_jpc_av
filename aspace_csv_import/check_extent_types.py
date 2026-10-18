@@ -156,8 +156,10 @@ def check_csv_values(csv_file):
 
 def build_parser():
     """The command-line parser (module-level so tests can check it against -h)."""
+    # hide_values: -p takes a password, so an argument error never repeats
+    # what was typed
     parser = styled_parser(["[FILE] [--env NAME] [-u USER -p PASS] [--no-color]"],
-                           get_colored_help, [ARGUMENTS, OPTIONS])
+                           get_colored_help, [ARGUMENTS, OPTIONS], hide_values=True)
     parser.add_argument(
         'csv_file',
         nargs='?',

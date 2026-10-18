@@ -2590,8 +2590,10 @@ def _safe_console(status: str, message: str) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     """The importer's command-line parser (module-level so tests can drive it)."""
+    # hide_values: -p takes a password, so an argument error never repeats
+    # what was typed
     parser = styled_parser(["(--create-records | --update-only) -f FILE [options]"],
-                           get_colored_help, [CLI_OPTIONS, MODE_OPTIONS])
+                           get_colored_help, [CLI_OPTIONS, MODE_OPTIONS], hide_values=True)
 
     parser.add_argument(
         '-n', '--dry-run',
@@ -2651,13 +2653,11 @@ def build_parser() -> argparse.ArgumentParser:
     # The easy mistake: a CSV path typed without -f. argparse only says -f is
     # missing; say what to type. Generic on purpose: nothing typed is echoed
     # back (a stray value could be a password).
-    plain_error = parser.error
-
-    def error(message):
+    def missing_file_hint(message):
         if message.startswith("the following arguments are required: ") and "-f/--file" in message:
-            message += "\n       a CSV path needs -f in front of it: -f FILE"
-        plain_error(message)
-    parser.error = error
+            return "\n       a CSV path needs -f in front of it: -f FILE"
+        return ""
+    parser.error_hint = missing_file_hint
     return parser
 
 

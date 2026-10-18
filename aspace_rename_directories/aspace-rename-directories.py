@@ -563,7 +563,9 @@ def outcome_category(outcome, dry_run):
     """Each target lands in exactly one category, in this order:
     unknown  - some step's result is uncertain
     partly   - some requested changes were made and kept, others were not
-    failed   - it did not finish, and nothing it changed was kept
+    failed   - no requested change was confirmed and kept; preparation or
+               cleanup leftovers may remain - check NEEDS ATTENTION before
+               rerunning
     current  - every requested step needed no change
     done     - every requested step succeeded"""
     if outcome["uncertain"]:

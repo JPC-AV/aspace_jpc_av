@@ -275,11 +275,17 @@ def help_section_names(text):
             if l and l == l.lstrip() and l.split(" (")[0].isupper() and not l.startswith("=")]
 
 
-def styled_parser(usage_lines, help_text, option_groups):
+def styled_parser(usage_lines, help_text, option_groups, hide_values=False):
     """An argparse parser that shows the tool's own -h screen, and on a
     mistake prints its usage lines, the option list and the error in red -
     the same way in every tool. option_groups: the lists render_options
-    draws, which the -h screen shows too (one list per tool)."""
+    draws, which the -h screen shows too (one list per tool).
+
+    hide_values: for a tool that takes a password on its command line. An
+    error argparse raises while parsing then never repeats what was typed
+    (see _without_typed_values); errors the tool raises after parsing are
+    shown as written. parser.error_hint, when set, returns text to add to
+    an error - it is given the message as it will be shown."""
     import argparse
 
     class StyledParser(argparse.ArgumentParser):
@@ -293,6 +299,10 @@ def styled_parser(usage_lines, help_text, option_groups):
             return help_text() if callable(help_text) else help_text
 
         def error(self, message):
+            if self.hide_values and self.parsing:
+                message = _without_typed_values(self, message)
+            if self.error_hint:
+                message += self.error_hint(message)
             self.print_usage(sys.stderr)
             self.exit(2, f"\n{Colors.RED}error: {message}{Colors.RESET}\n")
 
@@ -302,13 +312,62 @@ def styled_parser(usage_lines, help_text, option_groups):
             args = sys.argv[1:] if args is None else list(args)
             if _asks_no_color(self, args):
                 Colors.disable()
-            return super().parse_known_args(args, namespace)
+            self.parsing += 1
+            try:
+                return super().parse_known_args(args, namespace)
+            finally:
+                self.parsing -= 1
+
+        def parse_args(self, args=None, namespace=None):
+            # argparse reports leftover arguments after parse_known_args has
+            # returned - still parsing, so counted, not a plain flag
+            self.parsing += 1
+            try:
+                return super().parse_args(args, namespace)
+            finally:
+                self.parsing -= 1
 
     parser = StyledParser(add_help=False, usage=argparse.SUPPRESS)
+    parser.hide_values = hide_values
+    parser.error_hint = None
+    parser.parsing = 0   # > 0 while argparse is parsing (errors may hold typed text)
     parser.add_argument("-h", "--help", action="help", default=argparse.SUPPRESS,
                         help=argparse.SUPPRESS)
     parser.option_groups_shown = option_groups  # what -h and errors list (for tests)
     return parser
+
+
+# argparse errors that name only the parser's options, never a typed value
+_VALUE_FREE_ERRORS = (
+    r"the following arguments are required: [\w/, -]+",
+    r"one of the arguments [\w/ -]+ is required",
+    r"argument [\w/-]+: expected (?:one|at most one|at least one|\d+) arguments?",
+    r"argument [\w/-]+: not allowed with argument [\w/-]+",
+)
+
+
+def _without_typed_values(parser, message):
+    """An argparse error rewritten so that nothing typed appears in it -
+    typed text could be a password. Errors naming only options are kept;
+    the known kinds get a fixed message naming only this parser's own
+    options; anything else a generic one, so a new wording cannot leak."""
+    import re
+    if any(re.fullmatch(pattern, message) for pattern in _VALUE_FREE_ERRORS):
+        return message
+    if message.startswith("unrecognized arguments: "):
+        return "unrecognized arguments - not shown, in case one is a password"
+    known = {o for action in parser._actions for o in action.option_strings}
+    flag = re.match(r"argument ([\w/-]+): ignored explicit argument ", message)
+    if flag and set(flag.group(1).split("/")) <= known:
+        return (f"argument {flag.group(1)} takes no value - what followed it is not "
+                f"shown, in case it is a password")
+    if message.startswith("ambiguous option: ") and " could match " in message:
+        matches = message.rsplit(" could match ", 1)[1].split(", ")
+        if set(matches) <= known:
+            return (f"an abbreviation matches several options ({', '.join(matches)}) - "
+                    f"type the option in full; what was typed is not shown")
+    return ("invalid arguments - not shown, in case they include a password; "
+            "check them against the options above")
 
 
 def _asks_no_color(parser, args):

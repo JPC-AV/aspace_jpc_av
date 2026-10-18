@@ -274,7 +274,7 @@ NEEDS ATTENTION
 | Done | Every requested step succeeded |
 | Already up to date | Every requested step needed no change (only possible with `--no-rename`) |
 | Partly done | Some changes were made and kept, others were not - e.g. the record was updated but the folder could not be renamed |
-| Failed | It did not finish, and nothing it changed was kept |
+| Failed | No requested change was confirmed and kept. Preparation or cleanup leftovers may remain; check NEEDS ATTENTION before rerunning |
 | Outcome unknown | A step's result is uncertain - an update whose reply was lost, or a rename that reported an error but may have landed |
 | Not reached (the run stopped) | The run stopped - Ctrl-C or an unexpected error - before this target was processed |
 
