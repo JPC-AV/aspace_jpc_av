@@ -38,12 +38,14 @@ Lookups return a Lookup with status one of:
                caller must fail closed, never treat as "no match"
 """
 
+import ipaddress
 import json
 import logging
 import re
 import sys
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
+from urllib.parse import urlsplit
 
 # The #1 support issue is running outside the Python environment - a bare
 # ModuleNotFoundError traceback tells a novice nothing. Exit with the fix.
@@ -168,6 +170,76 @@ def console_logging() -> None:
     logging.basicConfig(level=logging.WARNING, format="      [log] %(message)s")
 
 
+# Why a configured URL (baseURL, staff_url) is refused, by kind. The URL
+# itself is never shown anywhere: it can carry a password or a token.
+_URL_PROBLEMS = {
+    "characters": "contains spaces, control characters, a backslash or non-ASCII characters",
+    "query": "has a ? or # part, which can carry a token",
+    "scheme": "is not an http:// or https:// address",
+    "userinfo": "contains a user name or password",
+    "host": "has no usable server name or port",
+    "path": "has characters a URL path cannot contain",
+}
+# A host name or IPv4 address, or an [IPv6] address, then an optional
+# numeric port. Checked here rather than through urlsplit's .port, which
+# accepts different things (e.g. "+80") on different Python versions.
+_AUTHORITY_RE = re.compile(r"(?:[A-Za-z0-9._-]+|\[([0-9A-Fa-f:.]+)\])(?::([0-9]{1,5}))?")
+_PATH_RE = re.compile(r"(?:[A-Za-z0-9\-._~!$&'()*+,;=:@/]|%[0-9A-Fa-f]{2})*")
+
+
+def url_problem(value) -> Optional[str]:
+    """Why a configured URL is not safe to use or show - a key of
+    _URL_PROBLEMS, "type" for a non-string - or None when it is. A check
+    only: a safe URL is used exactly as written, never normalized. The
+    value never goes into a message or an exception."""
+    if not isinstance(value, str):
+        return "type"
+    # raw characters first: the URL parser silently drops tabs and newlines
+    if "\\" in value or any(not 0x21 <= ord(c) <= 0x7e for c in value):
+        return "characters"
+    if "?" in value or "#" in value:
+        return "query"
+    try:
+        parts = urlsplit(value)
+    except ValueError:  # e.g. an unclosed [ - its text is not passed on
+        return "host"
+    if parts.scheme.lower() not in ("http", "https") or not value[len(parts.scheme):].startswith("://"):
+        return "scheme"
+    if "@" in parts.netloc:  # user info, empty or encoded included; an @ in the path is fine
+        return "userinfo"
+    authority = _AUTHORITY_RE.fullmatch(parts.netloc)  # no %-escapes in a host
+    if not authority:
+        return "host"
+    ipv6, port = authority.groups()
+    if port is not None and not 0 < int(port) <= 65535:
+        return "host"
+    if ipv6 is not None:
+        try:
+            ipaddress.IPv6Address(ipv6)
+        except ValueError:
+            return "host"
+    if not _PATH_RE.fullmatch(parts.path):
+        return "path"
+    return None
+
+
+def _url_refusal(env_name: str, field_name: str, kind: str, value) -> str:
+    """The message refusing one creds.py URL - it never contains the URL."""
+    where = f"Environment {env_name!r}: {field_name}"
+    if kind == "type":
+        return (f"{where} must be a string (got {type(value).__name__}) "
+                f"- see creds_template.py")
+    advice = {"userinfo": f"Give {field_name} as the plain address; the user name and "
+                          f"password belong in user and password",
+              "query": f"Give {field_name} as the plain address, with no ? or # part",
+              }.get(kind, f"Retype {field_name} as a plain http(s) address")
+    return f"{where} {_URL_PROBLEMS[kind]} - not shown. {advice} (see creds_template.py)"
+
+
+# The client's own refusal, when its URL is unsafe at the moment of use
+URL_REFUSED = "the ArchivesSpace URL is not usable (not shown) - check baseURL in creds.py"
+
+
 def select_environment(name: str) -> None:
     """Activate one configured environment. Raises ValueError for an unknown
     name - callers surface that as a CLI error, nothing defaults.
@@ -200,6 +272,15 @@ def select_environment(name: str) -> None:
     if not isinstance(staff_url, str):
         raise ValueError(f"Environment {name!r}: staff_url must be a string "
                          f"(got {type(staff_url).__name__}) - see creds_template.py")
+    # Both URLs are checked before anything is assigned: a refused one
+    # never reaches a header, a log, a request or a report. A missing or
+    # empty baseURL keeps its own message (at login); staff_url is optional.
+    for field_name, value in (("baseURL", env.get("baseURL")), ("staff_url", staff_url)):
+        if value is None or value == "":
+            continue
+        kind = url_problem(value)
+        if kind:
+            raise ValueError(_url_refusal(name, field_name, kind, value))
     repo_id, resource_id = env.get("repo_id"), env.get("resource_id")
     ACTIVE_ENV = name
     ASPACE_URL = env.get("baseURL")
@@ -328,6 +409,13 @@ class ASpaceClient:
         self.last_failure_definitive = True
 
     # -- session ------------------------------------------------------------
+    def _url_unusable(self) -> bool:
+        """True when the client's CURRENT base URL is unsafe to use - checked
+        at every use, not only when the client was made, so a URL changed
+        afterwards is caught before any request is built. A missing one is
+        left to the existing checks."""
+        return self.base_url not in (None, "") and url_problem(self.base_url) is not None
+
     def _login_failed(self, problem: str, detail: str = None) -> bool:
         """Record why login failed, in words a person can act on, and log the
         technical detail. Tools print `login_problem`; the log keeps the rest."""
@@ -337,17 +425,23 @@ class ASpaceClient:
 
     def login(self) -> bool:
         self.login_problem = None
+        # One reading of the URL for the whole attempt: the value checked
+        # here is the value requested and the value any failure names -
+        # self.base_url is never read again, even if it changes meanwhile.
+        base_url = self.base_url
         # An unconfigured client must refuse to operate: with REPO_ID or
         # RESOURCE_ID unset the scope locks would compare against None and
         # fail OPEN (None == None), which is worse than not running at all.
-        if not (self.base_url and REPO_ID and RESOURCE_URI):
+        if not (base_url and REPO_ID and RESOURCE_URI):
             return self._login_failed("creds.py must set baseURL, repo_id and resource_id "
                                       "(see creds_template.py)")
+        if url_problem(base_url) is not None:
+            return self._login_failed(URL_REFUSED)
         # Shape check, not just presence: a copied-but-unedited template
         # (baseURL="URL", repo_id="number") is truthy and would otherwise die
         # later with a confusing network error instead of this message.
-        if not (isinstance(self.base_url, str)
-                and self.base_url.startswith(("http://", "https://"))
+        if not (isinstance(base_url, str)
+                and base_url.startswith(("http://", "https://"))
                 and str(REPO_ID).isdigit() and str(RESOURCE_ID).isdigit()):
             return self._login_failed("creds.py looks unconfigured - baseURL must be an "
                                       "http(s) URL and repo_id/resource_id must be numeric "
@@ -370,7 +464,7 @@ class ASpaceClient:
         self.http.headers.pop("X-ArchivesSpace-Session", None)
         try:
             response = self.http.post(
-                f"{self.base_url}/users/{self.username}/login",
+                f"{base_url}/users/{self.username}/login",
                 data={"password": self.password},
                 timeout=TIMEOUT,
                 allow_redirects=False,
@@ -379,7 +473,7 @@ class ASpaceClient:
             # Name the likely cause: a network outage or a dropped VPN reads
             # as "authentication failed" otherwise, sending people to check
             # a password that was never even sent.
-            host = self.base_url.split("//", 1)[-1].split("/", 1)[0]
+            host = base_url.split("//", 1)[-1].split("/", 1)[0]
             if isinstance(e, getattr(requests, "Timeout", ())):
                 problem = (f"{host} did not respond within {TIMEOUT}s - check the "
                            f"network or VPN")
@@ -424,6 +518,9 @@ class ASpaceClient:
     def logout(self) -> bool:
         if not self.session_token:
             return True
+        if self._url_unusable():
+            logging.warning(f"Logout not attempted: {URL_REFUSED}")
+            return False
         try:
             response = self.http.post(f"{self.base_url}/logout", timeout=TIMEOUT,
                                       allow_redirects=False)
@@ -458,8 +555,13 @@ class ASpaceClient:
         412 was rejected outright, so retrying after re-login is safe).
         Writes fail fast."""
         import time as _time
-        url = f"{self.base_url}{endpoint}"
         self.last_failure_definitive = True
+        if self._url_unusable():
+            # nothing was sent: a definite local failure (for a GET,
+            # _request restores the earlier write's status)
+            logging.error(f"{method} {endpoint} refused: {URL_REFUSED}")
+            return None
+        url = f"{self.base_url}{endpoint}"
         try:
             # Never follow redirects: a 3xx would re-send a write to a
             # server-chosen location AFTER the scope locks approved the

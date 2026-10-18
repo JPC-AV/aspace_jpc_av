@@ -19,6 +19,9 @@
 #   staff_url   - optional: the staff UI you browse; enables clickable
 #                 staff_link columns in import reports
 #
+# baseURL and staff_url are plain addresses: no user name or password, and
+# no ? or # part. The tools refuse such a URL, without ever printing it.
+#
 # The JPCA sandbox values below are already filled in - most people only
 # need to enter their own sandbox username and password.
 
