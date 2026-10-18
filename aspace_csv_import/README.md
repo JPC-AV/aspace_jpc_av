@@ -820,6 +820,18 @@ aborts with no writes.
 
 ## Version History
 
+- **v3.6.1** (2026): authentication tokens are checked before use
+  - The Airtable read and write tokens, and the session token
+    ArchivesSpace returns at login, must be text of visible characters
+    only - no spaces, line breaks or other control characters. A token
+    that is not is refused, naming its setting, never the token, and
+    nothing is sent with it; a preview still needs no write token
+  - Connection errors are reported by kind, never with the HTTP library's
+    own text, which can quote a token; a write whose outcome is unknown
+    is still reported as unknown
+  - After pulling: nothing to reinstall; reinstalling only refreshes the
+    version `python -m pip show jpc-av-tools` reports
+
 - **v3.6** (2026): import reports record their ArchivesSpace target
   - Import reports and records files record the run's ArchivesSpace target
     (server URL, repository, resource), captured once before anything is

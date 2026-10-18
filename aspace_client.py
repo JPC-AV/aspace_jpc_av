@@ -238,6 +238,13 @@ def _url_refusal(env_name: str, field_name: str, kind: str, value) -> str:
 
 # The client's own refusal, when its URL is unsafe at the moment of use
 URL_REFUSED = "the ArchivesSpace URL is not usable (not shown) - check baseURL in creds.py"
+# ...and when the session header it would send is not a usable token
+SESSION_REFUSED = "the ArchivesSpace session header is not usable (not shown) - log in again"
+
+
+class _SendFailed(Exception):
+    """A ValueError raised inside the HTTP call itself, carrying only that
+    exception's kind: the library's own text can quote a header value."""
 
 
 # The ArchivesSpace target an import report records: the server URL, the
@@ -486,6 +493,13 @@ class ASpaceClient:
         left to the existing checks."""
         return self.base_url not in (None, "") and url_problem(self.base_url) is not None
 
+    def _session_header_unusable(self) -> bool:
+        """True when a session header is installed but is not a usable token
+        - the value actually sent, checked before every request, retry and
+        logout. No header installed is left as it was (login sends none)."""
+        value = self.http.headers.get("X-ArchivesSpace-Session")
+        return value is not None and creds_loader.token_problem(value) is not None
+
     def _login_failed(self, problem: str, detail: str = None) -> bool:
         """Record why login failed, in words a person can act on, and log the
         technical detail. Tools print `login_problem`; the log keeps the rest."""
@@ -499,6 +513,11 @@ class ASpaceClient:
         # here is the value requested and the value any failure names -
         # self.base_url is never read again, even if it changes meanwhile.
         base_url = self.base_url
+        # Fresh attempt: drop any earlier session before any check can
+        # return, so a failed or refused (re-)login never leaves a stale
+        # token or session header installed.
+        self.session_token = None
+        self.http.headers.pop("X-ArchivesSpace-Session", None)
         # An unconfigured client must refuse to operate: with REPO_ID or
         # RESOURCE_ID unset the scope locks would compare against None and
         # fail OPEN (None == None), which is worse than not running at all.
@@ -528,10 +547,7 @@ class ASpaceClient:
             return self._login_failed("creds.py still has the template placeholder "
                                       "username/password - fill in your own "
                                       "(see creds_template.py)")
-        # Fresh attempt: drop any stale token so a failed re-login can't
-        # leave a dead session header installed on the connection.
-        self.session_token = None
-        self.http.headers.pop("X-ArchivesSpace-Session", None)
+        host = base_url.split("//", 1)[-1].split("/", 1)[0]
         try:
             response = self.http.post(
                 f"{base_url}/users/{self.username}/login",
@@ -543,7 +559,6 @@ class ASpaceClient:
             # Name the likely cause: a network outage or a dropped VPN reads
             # as "authentication failed" otherwise, sending people to check
             # a password that was never even sent.
-            host = base_url.split("//", 1)[-1].split("/", 1)[0]
             if isinstance(e, getattr(requests, "Timeout", ())):
                 problem = (f"{host} did not respond within {TIMEOUT}s - check the "
                            f"network or VPN")
@@ -551,7 +566,11 @@ class ASpaceClient:
                 problem = f"could not reach {host} - check the network or VPN"
             else:
                 problem = f"could not connect to {host} ({type(e).__name__})"
-            return self._login_failed(problem, f"Login error: {e}")
+            # The exception's own text can quote a header: its kind only.
+            return self._login_failed(problem, f"Login error: {type(e).__name__}")
+        except ValueError as e:  # refused inside the HTTP library while sending
+            return self._login_failed(f"could not connect to {host} ({type(e).__name__})",
+                                      f"Login error: {type(e).__name__}")
         page = _web_page_block(response)
         if page:
             # The API answers login with JSON; a web page means something in
@@ -580,6 +599,9 @@ class ASpaceClient:
         token = payload.get("session")
         if not isinstance(token, str) or not token:
             return self._login_failed("the login response carried no usable session token")
+        if creds_loader.token_problem(token):  # never installed, never shown
+            return self._login_failed("the login response carried an unusable session token "
+                                      "(not shown)")
         self.session_token = token
         self.http.headers["X-ArchivesSpace-Session"] = token
         logging.info("Successfully authenticated with ArchivesSpace")
@@ -591,11 +613,17 @@ class ASpaceClient:
         if self._url_unusable():
             logging.warning(f"Logout not attempted: {URL_REFUSED}")
             return False
+        if self._session_header_unusable():
+            logging.warning(f"Logout not attempted: {SESSION_REFUSED}")
+            return False
         try:
             response = self.http.post(f"{self.base_url}/logout", timeout=TIMEOUT,
                                       allow_redirects=False)
         except requests.RequestException as e:
-            logging.warning(f"Logout error: {e}")
+            logging.warning(f"Logout error: {type(e).__name__}")
+            return False
+        except ValueError as e:  # refused inside the HTTP library while sending
+            logging.warning(f"Logout error: {type(e).__name__}")
             return False
         if response.status_code == 200:
             self.session_token = None
@@ -631,6 +659,12 @@ class ASpaceClient:
             # _request restores the earlier write's status)
             logging.error(f"{method} {endpoint} refused: {URL_REFUSED}")
             return None
+        if self._session_header_unusable():
+            # nothing was sent: a definite local failure, like the URL check
+            logging.error(f"{method} {endpoint} refused: {SESSION_REFUSED}")
+            return None
+        if method not in ("GET", "POST", "DELETE"):
+            raise ValueError(f"Unsupported HTTP method: {method}")
         url = f"{self.base_url}{endpoint}"
         try:
             # Never follow redirects: a 3xx would re-send a write to a
@@ -638,16 +672,21 @@ class ASpaceClient:
             # original endpoint (and 301/302 turn a POST into a GET, which
             # would report a write that never happened). A redirect also
             # forwards the session header wherever Location points.
-            if method == "GET":
-                response = self.http.get(url, timeout=TIMEOUT, allow_redirects=False)
-            elif method == "POST":
-                response = self.http.post(url, json=data, timeout=TIMEOUT,
-                                          allow_redirects=False)
-            elif method == "DELETE":
-                response = self.http.delete(url, timeout=TIMEOUT,
-                                            allow_redirects=False)
-            else:
-                raise ValueError(f"Unsupported HTTP method: {method}")
+            try:  # the HTTP call alone - response handling keeps its own errors
+                if method == "GET":
+                    response = self.http.get(url, timeout=TIMEOUT, allow_redirects=False)
+                elif method == "POST":
+                    response = self.http.post(url, json=data, timeout=TIMEOUT,
+                                              allow_redirects=False)
+                else:
+                    response = self.http.delete(url, timeout=TIMEOUT,
+                                                allow_redirects=False)
+            except ValueError as e:
+                if isinstance(e, requests.RequestException):
+                    raise  # handled below, as before
+                # refused inside the HTTP library while sending - its text
+                # can quote a header, so only the kind goes on
+                raise _SendFailed(type(e).__name__) from None
 
             if 300 <= response.status_code < 400:
                 location = getattr(response, "headers", {}).get("Location")
@@ -709,10 +748,12 @@ class ASpaceClient:
             self.last_failure_definitive = True
             logging.error(f"Unserializable payload for {method} {endpoint}: {e}")
             return None
-        except requests.RequestException as e:
-            # No response received - a write may still have committed.
+        except (requests.RequestException, _SendFailed) as e:
+            # No response received - a write may still have committed. The
+            # exception's own text can quote a header: its kind only.
             self.last_failure_definitive = False
-            logging.error(f"Request error: {method} {endpoint}: {e}")
+            kind = str(e) if isinstance(e, _SendFailed) else type(e).__name__
+            logging.error(f"Request error: {method} {endpoint}: {kind}")
             if method == "GET" and retry_count < RETRY_ATTEMPTS:
                 _time.sleep(RETRY_DELAY)
                 return self._request(method, endpoint, data, retry_count + 1)

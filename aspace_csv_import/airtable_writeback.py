@@ -52,6 +52,7 @@ PATCH_BATCH = 10  # Airtable's per-request record limit
 import creds_loader  # noqa: E402 - beside aspace_client at the repo root
 AIRTABLE_PAT_WRITE = (creds_loader.setting("airtable_pat_write", "")
                       or os.environ.get("AIRTABLE_PAT_WRITE", ""))
+WRITE_TOKEN = ("The Airtable write token", "airtable_pat_write", "AIRTABLE_PAT_WRITE")
 
 REF_ID_RE = re.compile(r"[0-9a-f]{32}")
 
@@ -489,18 +490,29 @@ def airtable_patch(table_id, records, token):
     Setting the same values twice is harmless, so a 429 is retried."""
     url = f"{pull.API_URL}/{BASE_ID}/{table_id}"
     body = {"records": records, "returnFieldsByFieldId": True}
+    problem = creds_loader.token_problem(token)  # the token actually used
+    if problem:  # refused before any request: definitely not sent
+        raise PullError(creds_loader.token_refusal(*WRITE_TOKEN, problem)
+                        + " - nothing was sent for this batch")
     headers = {"Authorization": f"Bearer {token}"}
     for attempt in range(pull.RATE_LIMIT_RETRIES + 1):
+        # Past this point a failure may follow a send: it stays uncertain.
+        # An exception's own text can quote the Authorization header, so
+        # only its kind is shown, and none is chained ("from None").
         try:
             resp = requests.patch(url, headers=headers, json=body, timeout=pull.TIMEOUT)
         except requests.Timeout:
             raise UncertainWrite(f"Airtable did not answer a write within {pull.TIMEOUT}s - it "
-                                 f"may or may not have been applied; rerun to re-check")
+                                 f"may or may not have been applied; rerun to re-check") from None
         except requests.ConnectionError:
             raise UncertainWrite("the connection to api.airtable.com failed during a write - "
-                                 "check the network; rerun to re-check")
+                                 "check the network; rerun to re-check") from None
         except requests.RequestException as e:
-            raise UncertainWrite(f"write to Airtable failed ({e}); rerun to re-check")
+            raise UncertainWrite(f"write to Airtable failed ({type(e).__name__}) - it may or "
+                                 f"may not have been applied; rerun to re-check") from None
+        except ValueError as e:  # refused inside the HTTP library while sending
+            raise UncertainWrite(f"write to Airtable failed ({type(e).__name__}) - it may or "
+                                 f"may not have been applied; rerun to re-check") from None
         if resp.status_code == 429 and attempt < pull.RATE_LIMIT_RETRIES:
             print_status("warning", f"Airtable rate limit - waiting {pull.RATE_LIMIT_WAIT}s")
             time.sleep(pull.RATE_LIMIT_WAIT)
@@ -713,6 +725,14 @@ def main():
                      or "No write token - add airtable_pat_write to creds.py "
                         "(data.records:write on this base)")
         sys.exit(1)
+    # Before anything is read: the tokens this run will use (the write token
+    # only with --run - a preview never uses it).
+    for token, names in ((pull.AIRTABLE_PAT_READ_ONLY, pull.READ_TOKEN),
+                         (AIRTABLE_PAT_WRITE if args.run else None, WRITE_TOKEN)):
+        problem = token is not None and creds_loader.token_problem(token)
+        if problem:
+            print_status("error", creds_loader.token_refusal(*names, problem))
+            sys.exit(1)
 
     try:  # Ctrl-C while reading: nothing has been written yet
         candidates, review, left_alone, excluded = load_report(

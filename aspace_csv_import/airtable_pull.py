@@ -58,6 +58,8 @@ RATE_LIMIT_RETRIES = 3
 import creds_loader  # noqa: E402
 AIRTABLE_PAT_READ_ONLY = (creds_loader.setting("airtable_pat_read_only", "")
                           or os.environ.get("AIRTABLE_PAT_READ_ONLY", ""))
+# How a refusal names the read token: where it comes from, never the token
+READ_TOKEN = ("The Airtable read token", "airtable_pat_read_only", "AIRTABLE_PAT_READ_ONLY")
 
 RUN_COMMAND = " ".join([os.path.basename(sys.executable)]
                        + [shlex.quote(a) for a in sys.argv])
@@ -120,16 +122,26 @@ def airtable_request(url, token):
     limit) waits and retries; nothing else is retried, since the pull is
     cheap to run again.
     """
+    problem = creds_loader.token_problem(token)  # the token actually used
+    if problem:  # refused before any request: nothing is sent
+        raise PullError(creds_loader.token_refusal(*READ_TOKEN, problem))
     headers = {"Authorization": f"Bearer {token}"}
     for attempt in range(RATE_LIMIT_RETRIES + 1):
+        # An exception's own text can quote the Authorization header, so
+        # only its kind is shown, and none is chained ("from None").
         try:
             resp = requests.get(url, headers=headers, timeout=TIMEOUT)
         except requests.Timeout:
-            raise PullError(f"Airtable did not respond within {TIMEOUT}s - check the network or VPN")
+            raise PullError(f"Airtable did not respond within {TIMEOUT}s - check the network "
+                            f"or VPN") from None
         except requests.ConnectionError:
-            raise PullError("could not reach api.airtable.com - check the network or VPN")
+            raise PullError("could not reach api.airtable.com - check the network or VPN") from None
         except requests.RequestException as e:
-            raise PullError(f"request to Airtable failed: {e}")
+            raise PullError(f"request to Airtable failed ({type(e).__name__}) - check the "
+                            f"network or VPN, then the read token") from None
+        except ValueError as e:  # refused inside the HTTP library while sending
+            raise PullError(f"request to Airtable failed ({type(e).__name__}) - check the "
+                            f"read token") from None
 
         if resp.status_code == 429 and attempt < RATE_LIMIT_RETRIES:
             print_status("warning", f"Airtable rate limit - waiting {RATE_LIMIT_WAIT}s")
@@ -317,6 +329,10 @@ def main():
         print_status("error", creds_loader.problem()
                      or "No Airtable token - add airtable_pat_read_only = \"pat...\" to creds.py "
                         "(or export AIRTABLE_PAT_READ_ONLY)")
+        sys.exit(1)
+    problem = creds_loader.token_problem(AIRTABLE_PAT_READ_ONLY)
+    if problem:
+        print_status("error", creds_loader.token_refusal(*READ_TOKEN, problem))
         sys.exit(1)
 
     now = datetime.now()

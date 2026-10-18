@@ -13,6 +13,7 @@ of error and the line number, and nothing else.
         (None, "...")   creds.py is there but could not be loaded
 
     creds_loader.setting("logs_dir", "")   one optional value, or its default
+    creds_loader.token_problem(token)       why a token cannot be sent, or None
 
 Standard library only, so it works before any third-party package loads.
 """
@@ -50,6 +51,34 @@ def setting(name, default):
 def problem():
     """The sanitized reason creds.py could not be loaded, or None."""
     return load()[1]
+
+
+def token_problem(value):
+    """Why `value` cannot go into an authentication header - "type" (not
+    text), "empty", or "characters" (anything but visible ASCII 0x21-0x7e:
+    a space, line break, tab, other control or non-ASCII character) - or
+    None. A check only: a token is used exactly as given, never trimmed or
+    repaired, and never shown - the HTTP library's own refusal of such a
+    header quotes the whole value."""
+    if not isinstance(value, str):
+        return "type"
+    if not value:
+        return "empty"
+    if any(not 0x21 <= ord(c) <= 0x7e for c in value):
+        return "characters"
+    return None
+
+
+def token_refusal(what, setting_name, variable, kind):
+    """The message refusing a token from creds.py (or its shell variable):
+    where the token comes from, never the token."""
+    where = f"{what} ({setting_name} in creds.py, or {variable})"
+    if kind == "type":
+        return f"{where} must be text - not shown. Copy the token in again (see creds_template.py)"
+    if kind == "empty":
+        return f"{where} is empty - add the token (see creds_template.py)"
+    return (f"{where} contains spaces, line breaks or other characters a token cannot "
+            f"have - not shown. Copy the token in again (see creds_template.py)")
 
 
 def _describe(error):
