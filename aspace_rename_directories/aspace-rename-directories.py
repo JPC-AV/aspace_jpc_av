@@ -1451,21 +1451,23 @@ def rename_no_overwrite(src, dst):
 def record_identity_problem(record, object_id, catalog_number, ref_id):
     """Why `record` is not the archival object the lookup verified, or None.
     Checked on the re-fetch that precedes every write: uri, resource, item
-    level, component_id and ref_id must all match what was verified."""
+    level, component_id and ref_id must all match what was verified.
+    Only the verified values are named; the server's mismatched values
+    are never echoed."""
     if not isinstance(record, dict):
         return "is not a record"
     expected_uri = f"/repositories/{aspace_client.REPO_ID}/archival_objects/{object_id}"
     if record.get("uri") != expected_uri:
-        return f"identifies as {record.get('uri')!r}, not {expected_uri}"
+        return f"identifies as a different record, not {expected_uri}"
     resource = record.get("resource")
     if not isinstance(resource, dict) or resource.get("ref") != aspace_client.RESOURCE_URI:
         return "is outside the configured resource"
     if record.get("level") != "item":
-        return f"is level {record.get('level')!r}, not item"
+        return "has a different level, not item"
     if record.get("component_id") != catalog_number:
-        return f"has component_id {record.get('component_id')!r}, not {catalog_number}"
+        return f"has a different component_id, not {catalog_number}"
     if record.get("ref_id") != ref_id:
-        return f"has ref_id {record.get('ref_id')!r}, not the verified {ref_id}"
+        return f"has a different ref_id, not the verified {ref_id}"
     return None
 
 

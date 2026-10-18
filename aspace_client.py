@@ -432,12 +432,46 @@ def _resource_ref(record: Dict) -> str:
     return ref
 
 
-def _short(text, limit: int = 300) -> str:
-    """A response body trimmed for the log - an HTML error page is thousands
-    of characters of markup nobody reads."""
-    text = text if isinstance(text, str) else ""
-    text = " ".join(text.split())
-    return text if len(text) <= limit else text[:limit] + " ..."
+# A rejection's own text is never logged: a server or proxy can echo back
+# what was sent, credentials included. These field names - and only these
+# strings - may be named from an ArchivesSpace error response.
+_ERROR_FIELDS = ("title", "component_id", "level", "dates", "extents",
+                 "instances", "notes", "parent", "resource", "ref_id",
+                 "lock_version", "indicator", "type")
+
+# Fixed explanations for a rejection that names none of those fields.
+_STATUS_GUIDANCE = {
+    400: "the server rejected the request's content",
+    401: "the server did not accept this session - try logging in again",
+    403: "the server denied access - check this account's permissions",
+    404: "the server found no such record or endpoint",
+    409: "the server reported a conflict with the record's current state",
+    412: "the session expired and could not be renewed",
+}
+
+
+def _rejection_detail(response) -> str:
+    """What an ArchivesSpace rejection can safely say: the allowlisted
+    fields its "error" object flags (keys cut at the first "/", e.g.
+    "dates/0/begin" -> dates), else a fixed explanation for the status.
+    Never raises and never returns the response's own keys or text."""
+    try:
+        error = response.json().get("error")
+        keys = error.keys() if isinstance(error, dict) else ()
+        flagged = {k.split("/", 1)[0] for k in keys if isinstance(k, str)}
+        fields = [name for name in _ERROR_FIELDS if name in flagged]
+    except Exception:
+        fields = []
+    if fields:
+        return f"fields flagged: {', '.join(fields)} (server text not shown)"
+    status = getattr(response, "status_code", None)
+    if status in _STATUS_GUIDANCE:
+        guidance = _STATUS_GUIDANCE[status]
+    elif isinstance(status, int) and status >= 500:
+        guidance = "the server reported an error of its own"
+    else:
+        guidance = "unexpected response"
+    return f"{guidance} (server text not shown)"
 
 
 def _web_page_block(response) -> Optional[str]:
@@ -585,11 +619,11 @@ class ASpaceClient:
             return self._login_failed(
                 f"the server refused the username/password for this environment "
                 f"(HTTP {response.status_code}) - check creds.py",
-                f"Login failed: {response.status_code} - {_short(response.text)}")
+                f"Login failed: HTTP {response.status_code}")
         if response.status_code != 200:
             return self._login_failed(
                 f"login failed with HTTP {response.status_code}",
-                f"Login failed: {response.status_code} - {_short(response.text)}")
+                f"Login failed: HTTP {response.status_code}")
         try:
             payload = response.json()
         except ValueError:
@@ -689,9 +723,10 @@ class ASpaceClient:
                 raise _SendFailed(type(e).__name__) from None
 
             if 300 <= response.status_code < 400:
-                location = getattr(response, "headers", {}).get("Location")
+                # Location is server-supplied and can carry anything: the
+                # status alone is logged.
                 logging.error(f"{method} {endpoint} -> unexpected redirect "
-                              f"{response.status_code} to {location!r} - refusing to follow")
+                              f"{response.status_code} - refusing to follow")
                 # The origin didn't process the request itself, but we can't
                 # prove what a redirecting proxy did - treat as ambiguous.
                 self.last_failure_definitive = False
@@ -715,7 +750,7 @@ class ASpaceClient:
                 # (/config/enumerations), so only writes are shape-checked.
                 if method != "GET" and not isinstance(body, dict):
                     logging.error(f"{method} {endpoint} -> 200 but response was "
-                                  f"not a JSON object: {str(body)[:100]}")
+                                  f"not a JSON object ({type(body).__name__})")
                     self.last_failure_definitive = False
                     return None
                 return body
@@ -731,7 +766,7 @@ class ASpaceClient:
             self.last_failure_definitive = 400 <= response.status_code < 500
             logging.error(f"API request failed: {method} {endpoint}")
             logging.error(f"Status: {response.status_code}")
-            logging.error(f"Response: {response.text[:300]}")
+            logging.error(f"Detail: {_rejection_detail(response)}")
             # Retry GETs on 5xx only: a 4xx is a definitive rejection that
             # will not change on retry - re-asking three times just makes
             # every fail-closed path slower.
@@ -825,8 +860,8 @@ class ASpaceClient:
         if result is None:
             return None
         if not self._canonical(result.get("uri"), f"{re.escape(endpoint)}/[0-9]+"):
-            logging.error(f"POST {endpoint} succeeded but response uri "
-                          f"{result.get('uri')!r} is not a canonical record uri "
+            logging.error(f"POST {endpoint} succeeded but the response uri "
+                          f"is not a canonical record uri (not shown) "
                           f"- treating as ambiguous failure")
             self.last_failure_definitive = False
             return None
@@ -934,7 +969,7 @@ class ASpaceClient:
                     # non-canonical path (../, query strings). A verified
                     # cross-scope uri would be handed back to callers that
                     # embed it in records they write.
-                    logging.error(f"Search hit uri {uri!r} is not a canonical "
+                    logging.error(f"A search hit uri (not shown) is not a canonical "
                                   f"record uri under {uri_prefix} - failing lookup")
                     return None
                 if uri in seen_uris:
@@ -1014,8 +1049,8 @@ class ASpaceClient:
             if record.get("uri") != uri:
                 # The fetched record must identify as the uri we asked
                 # for; anything else means the response can't be trusted.
-                logging.error(f"Record fetched from {uri} identifies as "
-                              f"{record.get('uri')!r} - failing lookup")
+                logging.error(f"Record fetched from {uri} identifies as a "
+                              f"different uri (not shown) - failing lookup")
                 return None
             # The matcher indexes nested fields; malformed nesting (e.g.
             # resource: []) must fail the lookup, not raise out of it.

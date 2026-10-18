@@ -500,7 +500,8 @@ def airtable_patch(table_id, records, token):
         # An exception's own text can quote the Authorization header, so
         # only its kind is shown, and none is chained ("from None").
         try:
-            resp = requests.patch(url, headers=headers, json=body, timeout=pull.TIMEOUT)
+            resp = requests.patch(url, headers=headers, json=body, timeout=pull.TIMEOUT,
+                                  allow_redirects=False)
         except requests.Timeout:
             raise UncertainWrite(f"Airtable did not answer a write within {pull.TIMEOUT}s - it "
                                  f"may or may not have been applied; rerun to re-check") from None
@@ -513,24 +514,31 @@ def airtable_patch(table_id, records, token):
         except ValueError as e:  # refused inside the HTTP library while sending
             raise UncertainWrite(f"write to Airtable failed ({type(e).__name__}) - it may or "
                                  f"may not have been applied; rerun to re-check") from None
+        # A redirect is never followed (that would re-send the write and the
+        # token elsewhere) and its Location is never shown. The write itself
+        # may or may not have been applied: uncertain, never retried.
+        if 300 <= resp.status_code < 400:
+            raise UncertainWrite(f"Airtable answered a write with a redirect (HTTP "
+                                 f"{resp.status_code}), which is not followed - it may or "
+                                 f"may not have been applied; rerun to re-check")
         if resp.status_code == 429 and attempt < pull.RATE_LIMIT_RETRIES:
             print_status("warning", f"Airtable rate limit - waiting {pull.RATE_LIMIT_WAIT}s")
             time.sleep(pull.RATE_LIMIT_WAIT)
             continue
         if resp.status_code in (401, 403, 404):
             raise PullError(f"Airtable refused the write (HTTP {resp.status_code}: "
-                            f"{pull._error_text(resp)}) - check airtable_pat_write's scopes "
+                            f"{pull._error_explanation(resp)}) - check airtable_pat_write's scopes "
                             f"(data.records:write), its access to base {BASE_ID}, and "
                             f"field permissions before changing anything")
         if resp.status_code >= 500:
             # Airtable can time out WHILE applying a write (503), so a 5xx
             # is not proof the write was refused
             raise UncertainWrite(f"Airtable had a server error during a write (HTTP "
-                                 f"{resp.status_code}: {pull._error_text(resp)}) - it may or "
+                                 f"{resp.status_code}: {pull._error_explanation(resp)}) - it may or "
                                  f"may not have been applied; rerun to re-check")
         if resp.status_code >= 400:
             raise PullError(f"Airtable refused the write (HTTP {resp.status_code}): "
-                            f"{pull._error_text(resp)}")
+                            f"{pull._error_explanation(resp)}")
         try:
             data = resp.json()
         except ValueError:

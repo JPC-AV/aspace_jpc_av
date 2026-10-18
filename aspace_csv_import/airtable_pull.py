@@ -130,7 +130,7 @@ def airtable_request(url, token):
         # An exception's own text can quote the Authorization header, so
         # only its kind is shown, and none is chained ("from None").
         try:
-            resp = requests.get(url, headers=headers, timeout=TIMEOUT)
+            resp = requests.get(url, headers=headers, timeout=TIMEOUT, allow_redirects=False)
         except requests.Timeout:
             raise PullError(f"Airtable did not respond within {TIMEOUT}s - check the network "
                             f"or VPN") from None
@@ -143,6 +143,12 @@ def airtable_request(url, token):
             raise PullError(f"request to Airtable failed ({type(e).__name__}) - check the "
                             f"read token") from None
 
+        # A redirect is never followed - it would leave api.airtable.com
+        # with the token - and its Location is never shown.
+        if 300 <= resp.status_code < 400:
+            raise PullError(f"Airtable answered with a redirect (HTTP {resp.status_code}), "
+                            f"which is not followed - nothing was read; check the network "
+                            f"or VPN")
         if resp.status_code == 429 and attempt < RATE_LIMIT_RETRIES:
             print_status("warning", f"Airtable rate limit - waiting {RATE_LIMIT_WAIT}s")
             time.sleep(RATE_LIMIT_WAIT)
@@ -154,7 +160,8 @@ def airtable_request(url, token):
                             f"the scopes data.records:read and schema.bases:read and access "
                             f"to base {BASE_ID}; also check BASE_ID/TABLE_ID in this script")
         if resp.status_code >= 400:
-            raise PullError(f"Airtable returned HTTP {resp.status_code}: {_error_text(resp)}")
+            raise PullError(f"Airtable returned HTTP {resp.status_code}: "
+                            f"{_error_explanation(resp)}")
         try:
             return resp.json()
         except ValueError:
@@ -162,15 +169,35 @@ def airtable_request(url, token):
     raise PullError(f"Airtable rate limit - still refused after {RATE_LIMIT_RETRIES} retries")
 
 
-def _error_text(resp):
-    """Airtable's own error message when it sent one, else the raw text."""
+# Airtable error types this tool explains, each with a fixed explanation.
+# Only these strings are ever shown: Airtable's own message, an unrecognized
+# type or a non-JSON body can echo back what was sent, token included.
+AIRTABLE_ERRORS = {
+    "AUTHENTICATION_REQUIRED": "the token was not accepted",
+    "INVALID_PERMISSIONS_OR_MODEL_NOT_FOUND": "the token lacks permission, or the "
+                                              "base, table or view was not found",
+    "INVALID_PERMISSIONS": "the token lacks permission for this",
+    "NOT_FOUND": "the base, table or record was not found",
+    "ROW_DOES_NOT_EXIST": "a record is no longer in the table",
+    "VIEW_NAME_NOT_FOUND": "the view was not found",
+    "UNKNOWN_FIELD_NAME": "a field name is not in the table",
+    "INVALID_VALUE_FOR_COLUMN": "a value does not fit its field",
+    "INVALID_MULTIPLE_CHOICE_OPTIONS": "a value is not one of the field's options",
+    "INVALID_REQUEST_UNKNOWN": "Airtable could not process the request",
+    "REQUEST_TOO_LARGE": "the request was too large",
+}
+
+
+def _error_explanation(resp):
+    """The fixed explanation for an Airtable error type listed above, else
+    "details not shown". Never raises."""
     try:
         err = resp.json().get("error")
-        if isinstance(err, dict):
-            return err.get("message") or err.get("type") or str(err)
-        return str(err or resp.text)[:200]
-    except (ValueError, AttributeError):
-        return str(resp.text)[:200]
+        code = err.get("type") if isinstance(err, dict) else err
+        explanation = AIRTABLE_ERRORS.get(code) if isinstance(code, str) else None
+    except Exception:
+        explanation = None
+    return explanation or "details not shown"
 
 
 def fetch_view_columns(token, view_name):

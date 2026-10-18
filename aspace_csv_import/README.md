@@ -820,6 +820,19 @@ aborts with no writes.
 
 ## Version History
 
+- **v3.6.2** (2026): server replies are no longer copied into messages
+  - ArchivesSpace and Airtable errors give the HTTP status and a fixed
+    explanation (for ArchivesSpace, the names of flagged fields such as
+    title or dates), never the server's own text, which can echo back
+    what was sent, a token included
+  - Airtable redirects are not followed and their address is not shown:
+    a redirected pull stops with nothing read; a redirected write-back is
+    reported as unknown, like a timeout - rerun to re-check
+  - The rename tool no longer quotes a mismatched record's values when
+    it refuses one; it still names what it expected
+  - After pulling: nothing to reinstall; reinstalling only refreshes the
+    version `python -m pip show jpc-av-tools` reports
+
 - **v3.6.1** (2026): authentication tokens are checked before use
   - The Airtable read and write tokens, and the session token
     ArchivesSpace returns at login, must be text of visible characters
