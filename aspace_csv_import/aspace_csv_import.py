@@ -207,23 +207,6 @@ RECORDS_REPORT = f"{OUTPUT_DIR}/import_records_{_RUN_STAMP}.json"
 # Processing Configuration
 BATCH_SIZE = 10  # Process in batches to avoid overwhelming the API
 
-# Extent Type Validation
-VALID_EXTENT_TYPES = [
-    "1 inch videotape",
-    "2 inch videotape",
-    "3/4 inch videotape",
-    "1/2 inch videotape",
-    "Betacam",
-    "Betamax", 
-    "VHS",
-    "U-matic",
-    "MiniDV",
-    "videocassettes",
-    "videoreels",
-    "videotapes",
-]
-VALIDATE_EXTENT_TYPES = True
-
 # ==============================
 # SETUP LOGGING AND DIRECTORIES
 # ==============================
@@ -469,15 +452,19 @@ class ArchivesSpaceClient(ASpaceClient):
                         enum_id = enum.get('id')
                         break
             # Guarded fallback to the conventional ID 14, but only if it really is
-            # the extent_extent_type enumeration on this instance.
+            # the extent_extent_type enumeration on this instance. The record
+            # fetched to check that is the enumeration itself: kept, and checked
+            # below like any other, rather than fetched a second time.
+            result = None
             if enum_id is None:
                 candidate = self.get("/config/enumerations/14")
                 if isinstance(candidate, dict) and candidate.get('name') == 'extent_extent_type':
-                    enum_id = 14
+                    enum_id, result = 14, candidate
             if enum_id is None:
                 logging.error("Could not locate the 'extent_extent_type' enumeration in ArchivesSpace")
                 return None
-            result = self.get(f"/config/enumerations/{enum_id}")
+            if result is None:
+                result = self.get(f"/config/enumerations/{enum_id}")
             if not isinstance(result, dict) or result.get('name') != 'extent_extent_type':
                 # The record fetched by id must identify as the enumeration
                 # we resolved - any other vocabulary is the wrong list.
