@@ -820,6 +820,19 @@ aborts with no writes.
 
 ## Version History
 
+- **v3.6.5** (2026): the write-back tries to keep its receipt after a Ctrl-C
+  - Once writing has begun, an interrupted run still tries to save this
+    run's outcomes file (an interrupted save is tried once more) and to
+    say whether it was saved; nothing more is sent to Airtable. Pressing
+    Ctrl-C again, or a disk or filesystem problem, can still prevent the
+    save or that message
+  - A Ctrl-C pressed again during the writes marks only the batch then in
+    flight unknown. The receipt never replaces an existing file; a report
+    folder that cannot publish it safely now stops the run before anything
+    is written to Airtable
+  - After pulling: nothing to reinstall; reinstalling only refreshes the
+    version `python -m pip show jpc-av-tools` reports
+
 - **v3.6.4** (2026): links in ArchivesSpace replies are checked first
   - A record's parent and container links are followed only when they
     are plain record paths in the configured repository; anything else

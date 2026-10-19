@@ -1084,8 +1084,11 @@ COMMANDS = {
         the time.
 
       A run cancelled at the yes prompt wrote nothing and saves nothing.
-      A Ctrl-C while the file is being saved can leave none, even after
-      Airtable was written - run the same command again to re-check.
+      Once writing has begun, an interrupted run still tries to save
+      this file (an interrupted save is tried once more) and to say
+      whether it was saved; it never replaces an existing file. Pressing
+      Ctrl-C again, or a disk or filesystem problem, can prevent the save
+      or that message - run the same command again to re-check.
 
 {run_stamp}
 
@@ -1154,19 +1157,21 @@ COMMANDS = {
             "exit": """    {ok}{bold}0{reset}    Done       All eligible, non-excluded rows were written or
                     already done; nothing remains unfinished or for review.
                     A preview: nothing for review.
-    {bad}{bold}1{reset}    Stopped    A report, token or Airtable setup problem, or
-                    cancelled while reading or at the prompt - nothing was
-                    written. After writing began: a refused or unknown
+    {bad}{bold}1{reset}    Stopped    A report, token or Airtable setup problem, a report
+                    folder that cannot hold the outcomes file safely, or
+                    cancelled before writing - nothing was written.
+                    After writing began: a refused or unknown
                     write, Ctrl-C during the writes, or the outcomes file
                     could not be saved - run the same command again to
                     re-check and finish.
     {warn}{bold}2{reset}    Review     Rows for review, or unfinished rows (run the same
                     command again). A preview: rows for review. Also: an
                     argument was rejected.
-    {warn}{bold}130{reset}  Stopped    Ctrl-C at another moment: while the PLAN or RESULT
-                    was shown, or while the outcomes file was being saved.
-                    After the yes, Airtable may be written and the outcomes
-                    file missing - run the same command again to re-check.""",
+    {warn}{bold}130{reset}  Stopped    Ctrl-C while the PLAN was shown, or after the writes
+                    ended. Once writing has begun, the run still tries to
+                    save and announce the outcomes file; pressing Ctrl-C
+                    again, or a filesystem problem, can prevent that. Run
+                    the same command again to re-check.""",
         },
     },
     "rename": {

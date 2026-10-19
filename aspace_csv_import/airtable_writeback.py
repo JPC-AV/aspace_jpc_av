@@ -12,10 +12,13 @@ after a stop finishes only what is left.
 
 import argparse
 import csv
+import io
 import json
 import os
 import re
+import secrets
 import shlex
+import stat
 import sys
 import time
 from datetime import datetime
@@ -562,21 +565,40 @@ def airtable_patch(table_id, records, token):
     raise PullError(f"Airtable rate limit - still refused after {pull.RATE_LIMIT_RETRIES} retries")
 
 
-def execute(plan, ids, token):
+INTERRUPTED = "interrupted (Ctrl-C) - rerun to re-check and finish"
+
+
+def initial_outcome(e):
+    """A row's outcome before anything is written for it."""
+    return "review" if e["note"] else (
+        "already done" if not (e["set_parent"] or e["set_created"]) else "not started")
+
+
+def complete_partials(plan):
+    """A row whose parent was just confirmed and whose Yes was already set
+    is complete (never a row whose outcome is unknown)."""
+    for e in plan:
+        if e["outcome"] == "partial" and not e["set_created"]:
+            e["outcome"] = "done"
+
+
+def execute(plan, ids, token, inflight=None):
     """Parents first (confirmed from the write's response), then Yes for rows
     whose parent is in place. Sets each entry's outcome; stops on the first
     refusal, lost response or Ctrl-C and returns its message (None when
     everything went through). A batch whose write may or may not have
-    landed is marked "unknown" - a rerun re-reads Airtable and settles it."""
+    landed is marked "unknown" - a rerun re-reads Airtable and settles it.
+    `inflight`, when given, is the list the batch being written is kept in,
+    so the caller still knows it if a second Ctrl-C escapes this function."""
     for e in plan:
-        e["outcome"] = "review" if e["note"] else (
-            "already done" if not (e["set_parent"] or e["set_created"]) else "not started")
+        e["outcome"] = initial_outcome(e)
         e["parent_ok"] = not e["note"] and not e["set_parent"]
-    batch = []  # the batch being written; its outcome is unknown if interrupted
+    # the batch being written; its outcome is unknown if interrupted
+    batch = inflight if inflight is not None else []
     try:
         todo = [e for e in plan if not e["note"] and e["set_parent"]]
         for i in range(0, len(todo), PATCH_BATCH):
-            batch = todo[i:i + PATCH_BATCH]
+            batch[:] = todo[i:i + PATCH_BATCH]
             back = airtable_patch(IMPORT_TABLE_ID, [
                 {"id": e["import_rec"], "fields": {ids["parent"]: e["parent"]}} for e in batch
             ], token)
@@ -584,18 +606,18 @@ def execute(plan, ids, token):
                 got = (back.get(e["import_rec"], {}).get("fields", {}).get(ids["parent"]) or "")
                 e["parent_ok"] = got == e["parent"]
                 e["outcome"] = "partial" if e["parent_ok"] else "parent not confirmed"
-            batch = []
+            batch.clear()
             time.sleep(pull.PAGE_PAUSE)
         todo = [e for e in plan if not e["note"] and e["parent_ok"] and e["set_created"]]
         for i in range(0, len(todo), PATCH_BATCH):
-            batch = todo[i:i + PATCH_BATCH]
+            batch[:] = todo[i:i + PATCH_BATCH]
             back = airtable_patch(TRACKING_TABLE_ID, [
                 {"id": e["tracking_rec"], "fields": {ids["created"]: CREATED_VALUE}} for e in batch
             ], token)
             for e in batch:
                 got = select_name(back.get(e["tracking_rec"], {}).get("fields", {}).get(ids["created"]))
                 e["outcome"] = "done" if got == CREATED_VALUE else "partial"
-            batch = []
+            batch.clear()
             time.sleep(pull.PAGE_PAUSE)
     except UncertainWrite as err:
         for e in batch:
@@ -604,30 +626,164 @@ def execute(plan, ids, token):
     except KeyboardInterrupt:
         for e in batch:
             e["outcome"] = "unknown"
-        return "interrupted (Ctrl-C) - rerun to re-check and finish"
+        return INTERRUPTED
     except PullError as err:  # a definite refusal: that batch was not applied
+        batch.clear()
         return str(err)
     finally:
-        for e in plan:  # parent just confirmed, and Yes was already set: complete
-            if e["outcome"] == "partial" and not e["set_created"]:  # never "unknown"
-                e["outcome"] = "done"
+        complete_partials(plan)
     return None
 
 
-def write_outcomes(path, plan, review, excluded, provenance):
+def settle_escaped(plan, inflight):
+    """After a Ctrl-C escaped execute (pressed again while it was stopping
+    for the first): rows it never reached keep their starting outcome,
+    confirmed rows keep theirs, and only the batch in flight is unknown."""
+    for e in plan:
+        e.setdefault("outcome", initial_outcome(e))
+    for e in inflight:
+        e["outcome"] = "unknown"
+    complete_partials(plan)
+
+
+SAVE_INTERRUPTED = "interrupted by Ctrl-C while saving"
+
+
+def receipt_path(report):
+    """This run's outcomes file, named before anything is written to Airtable:
+    airtable_writeback_<stamp>_<pid>.csv beside the report, or ..._2.csv and
+    so on when that name is taken - by anything, a dangling link included."""
+    folder = Path(report).resolve().parent
+    base = f"airtable_writeback_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{os.getpid()}"
+    path, n = folder / f"{base}.csv", 1
+    while os.path.lexists(path):
+        n += 1
+        path = folder / f"{base}_{n}.csv"
+    return path
+
+
+def outcomes_text(plan, review, excluded, provenance):
     """One row per created report row: its outcome and any note."""
-    tmp_path = path.with_name(path.name + ".tmp")
-    with open(tmp_path, "w", newline="", encoding="utf-8") as f:
-        f.write(f"# {provenance}\n")
-        w = csv.writer(f)
-        w.writerow([col.CATALOG, col.PARENT_REFID, "outcome", "note"])
-        for catalog in excluded:
-            w.writerow([catalog, "", "excluded", "--exclude-catalog"])
-        for catalog, note in review:
-            w.writerow([catalog, "", "review", note])
-        for e in plan:
-            w.writerow([e["catalog"], e["parent"], e["outcome"], e["note"]])
-    os.replace(tmp_path, path)
+    f = io.StringIO(newline="")
+    f.write(f"# {provenance}\n")
+    w = csv.writer(f)
+    w.writerow([col.CATALOG, col.PARENT_REFID, "outcome", "note"])
+    for catalog in excluded:
+        w.writerow([catalog, "", "excluded", "--exclude-catalog"])
+    for catalog, note in review:
+        w.writerow([catalog, "", "review", note])
+    for e in plan:
+        w.writerow([e["catalog"], e["parent"], e["outcome"], e["note"]])
+    return f.getvalue()
+
+
+def write_outcomes(path, plan, review, excluded, provenance, owned=None):
+    """Publish the receipt as `path` without replacing anything. The content
+    goes to a new temporary file created exclusively (O_EXCL: never through
+    an existing name or link), which is then hard-linked as `path` - the
+    link fails if anything, even a dangling link, is already there. A
+    filesystem without hard links fails the save rather than risk an
+    overwrite. `owned` maps each temporary file this run created to its
+    (device, inode), so only those are removed and only this run's own
+    publication counts; the temporary name is removed here once published."""
+    owned = {} if owned is None else owned
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                 0o666)
+    try:
+        st = os.fstat(fd)
+        owned[tmp] = (st.st_dev, st.st_ino)
+        with os.fdopen(fd, "w", newline="", encoding="utf-8") as f:
+            fd = None
+            f.write(outcomes_text(plan, review, excluded, provenance))
+        try:
+            os.link(tmp, path)
+        except FileExistsError:
+            raise FileExistsError(f"{path.name} already exists - not replaced") from None
+        except OSError as e:
+            raise OSError(f"cannot publish {path.name} here without risking an overwrite "
+                          f"({e.strerror or type(e).__name__})") from None
+    finally:
+        if fd is not None:
+            os.close(fd)
+        if tmp in owned:
+            remove_owned(tmp, owned[tmp])
+
+
+def remove_owned(tmp, ident):
+    """Remove `tmp` only while it is still the file this run created there."""
+    try:
+        st = os.lstat(tmp)
+        if (st.st_dev, st.st_ino) == ident and not stat.S_ISLNK(st.st_mode):
+            os.unlink(tmp)
+    except OSError:
+        pass
+
+
+def publication_problem(folder):
+    """Why this run's receipt could not be published in `folder`, or None -
+    checked before any write with the save's own steps (an exclusive new
+    temporary file, then a no-clobber hard link) on two uniquely named probe
+    files that only this check creates and removes. Nothing existing is
+    touched. Passing does not guarantee the later save: the folder can still
+    change or fill up."""
+    base = f".airtable_writeback_probe.{os.getpid()}.{secrets.token_hex(4)}"
+    src, dst = folder / f"{base}.tmp", folder / f"{base}.lnk"
+    owned = {}
+    try:
+        fd = os.open(src, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                     0o666)
+        try:
+            st = os.fstat(fd)
+            owned[src] = owned[dst] = (st.st_dev, st.st_ino)   # dst only if it is ours
+        finally:
+            os.close(fd)
+        os.link(src, dst)
+        return None
+    except OSError as e:
+        return e.strerror or type(e).__name__
+    finally:
+        for path, ident in owned.items():
+            remove_owned(path, ident)
+
+
+def published(path, owned):
+    """True when `path` is the file this run created and linked there - by
+    identity (device and inode), never by content: another file that happens
+    to match is not this run's receipt."""
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return False
+    return not stat.S_ISLNK(st.st_mode) and (st.st_dev, st.st_ino) in set(owned.values())
+
+
+def save_receipt(path, plan, review, excluded, provenance, tries, owned):
+    """Save this run's receipt: -> (saved, problem, interrupted). At most two
+    attempts in all (`tries` counts them across calls): one Ctrl-C while
+    saving is retried, a second is not. Nothing is sent to Airtable. Saved
+    means this run's own file was published at `path` (see published), not
+    that a file is there; temporary files this run created are removed."""
+    problem, interrupted = None, False
+    try:
+        while len(tries) < 2:
+            tries.append(len(tries) + 1)
+            try:
+                write_outcomes(path, plan, review, excluded, provenance, owned)
+                return True, None, interrupted
+            except OSError as e:
+                problem = str(e)
+                break
+            except KeyboardInterrupt:
+                interrupted = True
+                if published(path, owned):
+                    return True, None, True      # published just before the Ctrl-C
+        if published(path, owned):
+            return True, None, interrupted
+        return False, problem or SAVE_INTERRUPTED, interrupted
+    finally:
+        for tmp, ident in owned.items():
+            remove_owned(tmp, ident)
 
 # ==============================
 # MAIN EXECUTION
@@ -785,22 +941,90 @@ def main():
     if pending and not confirm(args.report, plan, excluded, len(to_review)):
         print_status("warning", "Cancelled - nothing written")
         sys.exit(1)
-    error = execute(plan, ids, AIRTABLE_PAT_WRITE) if pending else None
-    if not pending:
-        for e in plan:
-            e["outcome"] = "review" if e["note"] else "already done"
-    stamp = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{os.getpid()}"
-    out_path = Path(args.report).resolve().parent / f"airtable_writeback_{stamp}.csv"
-    provenance = f"{command} | {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+    if pending:
+        # Before any write: can the report's folder hold the receipt the way
+        # the save publishes it? A pass does not guarantee the later save.
+        try:
+            problem = publication_problem(Path(args.report).resolve().parent)
+        except KeyboardInterrupt:
+            print()
+            print_status("warning", "Cancelled before writing - nothing written to Airtable")
+            sys.exit(1)
+        if problem:
+            print_status("error", f"Stopped before writing: the report's folder cannot hold the "
+                                  f"outcomes file safely ({problem}) - nothing was written to "
+                                  f"Airtable")
+            sys.exit(1)
+    # After the yes: one boundary to the end of the run. The receipt is named
+    # before anything is written; a Ctrl-C anywhere below still settles the
+    # outcomes, saves this run's receipt (at most two attempts) and says
+    # whether it was saved. Nothing is sent to Airtable to recover it.
+    out_path = receipt_path(args.report)
+    inflight, tries, owned, stage = [], [], {}, "writing"
+    error = provenance = saved = save_problem = None
+    after_writes, unfinished = False, 0   # after_writes: a Ctrl-C after the writes
     try:
-        write_outcomes(out_path, plan, review, excluded, provenance)
-        saved = True
-    except OSError as e:
-        # Airtable is already written: still show what happened, and how
-        # to settle it (a rerun re-reads Airtable).
-        saved = False
-        save_problem = str(e)
+        try:
+            error = execute(plan, ids, AIRTABLE_PAT_WRITE, inflight) if pending else None
+        except KeyboardInterrupt:  # pressed again while the writes were stopping
+            settle_escaped(plan, inflight)
+            error = INTERRUPTED
+        if not pending:
+            for e in plan:
+                e["outcome"] = "review" if e["note"] else "already done"
+        stage = "saving"
+        provenance = f"{command} | {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+        saved, save_problem, after_writes = save_receipt(out_path, plan, review, excluded,
+                                                         provenance, tries, owned)
+        stage = "showing"
+        unfinished = show_result(plan, to_review, error, out_path, saved, save_problem,
+                                 after_writes)
+    except KeyboardInterrupt:
+        print()
+        if stage == "writing":  # as the writes ended: nothing saved or shown yet
+            settle_escaped(plan, inflight)
+            error = error or INTERRUPTED
+        else:
+            after_writes = True
+        if saved is None:  # finish this run's save, within its two attempts
+            if provenance is None:
+                provenance = f"{command} | {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+            saved, save_problem, _ = save_receipt(out_path, plan, review, excluded,
+                                                  provenance, tries, owned)
+        if stage == "showing":  # RESULT was already on its way: the receipt, at least
+            print_status("warning", "Interrupted (Ctrl-C) while showing the result - "
+                                    "nothing more was sent to Airtable")
+            announce_receipt(out_path, saved, save_problem)
+            unfinished = count_unfinished(plan)
+        else:
+            unfinished = show_result(plan, to_review, error, out_path, saved, save_problem,
+                                     after_writes)
+    print()
+    if saved is False and save_problem != SAVE_INTERRUPTED:
+        sys.exit(1)  # the outcomes file could not be saved
+    sys.exit(130 if after_writes else
+             1 if error or not saved else (2 if unfinished or to_review else 0))
 
+
+def count_unfinished(plan):
+    return sum(1 for e in plan if e["outcome"] in ("partial", "parent not confirmed",
+                                                   "unknown", "not started"))
+
+
+def announce_receipt(out_path, saved, save_problem):
+    """Whether this run's outcomes file was saved, and where."""
+    if saved:
+        print_saved([("write-back outcomes", out_path)])
+    else:
+        print_saved([], failed=[("write-back outcomes", out_path)])
+        print()
+        print_status("error", f"Could not save the outcomes file ({save_problem}) - Airtable "
+                              f"was written as shown above; rerun the same command to re-check it")
+
+
+def show_result(plan, to_review, error, out_path, saved, save_problem, after_writes):
+    """RESULT, any stop, unfinished rows and the receipt. Returns the number
+    of unfinished rows."""
     tally = {}
     for e in plan:
         tally[e["outcome"]] = tally.get(e["outcome"], 0) + 1
@@ -814,21 +1038,15 @@ def main():
     if error:
         print()
         print_status("error", f"Stopped: {error}")
-    unfinished = sum(tally.get(o, 0) for o in ("partial", "parent not confirmed", "unknown",
-                                               "not started"))
+    if after_writes:
+        print_status("warning", "Interrupted (Ctrl-C) after the writes - nothing more was "
+                                "sent to Airtable")
+    unfinished = count_unfinished(plan)
     if unfinished:
         print_status("warning", f"{unfinished} row(s) unfinished - rerun the same command to "
                                 f"re-check Airtable and finish them")
-    if saved:
-        print_saved([("write-back outcomes", out_path)])
-    else:
-        print_saved([], failed=[("write-back outcomes", out_path)])
-        print()
-        print_status("error", f"Could not save the outcomes file ({save_problem}) - Airtable "
-                              f"was written as shown above; rerun the same command to re-check it")
-    print()
-    sys.exit(1 if error or not saved else (2 if unfinished or to_review else 0))
-
+    announce_receipt(out_path, saved, save_problem)
+    return unfinished
 
 if __name__ == "__main__":
     main()
