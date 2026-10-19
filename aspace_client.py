@@ -484,8 +484,15 @@ def _web_page_block(response) -> Optional[str]:
     if not (head.startswith("<!doctype html") or head.startswith("<html")):
         return None
     if "cloudflare" in text.lower():
-        ray = re.search(r"Ray ID:\s*(?:<[^>]*>\s*)*([0-9a-f]{8,})", text, re.IGNORECASE)
-        return "a Cloudflare block page" + (f", Ray ID {ray.group(1)}" if ray else "")
+        # A local display bound, not a rule about every Cloudflare format:
+        # the whole token after "Ray ID:" (letters, digits, underscores)
+        # must be 8-32 hex characters, or no ID is shown - an odd or
+        # oversized token is left out, never cut to a prefix. A hyphen
+        # (a "-IAD" style suffix) still ends the token.
+        ray = re.search(r"Ray ID:\s*(?:<[^>]*>\s*)*(\w+)", text, re.IGNORECASE | re.ASCII)
+        ray_id = ray.group(1) if ray else ""
+        shown = re.fullmatch(r"[0-9a-f]{8,32}", ray_id, re.IGNORECASE)
+        return "a Cloudflare block page" + (f", Ray ID {ray_id}" if shown else "")
     return "a web page instead of the API"
 
 

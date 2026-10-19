@@ -352,7 +352,18 @@ def _fetch_batches(client, ids):
         if (not all(isinstance(u, str) for u in got)
                 or len(got) != len(wanted) or set(got) != wanted
                 or len(set(got)) != len(got)):
-            logging.error(f"id_set batch mismatch: asked for {sorted(wanted)}, got {got}")
+            # Name the failed check, never the returned uris: a reply can
+            # carry anything in them. The requested uris are our own.
+            if not all(isinstance(u, str) for u in got):
+                reason = "a returned record has no usable uri"
+            elif len(got) != len(wanted):
+                reason = f"{len(got)} records returned for {len(wanted)} requested"
+            elif len(set(got)) != len(got):
+                reason = "a record was returned more than once"
+            else:
+                reason = "a returned record was not one of those requested"
+            logging.error(f"id_set batch mismatch: asked for {sorted(wanted)}; {reason} "
+                          f"(returned uris not shown)")
             return None
         records.extend(result)
         progress("Fetched records", min(start + BATCH, len(ids)), len(ids))

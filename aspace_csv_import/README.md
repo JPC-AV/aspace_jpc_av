@@ -820,7 +820,17 @@ aborts with no writes.
 
 ## Version History
 
-- **v3.6.2** (2026): server replies are no longer copied into messages
+- **v3.6.3** (2026): two more refusals no longer quote server values
+  - An update refused because the record no longer matches or is not an
+    item, and an export stopped by a mismatched batch, name the check and
+    the record expected - not the values the server returned. Titles,
+    notes and other record details are shown as before
+  - A Cloudflare block page's Ray ID is shown only when it is 8-32 hex
+    characters; anything else is left out
+  - After pulling: nothing to reinstall; reinstalling only refreshes the
+    version `python -m pip show jpc-av-tools` reports
+
+- **v3.6.2** (2026): server error replies are no longer copied into messages
   - ArchivesSpace and Airtable errors give the HTTP status and a fixed
     explanation (for ArchivesSpace, the names of flagged fields such as
     title or dates), never the server's own text, which can echo back

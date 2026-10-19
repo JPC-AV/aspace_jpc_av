@@ -16,7 +16,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jpc-av-tools"
-version = "3.6.2"
+version = "3.6.3"
 description = "jpc- commands for the JPC AV ArchivesSpace workflow"
 authors = [{ name = "Bleakley McDowell" }, { email = "bleakleym@gmail.com" }]
 requires-python = ">=3.9"

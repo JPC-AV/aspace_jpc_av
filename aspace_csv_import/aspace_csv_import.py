@@ -1162,13 +1162,15 @@ def update_archival_object(row: Dict, client: ArchivesSpaceClient,
         return None, {}, ["Failed to retrieve existing object"]
     # The record was resolved during preflight; re-verify it is still the
     # same logical record right before writing (uri, resource, component_id).
+    # The refusal names what was expected, never what the reply holds: a
+    # server or proxy reply can carry anything in those fields.
     if not record_identity_ok(existing_obj, existing_uri, catalog_number):
-        seen = existing_obj if isinstance(existing_obj, dict) else {}
+        mismatch = ("the response was not a record" if not isinstance(existing_obj, dict)
+                    else "its uri, resource, component_id or level differs; "
+                         "server values not shown")
         return None, {}, [
             f"Record at {existing_uri} no longer matches item {catalog_number} "
-            f"(now uri={seen.get('uri')!r}, component_id="
-            f"{seen.get('component_id')!r}, level={seen.get('level')!r}"
-            f"{'' if seen else ', response was not a record'}) - refusing to update"]
+            f"({mismatch}) - refusing to update"]
     
     # Check for date errors before proceeding (non-strict: an unchanged
     # legacy date outside the range must not block an unrelated edit)
@@ -1619,9 +1621,10 @@ def _preflight_update_only_row(row_num: int, row: Dict, client: ArchivesSpaceCli
         # Matching searches every level (a same-id record at ANY level is a
         # conflict for creates), but update-only edits ITEMS only.
         if record.get('level') != 'item':
+            # fixed wording: the record's own level is not quoted
             problems.append((row_num, row,
-                             f"{catalog_number} is a {record.get('level') or 'non-item'}-level "
-                             f"record, not an item - update-only only edits items"))
+                             f"{catalog_number} is not an item-level record "
+                             f"- update-only only edits items"))
             return
         if not record_identity_ok(record, uri, catalog_number):
             problems.append((row_num, row,
