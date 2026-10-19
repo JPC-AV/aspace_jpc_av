@@ -695,6 +695,18 @@ class ASpaceClient:
         Writes fail fast."""
         import time as _time
         self.last_failure_definitive = True
+        if not (isinstance(endpoint, str) and endpoint.startswith("/")):
+            # The URL is the validated base followed by the endpoint, so an
+            # endpoint not starting with "/" could change the server it goes
+            # to (e.g. "@other.host/..." makes the base its user name) - with
+            # the session header. This keeps the configured server; it is not
+            # a check that the path stays inside the base path. Nothing was
+            # sent: a definite local failure (for a GET, _request restores
+            # the earlier write's status). The endpoint can come from a reply,
+            # so it is not shown.
+            logging.error(f"{method} refused: the endpoint is not a path on the "
+                          f"configured server (not shown)")
+            return None
         if self._url_unusable():
             # nothing was sent: a definite local failure (for a GET,
             # _request restores the earlier write's status)

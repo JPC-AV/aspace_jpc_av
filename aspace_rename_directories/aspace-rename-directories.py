@@ -278,7 +278,8 @@ def get_refid(client, query):
         # The ref_id becomes part of a directory (and media) name: it must be
         # a single safe filename component - ArchivesSpace generates 32 hex
         # characters, and anything else is a malformed record, not a name.
-        return None, None, f"matched record's ref_id {ref_id!r} is not a valid ArchivesSpace ref_id"
+        # The value itself is not shown: it came from a reply.
+        return None, None, "matched record has an invalid ArchivesSpace ref_id (not shown)"
     archival_object_id = lookup.uri.rstrip("/").rsplit("/", 1)[-1]
     logging.info(f"Verified archival object with Component Unique Identifier '{query}'")
     logging.info(f"Title: {lookup.record.get('title', 'N/A')}")

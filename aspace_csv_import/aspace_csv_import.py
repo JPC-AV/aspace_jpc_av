@@ -964,6 +964,16 @@ def record_identity_ok(record: Dict, uri: str, catalog_number: str) -> bool:
             and record.get('level') == 'item')
 
 
+def in_repository(value, collection: str) -> bool:
+    """True only for exactly /repositories/<configured repo>/<collection>/<n>.
+    A link taken from a reply (a parent, a container) is followed only then:
+    another repository, a query, a fragment, ".." or text that would change
+    the server is never requested."""
+    return isinstance(value, str) and re.fullmatch(
+        rf"/repositories/{re.escape(str(aspace_client.REPO_ID))}/{collection}/[0-9]+",
+        value) is not None
+
+
 def linked_container_ref(record: Dict) -> Optional[str]:
     """The top-container uri an archival object's instances link to (first
     instance carrying one), or None when there is no such instance."""
@@ -985,6 +995,11 @@ def fetch_linked_container(client: ArchivesSpaceClient, record: Dict,
     read fails (logged; the record itself is unaffected)."""
     ref = linked_container_ref(record)
     if ref is None:
+        return None
+    if not in_repository(ref, "top_containers"):
+        # never requested, and the link itself is not shown
+        logging.warning("A linked top container is not a top-container path in this "
+                        "repository - not read; the records file will omit it")
         return None
     container = client.get(ref)
     if (not isinstance(container, dict) or container.get('uri') != ref
@@ -1866,7 +1881,14 @@ def record_path(client: ArchivesSpaceClient, uri: str, record: Optional[Dict],
     ancestors are cached across rows. Display only: a failed fetch gives
     "(path unavailable)", never an error."""
     names, seen = [], set()
-    while uri and uri not in seen and len(names) < 12:
+    while uri and len(names) < 12:
+        # Checked before it is used at all - in seen, the cache or a request:
+        # a parent link from a reply must be an archival object in this
+        # repository (a list, another repository or another server is not).
+        if not in_repository(uri, "archival_objects"):
+            return "(path unavailable)"
+        if uri in seen:
+            break
         seen.add(uri)
         if uri not in cache:
             rec = record if (record is not None and not names) else client.get(uri)

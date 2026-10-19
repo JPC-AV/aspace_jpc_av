@@ -820,6 +820,18 @@ aborts with no writes.
 
 ## Version History
 
+- **v3.6.4** (2026): links in ArchivesSpace replies are checked first
+  - A record's parent and container links are followed only when they
+    are plain record paths in the configured repository; anything else
+    shows "(path unavailable)" or leaves that container out of the
+    records file
+  - Every ArchivesSpace request must be a path on the configured server,
+    so the session is never sent to another host; it is not a check
+    that the path stays under the server's base path
+  - The rename tool no longer quotes a ref_id it refuses as invalid
+  - After pulling: nothing to reinstall; reinstalling only refreshes the
+    version `python -m pip show jpc-av-tools` reports
+
 - **v3.6.3** (2026): two more refusals no longer quote server values
   - An update refused because the record no longer matches or is not an
     item, and an export stopped by a mismatched batch, name the check and
