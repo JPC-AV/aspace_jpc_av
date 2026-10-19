@@ -334,7 +334,9 @@ def select_environment(name: str) -> None:
                          f"(got {name!r}) - see creds_template.py")
     if name not in ENVIRONMENTS:
         known = ", ".join(sorted(ENVIRONMENTS)) or "none configured"
-        raise ValueError(f"Unknown environment {name!r} (configured: {known})")
+        # the name given is never repeated (it was typed: it could be a password)
+        raise ValueError(f"Unknown environment - the name given is not shown, in case it "
+                         f"is a password (configured: {known})")
     if _CLIENTS_CREATED and name != ACTIVE_ENV:
         raise RuntimeError(f"Cannot switch environment to {name!r}: a client for "
                            f"{ACTIVE_ENV!r} already exists in this process - select "

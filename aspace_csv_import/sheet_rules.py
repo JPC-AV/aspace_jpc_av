@@ -218,14 +218,23 @@ def duplicate_headers(headers):
                   for names in groups.values() if len(names) > 1)
 
 
-def resolve_output_path(custom, default_dir, default_name):
+def resolve_output_path(custom, default_dir, default_name, create=True):
     """The path a report will be written to, with its parent directory
     created. A custom -o path stands on its own: its parent is created and
-    the tool's default reports directory is never touched or required."""
+    the tool's default reports directory is never touched or required.
+    create=False only names the path; ensure_parent creates its folder
+    later (once the input has been read and found usable)."""
     import os
     path = custom or os.path.join(default_dir, default_name)
-    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    if create:
+        ensure_parent(path)
     return path
+
+
+def ensure_parent(path):
+    """Create the folder `path` will be written into, if it is missing."""
+    import os
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
 
 
 def same_file(a, b):

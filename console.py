@@ -281,11 +281,12 @@ def styled_parser(usage_lines, help_text, option_groups, hide_values=False):
     the same way in every tool. option_groups: the lists render_options
     draws, which the -h screen shows too (one list per tool).
 
-    hide_values: for a tool that takes a password on its command line. An
-    error argparse raises while parsing then never repeats what was typed
-    (see _without_typed_values); errors the tool raises after parsing are
-    shown as written. parser.error_hint, when set, returns text to add to
-    an error - it is given the message as it will be shown."""
+    hide_values: an error argparse raises while parsing then never repeats
+    what was typed - it could be a password, typed there by mistake if not
+    on purpose (see _without_typed_values); every tool sets it. Errors the
+    tool raises after parsing are shown as written. parser.error_hint, when
+    set, returns text to add to an error - it is given the message as it
+    will be shown."""
     import argparse
 
     class StyledParser(argparse.ArgumentParser):
@@ -366,6 +367,15 @@ def _without_typed_values(parser, message):
         if set(matches) <= known:
             return (f"an abbreviation matches several options ({', '.join(matches)}) - "
                     f"type the option in full; what was typed is not shown")
+    # invalid choice: the option and its choices come from the registered
+    # action itself - never from the message, which holds what was typed
+    flag = re.match(r"argument ([\w/-]+): invalid choice: ", message)
+    action = flag and next((a for a in parser._actions if a.option_strings and a.choices
+                            and "/".join(a.option_strings) == flag.group(1)), None)
+    if action:
+        return (f"argument {'/'.join(action.option_strings)}: not one of its choices - "
+                f"what was typed is not shown, in case it is a password; choose from "
+                f"{', '.join(str(c) for c in action.choices)}")
     return ("invalid arguments - not shown, in case they include a password; "
             "check them against the options above")
 

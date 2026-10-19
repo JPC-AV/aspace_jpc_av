@@ -2443,7 +2443,8 @@ def print_summary(summary: Dict, elapsed_time: str = None,
     ], title="RESULT - dry run" if dry else "RESULT")
     if aborted:
         print(f"\n  {Colors.DIM}Not written: these rows may be fine - the failed rows "
-              f"stopped the run before they were written{Colors.RESET}")
+              f"stopped the run{Colors.RESET}")
+        print(f"  {Colors.DIM}before they were written{Colors.RESET}")
     if dry:
         print(f"\n  {Colors.YELLOW}{Colors.BOLD}DRY RUN - nothing written to ArchivesSpace, "
               f"no files saved{Colors.RESET}")
@@ -2864,9 +2865,11 @@ def main():
             print_status("warning", warning)
         if len(val_warnings) > 5:
             print(f"         {Colors.DIM}... and {len(val_warnings) - 5} more warnings{Colors.RESET}")
-        print(f"\n  {Colors.DIM}Warnings are not errors - the run continues to the ArchivesSpace "
-              f"checks, which can still refuse a row (e.g. a date outside the range that "
-              f"differs from the stored one){Colors.RESET}")
+        print(f"\n  {Colors.DIM}Warnings are not errors - the run continues to the "
+              f"ArchivesSpace checks,{Colors.RESET}")
+        print(f"  {Colors.DIM}which can still refuse a row (e.g. a date outside the range "
+              f"that differs{Colors.RESET}")
+        print(f"  {Colors.DIM}from the stored one){Colors.RESET}")
     
     if not is_valid:
         print_status("error", f"CSV validation failed with {len(val_errors)} error(s)")

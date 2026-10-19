@@ -268,7 +268,8 @@ def build_parser():
     """The command-line parser (module-level so tests can check it against -h)."""
     parser = styled_parser(["FILE [-o PATH] [--no-color]",
                             "--directory BATCH [-o PATH] [--no-color]"], get_colored_help,
-                           [ARGUMENTS, OPTIONS])
+                           [ARGUMENTS, OPTIONS],
+                           hide_values=True)   # an argument error never repeats what was typed
     parser.add_argument("file", metavar="FILE", nargs="?")
     parser.add_argument("--directory", metavar="BATCH")
     parser.add_argument("-o", "--output", metavar="PATH")

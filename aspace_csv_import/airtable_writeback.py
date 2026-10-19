@@ -279,8 +279,11 @@ def load_report(path, exclude=()):
     excluded = sorted(set(exclude))
     unknown = [c for c in excluded if c not in created_numbers]
     if unknown:
-        raise PullError(f"--exclude-catalog {', '.join(unknown)}: not a created row in this "
-                        f"report - check the number (nothing written)")
+        # counted, never repeated: what was typed could be a password
+        raise PullError(f"--exclude-catalog: {len(unknown)} of the values given "
+                        f"{'is not a created row' if len(unknown) == 1 else 'are not created rows'} "
+                        f"in this report - not shown, in case one is a password; check them "
+                        f"(nothing written)")
     created = [r for r in created if (r.get(col.CATALOG) or "").strip() not in excluded]
 
     seen = {}
@@ -843,7 +846,8 @@ def confirm(report, plan, excluded, review_count):
 def build_parser():
     """The command-line parser (module-level so tests can check it against -h)."""
     parser = styled_parser(["REPORT.json [--run] [--exclude-catalog JPC_AV_xxxxx ...] [--no-color]"],
-                           get_colored_help, [ARGUMENTS, OPTIONS])
+                           get_colored_help, [ARGUMENTS, OPTIONS],
+                           hide_values=True)   # an argument error never repeats what was typed
     parser.add_argument('report')
     parser.add_argument('--run', action='store_true')
     parser.add_argument('--exclude-catalog', action='append', default=[], metavar='JPC_AV_xxxxx')

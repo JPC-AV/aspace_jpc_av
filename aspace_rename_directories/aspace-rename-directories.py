@@ -1505,7 +1505,8 @@ def update_archival_object(client, object_id, updated_data):
 def build_parser():
     """The command-line parser (module-level so tests can check it against -h)."""
     parser = styled_parser(["-d PATH [options]", "--single PATH [PATH ...] [options]"],
-                           get_colored_help, [TARGET_OPTIONS, OPTIONS])
+                           get_colored_help, [TARGET_OPTIONS, OPTIONS],
+                           hide_values=True)   # an argument error never repeats what was typed
     # -d and --single are genuinely mutually exclusive targets - allowing both
     # used to silently ignore the -d directory in favor of --single.
     target_group = parser.add_mutually_exclusive_group()
@@ -1526,30 +1527,29 @@ def build_parser():
     parser.add_argument('--no-color', action='store_true', help=argparse.SUPPRESS)
 
     # The easy mistake: a folder path typed without -d. argparse only says
-    # "unrecognized arguments"; say what to type instead. The leftovers are
-    # kept as a list (argparse's message joins them with spaces, which
-    # would make two paths look like one path with a space in it).
-    plain_parse, plain_error = parser.parse_known_args, parser.error
+    # "unrecognized arguments"; say what to type instead - without the
+    # path itself (hide_values: what was typed is never repeated). The
+    # leftovers are kept as a list, so one path with a space in it and two
+    # paths stay apart.
+    plain_parse = parser.parse_known_args
     leftovers = []
 
     def parse_known_args(args=None, namespace=None):
+        leftovers[:] = []
         namespace, extras = plain_parse(args, namespace)
         leftovers[:] = extras
         return namespace, extras
 
-    def error(message):
+    def folder_hint(message):
         paths = [a for a in leftovers if not a.startswith("-")]
-        if message.startswith("unrecognized arguments: ") and paths:
-            import shlex as _shlex
-            if len(paths) == 1:
-                message += (f"\n       a folder path needs -d in front of it: "
-                            f"-d {_shlex.quote(paths[0])}  (or --single for JPC_AV_ folders "
-                            f"named one by one)")
-            else:
-                message += ("\n       folder paths need -d in front (one folder holding JPC_AV_ "
-                            "subfolders) or --single (the JPC_AV_ folders themselves)")
-        plain_error(message)
-    parser.parse_known_args, parser.error = parse_known_args, error
+        if not message.startswith("unrecognized arguments") or not paths:
+            return ""
+        if len(paths) == 1:
+            return ("\n       a folder path needs -d in front of it: -d PATH"
+                    "\n       (or --single PATH ... for JPC_AV_ folders named one by one)")
+        return ("\n       folder paths need -d in front (one folder holding JPC_AV_ "
+                "subfolders) or --single (the JPC_AV_ folders themselves)")
+    parser.parse_known_args, parser.error_hint = parse_known_args, folder_hint
     return parser
 
 

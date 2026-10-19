@@ -358,7 +358,7 @@ The log holds everything up to the interruption.
 | Error | Solution |
 |-------|----------|
 | `mediainfo` not found | Install `mediainfo` and ensure it is on your system PATH |
-| `unrecognized arguments: /path/...` | The folder path needs `-d` in front of it (or `--single` for folders named one by one) - the error line below it shows the corrected form |
+| `unrecognized arguments - not shown, ...` | A folder path typed without `-d`: put `-d` in front of it (or use `--single` for folders named one by one), as the lines below the error say. What was typed is not repeated, in case it was a password |
 | Authentication failed | Check `creds.py` credentials and ArchivesSpace URL |
 | No record with this Component Unique Identifier | Verify the identifier exists in ArchivesSpace (AV resource) |
 | N records share this Component Unique Identifier | Clean up the duplicate records in ArchivesSpace first |

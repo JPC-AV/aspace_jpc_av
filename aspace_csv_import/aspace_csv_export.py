@@ -1506,6 +1506,8 @@ def run_check(list_path, csv_path=None, source=None):
         return 1
     for warning in sheet["warnings"]:
         print_status("warning", warning)
+    if csv_path:
+        col.ensure_parent(csv_path)  # the input is usable: the -o folder, before login
     client = ASpaceClient()
     print_status("info", f"Connecting to {aspace_client.ASPACE_URL}...")
     if not client.login():
@@ -1616,7 +1618,8 @@ def build_parser():
                             "--check FILE [-o PATH] [--env NAME]",
                             "--fill-parents FILE [--env NAME]"],
                            get_colored_help,
-                           [CHECK_OPTIONS, SELECT_OPTIONS, FILL_OPTIONS, EXPORT_CLI_OPTIONS])
+                           [CHECK_OPTIONS, SELECT_OPTIONS, FILL_OPTIONS, EXPORT_CLI_OPTIONS],
+                           hide_values=True)   # an argument error never repeats what was typed
     parser.add_argument("--level", default="item", choices=LEVELS, metavar="LEVEL",
                         help=argparse.SUPPRESS)
     parser.add_argument("--parent", metavar="REFID", help=argparse.SUPPRESS)
@@ -1685,7 +1688,10 @@ def main():
         out_path = None  # screen only: no path, no reports folder touched
     else:
         default_name = f"aspace_export_{aspace_client.ACTIVE_ENV}_{stamp}.csv"
-        out_path = col.resolve_output_path(args.output, OUTPUT_DIR, default_name)
+        # A --list or --check input is read first: its folder is created
+        # only once that input is usable, so a refused one leaves none behind.
+        out_path = col.resolve_output_path(args.output, OUTPUT_DIR, default_name,
+                                           create=not (args.list_file or args.check_file))
 
     for input_file in (args.list_file, args.check_file):
         if input_file and (args.output or not args.check_file):
@@ -1711,6 +1717,7 @@ def main():
         if numbers is None:
             print_status("error", problem)
             sys.exit(1)
+        col.ensure_parent(out_path)  # the list is usable: its output folder, before login
 
     client = ASpaceClient()
     print_status("info", f"Connecting to {aspace_client.ASPACE_URL}...")

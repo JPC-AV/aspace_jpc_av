@@ -820,6 +820,20 @@ aborts with no writes.
 
 ## Version History
 
+- **v3.6.8** (2026): no argument error repeats what was typed
+  - Every tool now refuses a mistyped or stray argument without repeating
+    it, as the importer and extent checker already did; a wrong `--level`
+    lists the levels to choose from, and a folder path typed without `-d`
+    gets the `-d PATH` hint
+  - An unknown `--env` name, and `--exclude-catalog` values that are not
+    created rows in the report, are refused without showing them
+  - The export creates its output folder only after the `--list` or
+    `--check` input has been read, so a refused input leaves none behind
+  - The importer's "Not written" and "Warnings are not errors" notes are
+    wrapped to fit the screen
+  - After pulling: nothing to reinstall; reinstalling only refreshes the
+    version `python -m pip show jpc-av-tools` reports
+
 - **v3.6.7** (2026): two clearer messages
   - The rename tool, run directly with one environment configured, now
     says why that environment cannot be used - the same explanation the

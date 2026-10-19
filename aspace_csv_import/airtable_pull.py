@@ -336,7 +336,8 @@ def _script(name):
 
 def build_parser():
     """The command-line parser (module-level so tests can check it against -h)."""
-    parser = styled_parser(["VIEW [--no-color]"], get_colored_help, [ARGUMENTS, OPTIONS])
+    parser = styled_parser(["VIEW [--no-color]"], get_colored_help, [ARGUMENTS, OPTIONS],
+                           hide_values=True)   # an argument error never repeats what was typed
     parser.add_argument('view')
     parser.add_argument('--no-color', action='store_true')
     return parser
