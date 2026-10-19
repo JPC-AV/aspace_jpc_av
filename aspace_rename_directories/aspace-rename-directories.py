@@ -1643,7 +1643,8 @@ def main():
             parser.error(f"multiple environments configured "
                          f"({', '.join(sorted(aspace_client.ENVIRONMENTS))}) - "
                          f"pass --env NAME to choose the target")
-        parser.error("no environments configured in creds.py (see creds_template.py)")
+        parser.error(aspace_client.CONFIG_ERROR
+                     or "no environments configured in creds.py (see creds_template.py)")
 
     # Validate: require either -d or --single (argparse enforces not-both)
     if not args.directory and not args.single:

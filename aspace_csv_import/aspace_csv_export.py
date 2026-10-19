@@ -1442,8 +1442,9 @@ def print_check_result(outcomes, columns=None):
         if unlisted:
             print(f"      {'and ' if listed else ''}{unlisted}{' more' if listed else ''} "
                   f"with no hold or issue (not listed; --output lists all)")
-    print(f"\n  {Colors.DIM}\"In ArchivesSpace\" means a record with that catalog number exists; "
-          f"only the listed Airtable columns were compared, no other metadata.{Colors.RESET}")
+    print(f"\n  {Colors.DIM}\"In ArchivesSpace\" means a record with that JPC_AV_xxxxx exists; "
+          f"only{Colors.RESET}")
+    print(f"  {Colors.DIM}the listed Airtable columns were compared, no other metadata.{Colors.RESET}")
     return 2 if any(o["key"] in REVIEW_KEYS for o in outcomes) else 0
 
 

@@ -820,6 +820,17 @@ aborts with no writes.
 
 ## Version History
 
+- **v3.6.7** (2026): two clearer messages
+  - The rename tool, run directly with one environment configured, now
+    says why that environment cannot be used - the same explanation the
+    other tools give, never the value - instead of "no environments
+    configured"
+  - `--check`'s closing note is wrapped to fit the screen and names
+    JPC_AV_xxxxx
+  - The Version History gains its missing v3.4 entry
+  - After pulling: nothing to reinstall; reinstalling only refreshes the
+    version `python -m pip show jpc-av-tools` reports
+
 - **v3.6.6** (2026): `--check` reads its input once
   - The list or pulled sheet is read from disk once, and its numbers, rows
     and pull details all come from that one read - a file saved again
@@ -933,6 +944,22 @@ aborts with no writes.
   - After pulling: run `python -m pip install -e .` once in each environment
     that has the commands (this adds `jpc-mads`), then open a new Terminal;
     `python -m pip show jpc-av-tools` then reports Version 3.5
+
+- **v3.4** (2026): the `jpc-` commands and `jpc-rename`
+  - The first packaged version: a `jpc-` command for each workflow step
+    (pull, check, fill, import, update, write-back) and `jpc`, which lists
+    them; production by default, with detailed help screens;
+    `--skip-duplicates` became `--keep-going`
+  - `jpc-check`, `jpc-fill`, `jpc-import` and `jpc-update` stop before
+    running when creds.py has no entry for the requested environment.
+    Setup became an install guide, with an optional zsh hint for a `jpc-`
+    command that is not found
+  - New `jpc-rename`: the rename tool shows a PLAN of every change, and
+    only `yes` writes or renames anything
+  - Fixes: a creds.py that fails to load is reported by file, error type
+    and line only, never the error text or the line itself; an uncertain
+    folder rename no longer rolls media back; a failed MADS save keeps
+    RESULT and exits 1; Ctrl-C at logout keeps the rename RESULT
 
 - **v3.3** (2026): `ASpace Issue`
   - The hold's reason field is renamed `ASpace Issue` and now records any
