@@ -288,6 +288,15 @@ def open_csv(source):
             return f
 
 
+def read_problem(path, error):
+    """How a list or sheet that could not be read is reported - the one
+    wording for every reader (--list, --check, the MADS check)."""
+    if isinstance(error, UnicodeDecodeError):
+        return (f"could not read {path}: not UTF-8 text (byte {error.start}: {error.reason}) "
+                f"- save the file as UTF-8 CSV")
+    return f"could not read {path}: {error}"
+
+
 def read_catalog_list(path):
     """Catalog numbers from a list file, order kept, duplicates dropped.
 
@@ -319,12 +328,11 @@ def read_catalog_list(path):
                 numbers = [line.strip().strip(',') for line in f
                            if not line.startswith('#')]
     except UnicodeDecodeError as e:
-        return None, (f"could not read {path}: not UTF-8 text (byte {e.start}: {e.reason}) "
-                      f"- save the file as UTF-8 CSV")
+        return None, read_problem(path, e)
     except csv.Error as e:
         return None, f"could not parse {path} as CSV: {e}"
     except OSError as e:
-        return None, f"could not read {path}: {e}"
+        return None, read_problem(path, e)
     seen = set()
     ordered = []
     for n in numbers:

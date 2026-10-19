@@ -820,6 +820,13 @@ aborts with no writes.
 
 ## Version History
 
+- **v3.6.6** (2026): `--check` reads its input once
+  - The list or pulled sheet is read from disk once, and its numbers, rows
+    and pull details all come from that one read - a file saved again
+    during the check can no longer mix two versions
+  - After pulling: nothing to reinstall; reinstalling only refreshes the
+    version `python -m pip show jpc-av-tools` reports
+
 - **v3.6.5** (2026): the write-back tries to keep its receipt after a Ctrl-C
   - Once writing has begun, an interrupted run still tries to save this
     run's outcomes file (an interrupted save is tried once more) and to

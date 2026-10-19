@@ -55,6 +55,7 @@ the CSV file).
 
 import argparse
 import csv
+import io
 import logging
 import re
 import os
@@ -1213,13 +1214,21 @@ def read_check_input(path):
     ({number: [one dict per row]}), columns ({name: present}), warnings,
     pulled ((view, when) from a pull's provenance line, or None) and plain
     (True for a plain text list). The list itself is read by
-    read_catalog_list, so a check accepts exactly what --list does."""
-    numbers, problem = read_catalog_list(path)
+    read_catalog_list, so a check accepts exactly what --list does.
+
+    The file is read from disk once: the numbers, the rows and the
+    provenance line all come from that one captured text, so a file saved
+    again meanwhile can never mix two versions into one check."""
+    try:
+        source = col.CsvSnapshot(path)
+    except (UnicodeDecodeError, OSError) as e:
+        return None, col.read_problem(path, e)
+    numbers, problem = read_catalog_list(source)
     if numbers is None:
         return None, problem
     sheet = {"numbers": numbers, "facts": {}, "warnings": [], "pulled": None,
              "plain": True, "columns": {c: False for c in COMPARED_COLUMNS + (col.HOLD, col.ISSUE)}}
-    with col.open_csv(path) as f:
+    with col.open_csv(source) as f:
         pos = f.tell()
         headers = csv.DictReader(f, strict=True).fieldnames or []
         if col.CATALOG not in headers:
@@ -1227,8 +1236,9 @@ def read_check_input(path):
         sheet["plain"] = False
         f.seek(pos)
         rows = list(csv.DictReader(f, strict=True))
-    with open(path, encoding="utf-8-sig") as raw:
-        match = PULL_PROVENANCE_RE.match(raw.readline().rstrip("\n"))
+    # the first line as before: universal newlines (LF, CRLF or a bare CR)
+    first = io.StringIO(source.text, newline=None).readline()
+    match = PULL_PROVENANCE_RE.match(first.rstrip("\n"))
     if match:
         sheet["pulled"] = (match["view"], match["when"])
     for name in sheet["columns"]:
