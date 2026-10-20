@@ -153,9 +153,11 @@ hold columns are read by every tool (see Holds below).
 fill sends it to the review file; strict `--create-records` and
 `--update-only` stop the whole batch before writing anything (like any
 problem row); `--keep-going` refuses just that row; the Airtable
-write-back leaves it alone (it reads the hold live from Airtable, so an item
-held after it was created is protected too); `--check` still lists it,
-marked. `airtable_pull.py` always includes `ASpace Hold` and `ASpace Issue`,
+write-back leaves it alone (it reads the hold live from Airtable when it
+plans, and again just before each batch is written and after any
+rate-limit wait, so an item held after it was created is protected too -
+but not a hold ticked between that last read and the write itself);
+`--check` still lists it, marked. `airtable_pull.py` always includes `ASpace Hold` and `ASpace Issue`,
 even when the view hides them. Two limits: a CSV carries the hold **as of the
 pull** - tick the box before pulling, and pull again after ticking one - and
 a sheet without the `ASpace Hold` column is not guarded at all.
@@ -756,6 +758,9 @@ environment is configured; use `--env sandbox` for a trial run.
    Reads Airtable, lists every change row by row - each tape's parent
    (`(blank) -> ref` or `already set`) and `ASpace Item Record Created`
    (`No -> Yes` or `already Yes`) - and writes only after you type `yes`.
+   Each batch's rows are read again just before they are written; a row
+   that changed in Airtable since the PLAN is left alone ("changed") - run
+   the command again to see the current plan.
    Without `--run` it only previews. `--exclude-catalog JPC_AV_xxxxx`
    leaves out a record deleted since the import.
 

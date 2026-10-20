@@ -1007,8 +1007,9 @@ COMMANDS = {
       For each row the import created, two Airtable fields:
 
         • ASpace Parent RefID in <<< ASpace_import >>> - the parent the
-          import used. Written only into a blank cell; a parent already
-          there is never replaced.
+          import used. Written only into a cell that is blank when it is
+          read just before the write; a parent found there is never
+          replaced.
         • ASpace Item Record Created in ((( ASpace_tracking ))) - set to
           Yes.
 
@@ -1071,6 +1072,15 @@ COMMANDS = {
       in a batch whose reply was lost are "unknown": the write may or may
       not have landed.
 
+      Just before each batch is written - and again after any rate-limit
+      wait - its rows are read again. A row whose links, hold, parent or
+      Yes changed since the PLAN is left alone and counted as changed (or
+      partial, if this run already wrote its parent); Yes is set only
+      while the parent read back is the import's. A write already in place
+      is skipped. Nothing is replaced by a new plan - run the same command
+      again to see one. An edit made between that read and the write can
+      still be overwritten: Airtable cannot make a write conditional.
+
       Running the same command again is safe: it re-reads Airtable, writes
       only what is still missing, and counts finished rows as already done.""",
             "output": """    A preview saves nothing; its PLAN is on screen only.
@@ -1088,13 +1098,17 @@ COMMANDS = {
       this file (an interrupted save is tried once more) and to say
       whether it was saved; it never replaces an existing file. Pressing
       Ctrl-C again, or a disk or filesystem problem, can prevent the save
-      or that message - run the same command again to re-check.
+      or that message - run the same command again to re-check. If the
+      screen output fails (for example a closed pipe), nothing more is
+      written to Airtable; the run still tries to save this file and, when
+      stderr is available, says whether it was saved. It exits 1.
 
 {run_stamp}
 
     Outcomes: done; already done; partial (parent written, Yes not yet);
     parent not confirmed; unknown (a write may or may not have landed);
-    not started; review; excluded.
+    not started; changed (changed in Airtable after the PLAN - left
+    alone); review; excluded.
 
     RESULT counts them, except excluded rows - the PLAN counts those. The
     saved file's path is printed ("Saved write-back outcomes: ..."); if it
@@ -1110,8 +1124,9 @@ COMMANDS = {
       {command}jpc-writeback --report REPORT --run{reset}
 
     {bold}Unfinished rows{reset}
-      Partial, parent not confirmed, unknown or not started: run the same
-      --run command again. It re-reads Airtable and finishes what is left.
+      Partial, parent not confirmed, unknown, not started or changed: run
+      the same --run command again. It re-reads Airtable, shows the
+      current plan and finishes what is left.
 
     {bold}Rows for review{reset}
       Nothing was written for them. By the note shown:
@@ -1163,7 +1178,8 @@ COMMANDS = {
                     After writing began: a refused or unknown
                     write, Ctrl-C during the writes, or the outcomes file
                     could not be saved - run the same command again to
-                    re-check and finish.
+                    re-check and finish. Also: the screen output failed,
+                    even if only while the result was shown.
     {warn}{bold}2{reset}    Review     Rows for review, or unfinished rows (run the same
                     command again). A preview: rows for review. Also: an
                     argument was rejected.

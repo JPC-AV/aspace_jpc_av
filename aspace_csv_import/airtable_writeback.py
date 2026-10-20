@@ -58,6 +58,9 @@ AIRTABLE_PAT_WRITE = (creds_loader.setting("airtable_pat_write", "")
 WRITE_TOKEN = ("The Airtable write token", "airtable_pat_write", "AIRTABLE_PAT_WRITE")
 
 REF_ID_RE = re.compile(r"[0-9a-f]{32}")
+# An Airtable record ID ("rec" and letters/digits) - the only text a re-check
+# puts into a formula: nothing that could quote or call anything
+AIRTABLE_ID_RE = re.compile(r"rec[A-Za-z0-9]{1,30}")
 
 from console import (Colors, print_status, print_run_header,  # shared display  # noqa: E402
                      print_result, print_saved, print_next_step, render_options,
@@ -68,6 +71,16 @@ PullError = pull.PullError
 
 class UncertainWrite(PullError):
     """A write whose outcome is unknown: it may or may not have been applied."""
+
+
+class RateLimited(PullError):
+    """A write refused with HTTP 429 - definitely not applied. The caller
+    waits, re-checks the rows and only then tries again."""
+
+
+class OutputStopped(PullError):
+    """The screen output failed, so no further write is sent. Raised before
+    a send: nothing is in flight."""
 
 # ==============================
 # HELP MENU
@@ -93,6 +106,13 @@ def get_colored_help():
       - {CREATED_FIELD} in {TRACKING_LABEL} is set to {CREATED_VALUE}
     The parent is written and confirmed first; {CREATED_VALUE} is set only after.
 
+    Each batch's rows are read again just before they are written, and
+    again after any rate-limit wait. A row whose links, hold, parent or
+    {CREATED_VALUE} changed since the PLAN is left alone ("changed"); {CREATED_VALUE} is set only
+    while the parent read back is the import's. An edit made between that
+    read and the write can still be overwritten - Airtable cannot make a
+    write conditional.
+
     Rows the run skipped, updated or refused are left alone. A row whose
     Airtable parent already differs, that matches no row or several, that is
     on hold in Airtable now, or whose read-back snapshot is missing, does not
@@ -114,13 +134,17 @@ def get_colored_help():
         ("EXAMPLES", f"""    {C.GREEN}${C.RESET} python3 aspace_csv_import/airtable_writeback.py import_reports/import_report_<stamp>.json --run
     {C.GREEN}${C.RESET} python3 aspace_csv_import/airtable_writeback.py REPORT.json --exclude-catalog JPC_AV_13500 --run"""),
         ("OUTPUT", """    With --run: airtable_writeback_<stamp>.csv next to the report - each row's
-    outcome (done / already done / partial / unknown / not started / review).
-    "unknown" means a write may or may not have landed (lost response, server
-    error, Ctrl-C); run the same command again to settle it."""),
+    outcome (done / already done / partial / unknown / not started / changed
+    / review). "unknown" means a write may or may not have landed (lost
+    response, server error, Ctrl-C); run the same command again to settle it.
+    If the screen output fails (a closed pipe), nothing more is written; the
+    run still tries to save the file and, when stderr is available, says
+    whether it was saved."""),
         ("EXIT", f"""    {C.GREEN}0{C.RESET}  done (or, previewing, nothing for review)
     {C.YELLOW}2{C.RESET}  rows for review or unfinished rows (rerun to finish), or a bad argument
     {C.RED}1{C.RESET}  stopped: a report or token problem, a refused or unknown write,
-       cancelled at the prompt, or the outcomes file could not be saved"""),
+       cancelled at the prompt, the outcomes file could not be saved, or the
+       screen output failed"""),
     ])
 
 
@@ -476,6 +500,7 @@ def build_plan(token, candidates):
             entry["note"] = f"on hold in Airtable{': ' + reason if reason else ''} - left alone"
             continue
         entry["import_rec"], entry["tracking_rec"] = imp["id"], trk["id"]
+        entry["source_rec"] = source_ids[0]   # re-checked before each write
         current = (imp.get("fields", {}).get(ids["parent"]) or "").strip()
         if current and current != c["parent"]:
             entry["note"] = (f"Airtable already has parent {current}; the import used "
@@ -487,13 +512,115 @@ def build_plan(token, candidates):
         entry["set_created"] = created_now != CREATED_VALUE
     return plan, ids
 
+
+def read_records(token, table_id, record_ids, field_ids, as_text=False):
+    """Only the given records of a table, read again by record ID - never the
+    whole table: {record ID: fields}. A record that no longer exists is
+    simply absent. Only record IDs of letters and digits go into the
+    formula; an answer naming any other record is refused."""
+    wanted = sorted(set(record_ids))
+    if not all(isinstance(r, str) and AIRTABLE_ID_RE.fullmatch(r) for r in wanted):
+        raise PullError("a planned Airtable record ID is not in Airtable's form - nothing more "
+                        "was written")
+    params = [("filterByFormula", "OR(" + ",".join(f"RECORD_ID()='{r}'" for r in wanted) + ")"),
+              ("returnFieldsByFieldId", "true"), ("pageSize", "100")]
+    params += [("fields[]", fid) for fid in field_ids]
+    if as_text:
+        params += [("cellFormat", "string"), ("timeZone", pull.TIME_ZONE),
+                   ("userLocale", pull.USER_LOCALE)]
+    page = pull.airtable_request(f"{pull.API_URL}/{BASE_ID}/{table_id}?{urlencode(params)}", token)
+    records = page.get("records") if isinstance(page, dict) else None
+    if (not isinstance(records, list) or page.get("offset")
+            or any(not isinstance(r, dict) or r.get("id") not in wanted
+                   or not isinstance(r.get("fields"), dict) for r in records)
+            or len({r["id"] for r in records}) != len(records)):
+        raise PullError("Airtable sent a malformed answer while the rows were re-checked - "
+                        "nothing more was written")
+    time.sleep(pull.PAGE_PAUSE)
+    return {r["id"]: r["fields"] for r in records}
+
+
+def _text(value):
+    """A cell as stripped text: "" when empty, None when it is not text."""
+    if value is None:
+        return ""
+    return value.strip() if isinstance(value, str) else None
+
+
+def recheck(token, ids, rows, phase):
+    """Read the rows of the next batch again, just before it is sent, and
+    compare them with what the PLAN approved: -> (changed, satisfied).
+
+    changed: {catalog: what changed} for rows the PLAN no longer authorizes -
+    their source record, import or tracking row is gone or relinked, the
+    item is on hold, or a field changed. The words are fixed; no cell value
+    is quoted. satisfied: catalogs whose approved value is already there, so
+    their write is skipped. Before a parent write ("parent") the cell may
+    still be blank or already the approved parent; before Yes ("created") it
+    must be the approved parent - a cleared or changed parent stops the Yes.
+    A failed read raises PullError; nothing has been sent for these rows."""
+    changed, ready = {}, []
+    for e in rows:
+        if all(AIRTABLE_ID_RE.fullmatch(str(e.get(k))) for k in
+               ("source_rec", "import_rec", "tracking_rec")):
+            ready.append(e)
+        else:
+            changed[e["catalog"]] = "its Airtable records cannot be re-checked"
+    if not ready:
+        return changed, set()
+    sources = read_records(token, ids["source_table"], [e["source_rec"] for e in ready],
+                           [ids["source_primary"]], as_text=True)
+    imports = read_records(token, IMPORT_TABLE_ID, [e["import_rec"] for e in ready],
+                           [f for f in (ids["import_link"], ids["parent"], ids["hold"]) if f])
+    trackings = read_records(token, TRACKING_TABLE_ID, [e["tracking_rec"] for e in ready],
+                             [ids["tracking_link"], ids["created"]])
+    satisfied = set()
+    for e in ready:
+        facts = []
+        src, imp, trk = (sources.get(e["source_rec"]), imports.get(e["import_rec"]),
+                         trackings.get(e["tracking_rec"]))
+        if src is None:
+            facts.append("its source record is gone")
+        elif _text(src.get(ids["source_primary"])) != e["catalog"]:
+            facts.append("its source record was renamed")
+        if imp is None:
+            facts.append(f"its {IMPORT_LABEL} row is gone")
+        else:
+            if link_ids(imp.get(ids["import_link"])) != [e["source_rec"]]:
+                facts.append(f"its {IMPORT_LABEL} row links other records")
+            if ids["hold"] and imp.get(ids["hold"]) is True:
+                facts.append("on hold in Airtable now")
+            parent = _text(imp.get(ids["parent"]))
+            allowed = ({e["current_parent"], e["parent"]} if phase == "parent"
+                       else {e["parent"]})
+            if parent not in allowed:
+                facts.append(f"{PARENT_FIELD} changed")
+        if trk is None:
+            facts.append(f"its {TRACKING_LABEL} row is gone")
+        else:
+            if link_ids(trk.get(ids["tracking_link"])) != [e["source_rec"]]:
+                facts.append(f"its {TRACKING_LABEL} row links other records")
+            created = trk.get(ids["created"])
+            if created is not None and not isinstance(created, (str, dict)):
+                facts.append(f"{CREATED_FIELD} changed")
+            elif select_name(created) not in (e["current_created"], CREATED_VALUE):
+                facts.append(f"{CREATED_FIELD} changed")
+        if facts:
+            changed[e["catalog"]] = "; ".join(facts)
+        elif phase == "parent" and _text(imp.get(ids["parent"])) == e["parent"]:
+            satisfied.add(e["catalog"])
+        elif phase == "created" and select_name(trk.get(ids["created"])) == CREATED_VALUE:
+            satisfied.add(e["catalog"])
+    return changed, satisfied
+
 # ==============================
 # AIRTABLE WRITES (write token)
 # ==============================
 
 def airtable_patch(table_id, records, token):
-    """PATCH up to 10 records; returns the updated records keyed by ID.
-    Setting the same values twice is harmless, so a 429 is retried."""
+    """PATCH up to 10 records, once; returns the updated records keyed by ID.
+    A 429 raises RateLimited (definitely not applied): the caller re-checks
+    the rows before any retry, so no write goes out on an old check."""
     url = f"{pull.API_URL}/{BASE_ID}/{table_id}"
     body = {"records": records, "returnFieldsByFieldId": True}
     problem = creds_loader.token_problem(token)  # the token actually used
@@ -501,71 +628,68 @@ def airtable_patch(table_id, records, token):
         raise PullError(creds_loader.token_refusal(*WRITE_TOKEN, problem)
                         + " - nothing was sent for this batch")
     headers = {"Authorization": f"Bearer {token}"}
-    for attempt in range(pull.RATE_LIMIT_RETRIES + 1):
-        # Past this point a failure may follow a send: it stays uncertain.
-        # An exception's own text can quote the Authorization header, so
-        # only its kind is shown, and none is chained ("from None").
-        try:
-            resp = requests.patch(url, headers=headers, json=body, timeout=pull.TIMEOUT,
-                                  allow_redirects=False)
-        except requests.Timeout:
-            raise UncertainWrite(f"Airtable did not answer a write within {pull.TIMEOUT}s - it "
-                                 f"may or may not have been applied; rerun to re-check") from None
-        except requests.ConnectionError:
-            raise UncertainWrite("the connection to api.airtable.com failed during a write - "
-                                 "check the network; rerun to re-check") from None
-        except requests.RequestException as e:
-            raise UncertainWrite(f"write to Airtable failed ({type(e).__name__}) - it may or "
-                                 f"may not have been applied; rerun to re-check") from None
-        except ValueError as e:  # refused inside the HTTP library while sending
-            raise UncertainWrite(f"write to Airtable failed ({type(e).__name__}) - it may or "
-                                 f"may not have been applied; rerun to re-check") from None
-        # A redirect is never followed (that would re-send the write and the
-        # token elsewhere) and its Location is never shown. The write itself
-        # may or may not have been applied: uncertain, never retried.
-        if 300 <= resp.status_code < 400:
-            raise UncertainWrite(f"Airtable answered a write with a redirect (HTTP "
-                                 f"{resp.status_code}), which is not followed - it may or "
-                                 f"may not have been applied; rerun to re-check")
-        if resp.status_code == 429 and attempt < pull.RATE_LIMIT_RETRIES:
-            print_status("warning", f"Airtable rate limit - waiting {pull.RATE_LIMIT_WAIT}s")
-            time.sleep(pull.RATE_LIMIT_WAIT)
-            continue
-        if resp.status_code in (401, 403, 404):
-            raise PullError(f"Airtable refused the write (HTTP {resp.status_code}: "
-                            f"{pull._error_explanation(resp)}) - check airtable_pat_write's scopes "
-                            f"(data.records:write), its access to base {BASE_ID}, and "
-                            f"field permissions before changing anything")
-        if resp.status_code >= 500:
-            # Airtable can time out WHILE applying a write (503), so a 5xx
-            # is not proof the write was refused
-            raise UncertainWrite(f"Airtable had a server error during a write (HTTP "
-                                 f"{resp.status_code}: {pull._error_explanation(resp)}) - it may or "
-                                 f"may not have been applied; rerun to re-check")
-        if resp.status_code >= 400:
-            raise PullError(f"Airtable refused the write (HTTP {resp.status_code}): "
-                            f"{pull._error_explanation(resp)}")
-        try:
-            data = resp.json()
-        except ValueError:
-            raise UncertainWrite("Airtable answered a write with something that is not JSON - "
-                                 "rerun to re-check")
-        records = data.get("records") if isinstance(data, dict) else None
-        if not isinstance(records, list):
-            raise UncertainWrite("Airtable answered a write without a list of records - it "
-                                 "may or may not have been applied; rerun to re-check")
-        # every record must be one we asked about, once, with a fields dict -
-        # anything else is an answer we cannot read, not a result
-        sent = [r["id"] for r in body["records"]]
-        got = [r.get("id") if isinstance(r, dict) else None for r in records]
-        if (sorted(map(str, got)) != sorted(sent)
-                or any(not isinstance(r, dict) or not isinstance(r.get("id"), str)
-                       or not isinstance(r.get("fields"), dict) for r in records)):
-            raise UncertainWrite("Airtable answered a write with records that do not match "
-                                 "the request - it may or may not have been applied; rerun "
-                                 "to re-check")
-        return {r["id"]: r for r in records}
-    raise PullError(f"Airtable rate limit - still refused after {pull.RATE_LIMIT_RETRIES} retries")
+    # Past this point a failure may follow a send: it stays uncertain.
+    # An exception's own text can quote the Authorization header, so
+    # only its kind is shown, and none is chained ("from None").
+    try:
+        resp = requests.patch(url, headers=headers, json=body, timeout=pull.TIMEOUT,
+                              allow_redirects=False)
+    except requests.Timeout:
+        raise UncertainWrite(f"Airtable did not answer a write within {pull.TIMEOUT}s - it "
+                             f"may or may not have been applied; rerun to re-check") from None
+    except requests.ConnectionError:
+        raise UncertainWrite("the connection to api.airtable.com failed during a write - "
+                             "check the network; rerun to re-check") from None
+    except requests.RequestException as e:
+        raise UncertainWrite(f"write to Airtable failed ({type(e).__name__}) - it may or "
+                             f"may not have been applied; rerun to re-check") from None
+    except ValueError as e:  # refused inside the HTTP library while sending
+        raise UncertainWrite(f"write to Airtable failed ({type(e).__name__}) - it may or "
+                             f"may not have been applied; rerun to re-check") from None
+    # A redirect is never followed (that would re-send the write and the
+    # token elsewhere) and its Location is never shown. The write itself
+    # may or may not have been applied: uncertain, never retried.
+    if 300 <= resp.status_code < 400:
+        raise UncertainWrite(f"Airtable answered a write with a redirect (HTTP "
+                             f"{resp.status_code}), which is not followed - it may or "
+                             f"may not have been applied; rerun to re-check")
+    if resp.status_code == 429:
+        raise RateLimited(f"Airtable rate limit - still refused after "
+                          f"{pull.RATE_LIMIT_RETRIES} retries")
+    if resp.status_code in (401, 403, 404):
+        raise PullError(f"Airtable refused the write (HTTP {resp.status_code}: "
+                        f"{pull._error_explanation(resp)}) - check airtable_pat_write's scopes "
+                        f"(data.records:write), its access to base {BASE_ID}, and "
+                        f"field permissions before changing anything")
+    if resp.status_code >= 500:
+        # Airtable can time out WHILE applying a write (503), so a 5xx
+        # is not proof the write was refused
+        raise UncertainWrite(f"Airtable had a server error during a write (HTTP "
+                             f"{resp.status_code}: {pull._error_explanation(resp)}) - it may or "
+                             f"may not have been applied; rerun to re-check")
+    if resp.status_code >= 400:
+        raise PullError(f"Airtable refused the write (HTTP {resp.status_code}): "
+                        f"{pull._error_explanation(resp)}")
+    try:
+        data = resp.json()
+    except ValueError:
+        raise UncertainWrite("Airtable answered a write with something that is not JSON - "
+                             "rerun to re-check")
+    records = data.get("records") if isinstance(data, dict) else None
+    if not isinstance(records, list):
+        raise UncertainWrite("Airtable answered a write without a list of records - it "
+                             "may or may not have been applied; rerun to re-check")
+    # every record must be one we asked about, once, with a fields dict -
+    # anything else is an answer we cannot read, not a result
+    sent = [r["id"] for r in body["records"]]
+    got = [r.get("id") if isinstance(r, dict) else None for r in records]
+    if (sorted(map(str, got)) != sorted(sent)
+            or any(not isinstance(r, dict) or not isinstance(r.get("id"), str)
+                   or not isinstance(r.get("fields"), dict) for r in records)):
+        raise UncertainWrite("Airtable answered a write with records that do not match "
+                             "the request - it may or may not have been applied; rerun "
+                             "to re-check")
+    return {r["id"]: r for r in records}
 
 
 INTERRUPTED = "interrupted (Ctrl-C) - rerun to re-check and finish"
@@ -585,40 +709,106 @@ def complete_partials(plan):
             e["outcome"] = "done"
 
 
-def execute(plan, ids, token, inflight=None):
+CHANGED = "changed in Airtable after the PLAN"
+
+
+def stop_if_output_lost():
+    """Before any write is sent: once the screen output has failed, nothing
+    more goes to Airtable (a definite stop - nothing is in flight). What a
+    pipe still holds back is flushed first, so a failure hidden in its
+    buffer - a warning just printed - counts before the send, not after."""
+    if SCREEN is not None:
+        SCREEN.flush()
+    lost = output_lost()
+    if lost:
+        raise OutputStopped(f"the screen output failed ({lost}) - nothing more was sent "
+                            f"to Airtable")
+
+
+def execute(plan, ids, token, inflight=None, *, recheck):
     """Parents first (confirmed from the write's response), then Yes for rows
     whose parent is in place. Sets each entry's outcome; stops on the first
     refusal, lost response or Ctrl-C and returns its message (None when
     everything went through). A batch whose write may or may not have
     landed is marked "unknown" - a rerun re-reads Airtable and settles it.
     `inflight`, when given, is the list the batch being written is kept in,
-    so the caller still knows it if a second Ctrl-C escapes this function."""
+    so the caller still knows it if a second Ctrl-C escapes this function.
+
+    recheck(rows, phase) -> (changed, satisfied) reads a batch's rows again
+    just before it is sent, and again after every rate-limit wait (see
+    recheck()). A changed row is left alone - "changed", or "partial" with
+    its note when this run already wrote its parent - and never replaced by
+    another row or a new plan; a satisfied write is skipped. It runs while
+    no batch is in flight, so its failure or a Ctrl-C during it makes no row
+    unknown. So does a failure of the screen output, checked before each send."""
     for e in plan:
         e["outcome"] = initial_outcome(e)
         e["parent_ok"] = not e["note"] and not e["set_parent"]
+        e["wrote"] = False            # did this run write anything to the row
     # the batch being written; its outcome is unknown if interrupted
     batch = inflight if inflight is not None else []
+
+    def send(rows, phase, table_id, record, field, value):
+        """Re-check `rows`, then PATCH the ones still authorized and not
+        already in place - each row's `record` ID, `field` set to value(row);
+        after a 429, wait, re-check and try again.
+        -> (rows sent, the reply's records by ID)."""
+        for attempt in range(pull.RATE_LIMIT_RETRIES + 1):
+            stop_if_output_lost()
+            changed, satisfied = recheck(rows, phase)
+            for e in rows:
+                if e["catalog"] in changed:
+                    e["note"] = (f"{CHANGED} ({changed[e['catalog']]}) - "
+                                 f"{'Yes not set' if e['wrote'] else 'left alone'}; run the "
+                                 f"same command again to see the current plan")
+                    e["outcome"] = "partial" if e["wrote"] else "changed"
+                elif e["catalog"] in satisfied and phase == "parent":
+                    e["parent_ok"] = True     # already the approved parent: not written
+                elif e["catalog"] in satisfied:
+                    e["outcome"] = "done" if e["wrote"] else "already done"
+            rows = [e for e in rows if e["catalog"] not in changed
+                    and e["catalog"] not in satisfied]
+            if not rows:
+                return [], {}
+            stop_if_output_lost()
+            batch[:] = rows
+            try:
+                back = airtable_patch(table_id, [{"id": e[record], "fields": {field: value(e)}}
+                                                 for e in rows], token)
+            except RateLimited:
+                batch.clear()                 # refused: definitely not applied
+                if attempt == pull.RATE_LIMIT_RETRIES:
+                    raise
+                print_status("warning", f"Airtable rate limit - waiting "
+                                        f"{pull.RATE_LIMIT_WAIT}s, then re-checking these rows")
+                time.sleep(pull.RATE_LIMIT_WAIT)
+                continue
+            return rows, back
+        return [], {}
+
     try:
         todo = [e for e in plan if not e["note"] and e["set_parent"]]
         for i in range(0, len(todo), PATCH_BATCH):
-            batch[:] = todo[i:i + PATCH_BATCH]
-            back = airtable_patch(IMPORT_TABLE_ID, [
-                {"id": e["import_rec"], "fields": {ids["parent"]: e["parent"]}} for e in batch
-            ], token)
-            for e in batch:
+            sent, back = send(todo[i:i + PATCH_BATCH], "parent", IMPORT_TABLE_ID,
+                              "import_rec", ids["parent"], lambda e: e["parent"])
+            for e in sent:
                 got = (back.get(e["import_rec"], {}).get("fields", {}).get(ids["parent"]) or "")
+                e["wrote"] = True
                 e["parent_ok"] = got == e["parent"]
                 e["outcome"] = "partial" if e["parent_ok"] else "parent not confirmed"
             batch.clear()
             time.sleep(pull.PAGE_PAUSE)
+        for e in plan:                    # a parent found already in place, nothing else to do
+            if (e["set_parent"] and not e["note"] and e["parent_ok"] and not e["wrote"]
+                    and not e["set_created"]):
+                e["outcome"] = "already done"
         todo = [e for e in plan if not e["note"] and e["parent_ok"] and e["set_created"]]
         for i in range(0, len(todo), PATCH_BATCH):
-            batch[:] = todo[i:i + PATCH_BATCH]
-            back = airtable_patch(TRACKING_TABLE_ID, [
-                {"id": e["tracking_rec"], "fields": {ids["created"]: CREATED_VALUE}} for e in batch
-            ], token)
-            for e in batch:
+            sent, back = send(todo[i:i + PATCH_BATCH], "created", TRACKING_TABLE_ID,
+                              "tracking_rec", ids["created"], lambda e: CREATED_VALUE)
+            for e in sent:
                 got = select_name(back.get(e["tracking_rec"], {}).get("fields", {}).get(ids["created"]))
+                e["wrote"] = True
                 e["outcome"] = "done" if got == CREATED_VALUE else "partial"
             batch.clear()
             time.sleep(pull.PAGE_PAUSE)
@@ -789,6 +979,112 @@ def save_receipt(path, plan, review, excluded, provenance, tries, owned):
             remove_owned(tmp, ident)
 
 # ==============================
+# SCREEN OUTPUT
+# ==============================
+
+def _to_null(stream):
+    """Point a failed stream's descriptor at the null device, so what is
+    still buffered - and the interpreter's own flush at exit - cannot fail
+    again (Python's documented broken-pipe pattern). A stream without a
+    usable descriptor (an in-memory one) is left as it is."""
+    try:
+        fd = stream.fileno()
+    except (OSError, ValueError, AttributeError):   # io.UnsupportedOperation included
+        return
+    try:
+        null = os.open(os.devnull, os.O_WRONLY)
+        try:
+            os.dup2(null, fd)
+        finally:
+            os.close(null)
+    except OSError:
+        pass
+
+
+class Screen:
+    """Standard output for one run of main(). The first write or flush that
+    fails - a closed pipe or terminal - is recorded in `lost`; that and every
+    later write are dropped, so nothing more goes to the failed sink, and
+    the failure never escapes into the run. Only stream errors are caught:
+    an interrupt passes, and so does a ValueError from write() on a stream
+    that is still open (bad text, not a failed sink). A failed flush always
+    counts as lost output, so it can never skip the receipt."""
+
+    def __init__(self, stream):
+        self.stream, self.lost, self.told = stream, None, False
+
+    def _failed(self, error, flushing=False):
+        if (isinstance(error, ValueError) and not flushing
+                and not getattr(self.stream, "closed", False)):
+            return False
+        self.lost = getattr(error, "strerror", None) or type(error).__name__
+        _to_null(self.stream)
+        return True
+
+    def write(self, text):
+        if self.lost is None:
+            try:
+                return self.stream.write(text)
+            except (OSError, ValueError) as e:
+                if not self._failed(e):
+                    raise
+        return len(text)
+
+    def flush(self):
+        if self.lost is None:
+            try:
+                self.stream.flush()
+            except (OSError, ValueError) as e:
+                self._failed(e, flushing=True)
+
+    def isatty(self):
+        try:
+            return self.lost is None and self.stream.isatty()
+        except (OSError, ValueError):
+            return False
+
+    def __getattr__(self, name):
+        return getattr(self.stream, name)
+
+
+SCREEN = None   # this run's Screen while main() runs
+
+
+def output_lost():
+    """Why the screen output failed during this run, or None."""
+    return SCREEN.lost if SCREEN is not None else None
+
+
+def tell(lines):
+    """After the screen output failed: a few plain lines on stderr, best
+    effort. If stderr fails too they are dropped - the outcomes file is
+    already saved and the exit status still says what happened."""
+    if SCREEN is not None:
+        SCREEN.told = True
+    try:
+        for line in lines:
+            sys.stderr.write(line + "\n")
+        sys.stderr.flush()
+    except (OSError, ValueError):
+        _to_null(sys.stderr)
+
+
+def tell_receipt(out_path, saved, save_problem, during_writes, unfinished):
+    """The receipt and the stop, on stderr, once the screen output failed."""
+    lines = [f"The screen output failed ({output_lost()})"
+             + (" during the writes - nothing more was sent to Airtable." if during_writes
+                else "; the outcomes file records what was written.")]
+    if saved:
+        lines.append(f"Saved write-back outcomes: {out_path}")
+    else:
+        lines.append(f"NOT saved write-back outcomes: {out_path} ({save_problem}) - Airtable "
+                     f"was written as far as it got; run the same command again to re-check it")
+    if unfinished:
+        lines.append(f"{unfinished} row(s) unfinished - run the same command again to re-check "
+                     f"Airtable and finish them")
+    tell(lines)
+
+# ==============================
 # MAIN EXECUTION
 # ==============================
 
@@ -824,7 +1120,9 @@ def print_changes(plan):
 
 def confirm(report, plan, excluded, review_count):
     """Show what --run is about to write and ask for an explicit yes.
-    Anything else - no, blank, closed input, Ctrl-C - writes nothing."""
+    Anything else - no, blank, closed input, Ctrl-C - writes nothing; so
+    does a PLAN or prompt that could not be shown (the screen output
+    failed), whatever is typed."""
     pending = [e for e in plan if not e["note"] and (e["set_parent"] or e["set_created"])]
     n_parent = sum(1 for e in pending if e["set_parent"])
     n_yes = sum(1 for e in pending if e["set_created"])
@@ -835,12 +1133,15 @@ def confirm(report, plan, excluded, review_count):
     print(f"    Fields:   {PARENT_FIELD} in {IMPORT_LABEL} ({n_parent} row(s))")
     print(f"              {CREATED_FIELD} = {CREATED_VALUE} in {TRACKING_LABEL} "
           f"({n_yes} row(s))")
+    sys.stdout.flush()              # the PLAN must have reached the screen
+    if output_lost():
+        return False
     try:
         answer = input(f"\n  Type yes to write, anything else to cancel: ")
     except (EOFError, KeyboardInterrupt):
         print()
         return False
-    return answer.strip().lower() == "yes"
+    return answer.strip().lower() == "yes" and not output_lost()
 
 
 def build_parser():
@@ -873,6 +1174,33 @@ def run_suggestion(args, recorded):
 
 
 def main():
+    """The run, with standard output guarded (Screen) and put back after.
+    A detected output failure makes the exit status 1 - after the writes
+    and a saved receipt too - except where a Ctrl-C's 130 applies; stderr
+    says so when it can."""
+    global SCREEN
+    real = sys.stdout
+    screen = SCREEN = Screen(real)
+    sys.stdout = screen
+    code = 0
+    try:
+        run()
+    except SystemExit as e:
+        code = e.code
+    finally:
+        screen.flush()      # what a pipe still holds: a failure counts now, not at exit
+        SCREEN = None
+        if sys.stdout is screen:
+            sys.stdout = real
+    if screen.lost:
+        if not screen.told:
+            tell([f"The screen output failed ({screen.lost}) - nothing was written to Airtable."])
+        if code != 130:
+            code = 1
+    sys.exit(code)
+
+
+def run():
     parser = build_parser()
     args = parser.parse_args()
     if args.no_color:
@@ -943,6 +1271,9 @@ def main():
         sys.exit(2 if to_review else 0)
 
     if pending and not confirm(args.report, plan, excluded, len(to_review)):
+        if output_lost():
+            tell([f"Cancelled: the screen output failed ({output_lost()}) before the yes - "
+                  f"nothing was written to Airtable."])
         print_status("warning", "Cancelled - nothing written")
         sys.exit(1)
     if pending:
@@ -967,12 +1298,18 @@ def main():
     inflight, tries, owned, stage = [], [], {}, "writing"
     error = provenance = saved = save_problem = None
     after_writes, unfinished = False, 0   # after_writes: a Ctrl-C after the writes
+    lost_in_writes = False                # the screen output failed before the writes ended
+
+    def check(rows, phase):               # each batch is read again just before it is sent
+        return recheck(pull.AIRTABLE_PAT_READ_ONLY, ids, rows, phase)
     try:
         try:
-            error = execute(plan, ids, AIRTABLE_PAT_WRITE, inflight) if pending else None
+            error = (execute(plan, ids, AIRTABLE_PAT_WRITE, inflight, recheck=check)
+                     if pending else None)
         except KeyboardInterrupt:  # pressed again while the writes were stopping
             settle_escaped(plan, inflight)
             error = INTERRUPTED
+        lost_in_writes = bool(pending) and output_lost() is not None
         if not pending:
             for e in plan:
                 e["outcome"] = "review" if e["note"] else "already done"
@@ -988,6 +1325,7 @@ def main():
         if stage == "writing":  # as the writes ended: nothing saved or shown yet
             settle_escaped(plan, inflight)
             error = error or INTERRUPTED
+            lost_in_writes = bool(pending) and output_lost() is not None
         else:
             after_writes = True
         if saved is None:  # finish this run's save, within its two attempts
@@ -1004,6 +1342,9 @@ def main():
             unfinished = show_result(plan, to_review, error, out_path, saved, save_problem,
                                      after_writes)
     print()
+    sys.stdout.flush()  # a pipe holds output back: a failure must show up here, not at exit
+    if output_lost():   # the receipt is final: now the stop and the receipt, on stderr
+        tell_receipt(out_path, saved, save_problem, lost_in_writes, count_unfinished(plan))
     if saved is False and save_problem != SAVE_INTERRUPTED:
         sys.exit(1)  # the outcomes file could not be saved
     sys.exit(130 if after_writes else
@@ -1012,7 +1353,7 @@ def main():
 
 def count_unfinished(plan):
     return sum(1 for e in plan if e["outcome"] in ("partial", "parent not confirmed",
-                                                   "unknown", "not started"))
+                                                   "unknown", "not started", "changed"))
 
 
 def announce_receipt(out_path, saved, save_problem):
@@ -1038,7 +1379,15 @@ def show_result(plan, to_review, error, out_path, saved, save_problem, after_wri
                   ("Parent not confirmed", tally.get("parent not confirmed", 0), "attention"),
                   ("Outcome unknown", tally.get("unknown", 0), "unknown"),
                   ("Not started", tally.get("not started", 0), "attention"),
+                  ("Changed since the PLAN (left alone)", tally.get("changed", 0), "attention"),
                   ("For review", len(to_review), "attention")])
+    changed = [e for e in plan if e["note"].startswith(CHANGED)]
+    if changed:
+        print()
+        print_status("warning", f"{len(changed)} row(s) {CHANGED} - nothing more written "
+                                f"for them:")
+        for e in changed:
+            print_status("warning", f"{e['catalog']}: {e['note']}", indent=1)
     if error:
         print()
         print_status("error", f"Stopped: {error}")
