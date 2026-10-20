@@ -1215,7 +1215,9 @@ COMMANDS = {
       ~/aspace_rename_reports/, or in rename_reports/ inside the logs_dir
       folder set in creds.py - dry runs and cancelled runs too. A run that
       stops at an argument or creds.py problem saves none. The run prints
-      the log's path at the end ("Saved log:")."""),
+      the log's path at the end ("Saved log:"). If writing the log fails
+      after it opens - a full or disconnected disk - the run stops before
+      its next change and prints "NOT saved log:" instead (exit 1)."""),
             "environment_note": """    {bold}The folders are real in either environment.{reset} --env sandbox changes
     only which ArchivesSpace is used: a real sandbox run still renames the
     folders, with the sandbox records' RefIDs, which may not match
@@ -1410,7 +1412,8 @@ COMMANDS = {
                     or have an unknown outcome (RESULT lists them). Also:
                     stopped before writing - a creds.py or login problem, a
                     missing folder, or cancelled at the yes prompt (nothing
-                    written, nothing renamed).
+                    written, nothing renamed). Or writing the log failed
+                    after it opened: the run stopped before its next change.
     {warn}{bold}2{reset}    Refused    An argument was rejected; nothing was done.
     {warn}{bold}130{reset}  Stopped    Interrupted with Ctrl-C. While planning, nothing was
                     written; after writing began, RESULT shows what each

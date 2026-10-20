@@ -329,27 +329,24 @@ def main():
                      extra=[("Note", note)])
     results = check_many(numbers)
 
-    # Written to a staging file, then moved into place in one step, so a
-    # half-written report never sits under the final name. A failure here
+    # Written to a temporary file only this run owns, then moved into place
+    # in one step, so a half-written report never sits under the final name
+    # (col.save_via_temp: a failure removes only that file). A failure here
     # comes after the checks: their RESULT is still shown, and the report is
     # announced as NOT saved (exit 1).
     checked_at = datetime.now().strftime("%Y-%m-%d %H:%M")
-    tmp_path = out_path + ".tmp"
+
+    def write_report(f):
+        f.write(f"# {RUN_COMMAND} | {checked_at}\n")
+        writer = csv.writer(f)
+        writer.writerow([col.CATALOG, "MADS URL", "MADS live", "Checked"])
+        for cat in numbers:
+            writer.writerow([cat, mads_url(cat), results.get(cat, ""), checked_at])
     save_error = None
     try:
-        with open(tmp_path, "w", newline="", encoding="utf-8") as f:
-            f.write(f"# {RUN_COMMAND} | {checked_at}\n")
-            writer = csv.writer(f)
-            writer.writerow([col.CATALOG, "MADS URL", "MADS live", "Checked"])
-            for cat in numbers:
-                writer.writerow([cat, mads_url(cat), results.get(cat, ""), checked_at])
-        os.replace(tmp_path, out_path)
+        col.save_via_temp(out_path, write_report, newline="")
     except OSError as e:
         save_error = e
-        try:
-            os.remove(tmp_path)        # a staging file is not a report
-        except OSError:
-            pass
 
     live, not_live, failed = summarize(results)
     invalid = [c for c, s in results.items() if s == "invalid catalog number"]

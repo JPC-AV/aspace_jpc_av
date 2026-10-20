@@ -312,18 +312,19 @@ def output_path(view_name, now):
 
 
 def write_csv(path, columns, records, provenance):
-    """Provenance line, header, rows - written to a temp file and moved into
-    place, so an interrupted pull never leaves a half file."""
+    """Provenance line, header, rows - written to a temporary file only this
+    run owns and moved into place (col.save_via_temp), so an interrupted
+    pull never leaves a half file."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_name(path.name + ".tmp")
-    with open(tmp_path, "w", newline="", encoding="utf-8") as f:
+
+    def write(f):
         f.write(f"# {provenance}\n")
         writer = csv.writer(f)
         writer.writerow([name for _, name, _ in columns])
         for rec in records:
             fields = rec.get("fields", {})
             writer.writerow([cell_text(fields.get(fid), ftype) for fid, _, ftype in columns])
-    os.replace(tmp_path, path)
+    col.save_via_temp(path, write, newline="")
 
 # ==============================
 # MAIN EXECUTION

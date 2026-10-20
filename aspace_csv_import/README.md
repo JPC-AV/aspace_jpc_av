@@ -820,11 +820,28 @@ aborts with no writes.
 
 ## Version History
 
-- **v3.6.8** (2026): no argument error repeats what was typed
-  - Every tool now refuses a mistyped or stray argument without repeating
-    it, as the importer and extent checker already did; a wrong `--level`
-    lists the levels to choose from, and a folder path typed without `-d`
-    gets the `-d PATH` hint
+- **v3.6.9** (2026): honest rename logs, safer report saving
+  - The rename tool notices when writing its log fails after the log
+    opened: it starts no further change, says the log was NOT saved and
+    exits 1 (Ctrl-C keeps 130); changes already made are kept and reported
+  - Reports and CSVs are saved through a temporary file the run itself
+    created: an existing file or link at a staging name is never written
+    through or removed
+  - An unusable vocabulary id or an unrecognized stored date type is
+    refused or described without repeating the server's value, and the
+    multi-extent refusal no longer quotes the record's extent types
+  - RESULT and NEXT STEP count each problem row once - on hold, outcome
+    unknown or failed - so issue text can no longer make a held row read
+    as an unknown outcome
+  - After pulling: nothing to reinstall; reinstalling only refreshes the
+    version `python -m pip show jpc-av-tools` reports
+
+- **v3.6.8** (2026): direct tools' argument errors no longer repeat what
+  was typed
+  - Every direct tool now refuses a mistyped or stray argument without
+    repeating it, as the importer and extent checker already did; a wrong
+    `--level` lists the levels to choose from, and a folder path typed
+    without `-d` gets the `-d PATH` hint
   - An unknown `--env` name, and `--exclude-catalog` values that are not
     created rows in the report, are refused without showing them
   - The export creates its output folder only after the `--list` or

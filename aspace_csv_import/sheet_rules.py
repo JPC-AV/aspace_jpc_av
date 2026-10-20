@@ -11,8 +11,9 @@ sheet:
   - the AV date range (1940-2020) and two-digit-year resolution
   - header rules (duplicates), overflow-cell and strict-quoting expectations
   - file safety: reading a sheet once (CsvSnapshot), skipping provenance
-    lines (open_csv), never overwriting an input (clobber_problem), and
+    lines (open_csv), never overwriting an input (clobber_problem),
     creating exactly the directory an output lands in (resolve_output_path)
+    and saving through a temporary file only this run owns (save_via_temp)
 
 Deliberately pure: standard library only, no network, no knowledge of
 ArchivesSpace - so the Airtable pull and the public-only MADS checker can
@@ -152,6 +153,23 @@ import re as _re
 CATALOG_NUMBER_RE = _re.compile(r"JPC_AV_[0-9]+")
 
 
+# ArchivesSpace's standard date types. A stored date's date_type comes from
+# the server's reply, so it is only ever named from this list - anything
+# else is described, never quoted.
+DATE_TYPES = ("single", "inclusive", "bulk")
+
+
+def date_type_text(value):
+    """A stored date's date_type as fixed text: "single", "inclusive" or
+    "bulk" as written; "missing" when absent or empty; "unrecognized" for
+    anything else - never the value itself."""
+    if value is None or value == "":
+        return "missing"
+    if isinstance(value, str) and value in DATE_TYPES:
+        return value
+    return "unrecognized"
+
+
 # The JPC AV material spans 1940-2020: no item, edit, or broadcast date can
 # fall outside that range. Every parsed date (full, partial, or two-digit
 # year) is checked against it, so an impossible year is rejected as a typo
@@ -247,16 +265,64 @@ def same_file(a, b):
 
 
 def clobber_problem(input_path, out_path):
-    """Why writing `out_path` (via its .tmp staging file) would destroy
-    `input_path`, or None. Check BEFORE any network work: both the final
-    path and the temporary path are compared, since the input could be
-    either (e.g. an input literally named report.csv.tmp)."""
+    """Why writing `out_path` would destroy `input_path`, or None. Check
+    BEFORE any network work. The final path is compared, and so is the old
+    fixed staging name out_path + ".tmp" (an input literally named
+    report.csv.tmp is still refused, as before - save_via_temp itself never
+    writes through an existing name)."""
     import os
     for candidate in (out_path, out_path + ".tmp"):
         if os.path.exists(candidate) and same_file(candidate, input_path):
             return (f"refusing to write {candidate} - it is the input file "
                     f"{input_path} (choose another -o)")
     return None
+
+
+def save_via_temp(path, write, newline=None, encoding="utf-8"):
+    """Save `path` in one step. write(f) writes the content into a new
+    temporary file this call creates exclusively in the same folder - a
+    unique name, opened with O_EXCL, so never through an existing file or
+    link - which os.replace then moves into place as `path`, replacing what
+    is there (a caller that must not overwrite checks before, as it always
+    has). On any error or Ctrl-C before the move, only that temporary file
+    is removed, while it is still the one this call created; an existing
+    file or link at any staging name is never followed, truncated or
+    deleted. A new file gets mode 0666 less the umask, as open() gives.
+    Not a guarantee against power loss."""
+    import os
+    import secrets
+    path = os.fspath(path)
+    folder, name = os.path.split(os.path.abspath(path))
+    tmp = os.path.join(folder, f"{name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                 0o666)
+    owned = None
+    try:
+        st = os.fstat(fd)
+        owned = (st.st_dev, st.st_ino)
+        with os.fdopen(fd, "w", newline=newline, encoding=encoding) as f:
+            fd = None
+            write(f)
+        os.replace(tmp, path)
+        owned = None                      # moved into place: nothing left to remove
+    finally:
+        if fd is not None:
+            os.close(fd)
+        if owned is not None:
+            _remove_owned(tmp, owned)
+
+
+def _remove_owned(path, ident):
+    """Remove `path` only while it is still the file (device, inode) this
+    process created there - never a link, never someone else's file."""
+    import os
+    import stat
+    try:
+        st = os.lstat(path)
+        if (st.st_dev, st.st_ino) == ident and not stat.S_ISLNK(st.st_mode):
+            os.unlink(path)
+    except OSError:
+        pass
 
 
 class CsvSnapshot:

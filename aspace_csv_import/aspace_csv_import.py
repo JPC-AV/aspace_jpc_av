@@ -445,18 +445,26 @@ class ArchivesSpaceClient(ASpaceClient):
             # Resolve the extent_extent_type enumeration by name — enumeration IDs
             # are not stable across ArchivesSpace instances.
             enums = self.get("/config/enumerations")
-            enum_id = None
+            enum_id = named = None
             if isinstance(enums, list):
                 for enum in enums:
                     if isinstance(enum, dict) and enum.get('name') == 'extent_extent_type':
-                        enum_id = enum.get('id')
+                        named, enum_id = enum, enum.get('id')
                         break
-            # Guarded fallback to the conventional ID 14, but only if it really is
-            # the extent_extent_type enumeration on this instance. The record
-            # fetched to check that is the enumeration itself: kept, and checked
-            # below like any other, rather than fetched a second time.
+            if named is not None and not positive_id(enum_id):
+                # A named entry whose id is not a positive integer is a
+                # malformed reply: refused before any endpoint is built from
+                # it (the id is not shown), never replaced by the fallback.
+                logging.error("The 'extent_extent_type' enumeration has an unusable id "
+                              "(not a positive whole number; not shown)")
+                return None
+            # Guarded fallback to the conventional ID 14, but only when no entry
+            # is named extent_extent_type, and only if ID 14 really is that
+            # enumeration on this instance. The record fetched to check that is
+            # the enumeration itself: kept, and checked below like any other,
+            # rather than fetched a second time.
             result = None
-            if enum_id is None:
+            if named is None:
                 candidate = self.get("/config/enumerations/14")
                 if isinstance(candidate, dict) and candidate.get('name') == 'extent_extent_type':
                     enum_id, result = 14, candidate
@@ -715,6 +723,26 @@ def create_notes(row: Dict) -> List[Dict]:
 # INSTANCE PROCESSING
 # ==============================
 
+class UnknownOutcome(str):
+    """The message of a write whose outcome is not known: a lost response, a
+    timeout, Ctrl-C mid-write. Its type is the marker - a row counts as
+    "outcome unknown" only when one of these reached it, never because its
+    text contains such words (a held row's issue text, or a sheet value
+    quoted in a refusal, can)."""
+
+
+# A row result's private flag for an unknown write outcome. Set only from
+# UnknownOutcome messages and the Ctrl-C mid-row handlers; left out of the
+# receipt copies, so the reports keep their format.
+UNCERTAIN = "_uncertain"
+
+
+def uncertain_errors(errors: List[str]) -> bool:
+    """True when any error message is an UnknownOutcome - checked on the
+    list, before the messages are joined into one."""
+    return any(isinstance(e, UnknownOutcome) for e in errors)
+
+
 def create_instances(row: Dict, client: ArchivesSpaceClient) -> Tuple[List[Dict], Optional[str], List[str]]:
     """Build the instance list for a CSV row, reusing an existing top container
     when one with this indicator already exists (e.g. from an earlier partial
@@ -743,10 +771,10 @@ def create_instances(row: Dict, client: ArchivesSpaceClient) -> Tuple[List[Dict]
         if not container_uri:
             if client.last_failure_definitive:
                 return [], None, [f"Failed to create top container for {catalog_number}"]
-            return [], None, [
+            return [], None, [UnknownOutcome(
                 f"Top container create outcome UNKNOWN for {catalog_number} "
                 f"(timeout/lost response) - it may exist; verify in ArchivesSpace "
-                f"before rerunning"]
+                f"before rerunning")]
         created_uri = container_uri
 
     instance = {
@@ -888,6 +916,11 @@ def detect_changes(existing_obj: Dict, row: Dict) -> Dict[str, Tuple[Any, Any]]:
     return changes
 
 
+# How a ranged stored date's type reads in a refusal ("<words> with an end
+# date"); the standard types read as themselves.
+DATE_TYPE_WORDS = {'missing': 'untyped', 'unrecognized': 'of an unrecognized date_type'}
+
+
 def non_single_date_conflicts(existing_obj: Dict, changes: Dict) -> List[Tuple[str, str]]:
     """Changed date labels whose existing date is not a plain single date.
 
@@ -905,11 +938,15 @@ def non_single_date_conflicts(existing_obj: Dict, changes: Dict) -> List[Tuple[s
         for d in existing_obj.get('dates', []):
             if d.get('label') != label:
                 continue
-            dtype = d.get('date_type')
+            # the stored date_type is named only from the standard list,
+            # never quoted (it comes from the server's reply)
+            kind = col.date_type_text(d.get('date_type'))
             if d.get('end'):
-                conflicts.append((label, f"{dtype or 'untyped'} with an end date"))
-            elif dtype != 'single':
-                conflicts.append((label, dtype or 'missing its date_type'))
+                conflicts.append((label, f"{DATE_TYPE_WORDS.get(kind, kind)} with an end date"))
+            elif kind != 'single':
+                conflicts.append((label, {'missing': 'missing its date_type',
+                                          'unrecognized': 'of an unrecognized date_type'}
+                                         .get(kind, kind)))
             break
     return conflicts
 
@@ -949,6 +986,12 @@ def record_identity_ok(record: Dict, uri: str, catalog_number: str) -> bool:
             and resource.get('ref') == aspace_client.RESOURCE_URI
             and record.get('component_id') == catalog_number
             and record.get('level') == 'item')
+
+
+def positive_id(value) -> bool:
+    """True for a positive JSON integer id - never a bool (True is an int to
+    Python), a float, text or a container."""
+    return type(value) is int and value > 0
 
 
 def in_repository(value, collection: str) -> bool:
@@ -1111,13 +1154,15 @@ def create_archival_object(row: Dict, client: ArchivesSpaceClient,
                 else:
                     found_count, existing_uri = client.check_component_unique_id(catalog_number)
                     if found_count:
-                        msg = (f"Create response was lost but {catalog_number} EXISTS at "
-                               f"{existing_uri} - verify it in ArchivesSpace; container "
-                               f"{created_container_uri} was kept")
+                        msg = UnknownOutcome(
+                            f"Create response was lost but {catalog_number} EXISTS at "
+                            f"{existing_uri} - verify it in ArchivesSpace; container "
+                            f"{created_container_uri} was kept")
                     else:
-                        msg = (f"Create outcome unknown (timeout/lost response) - verify "
-                               f"{catalog_number} in ArchivesSpace before rerunning; container "
-                               f"{created_container_uri} was kept and may need manual cleanup")
+                        msg = UnknownOutcome(
+                            f"Create outcome unknown (timeout/lost response) - verify "
+                            f"{catalog_number} in ArchivesSpace before rerunning; container "
+                            f"{created_container_uri} was kept and may need manual cleanup")
                     logging.warning(msg)
                     errors.append(msg)
             elif not client.last_failure_definitive:
@@ -1125,11 +1170,12 @@ def create_archival_object(row: Dict, client: ArchivesSpaceClient,
                 # unknown: the object may exist. Say so, never "failed".
                 found_count, existing_uri = client.check_component_unique_id(catalog_number)
                 if found_count:
-                    msg = (f"Create response was lost but {catalog_number} EXISTS at "
-                           f"{existing_uri} - verify it in ArchivesSpace")
+                    msg = UnknownOutcome(f"Create response was lost but {catalog_number} EXISTS "
+                                         f"at {existing_uri} - verify it in ArchivesSpace")
                 else:
-                    msg = (f"Create outcome unknown (timeout/lost response) - verify "
-                           f"{catalog_number} in ArchivesSpace before rerunning")
+                    msg = UnknownOutcome(f"Create outcome unknown (timeout/lost response) - "
+                                         f"verify {catalog_number} in ArchivesSpace before "
+                                         f"rerunning")
                 logging.warning(msg)
                 errors = [msg]
             return None, errors
@@ -1375,9 +1421,10 @@ def update_archival_object(row: Dict, client: ArchivesSpaceClient,
             if client.last_failure_definitive:
                 logging.error(f"Failed to update archival object: {catalog_number}")
                 return None, changes, ["Failed to update archival object via API"]
-            msg = (f"Update outcome UNKNOWN for {catalog_number} (timeout/lost "
-                   f"response) - verify the record in ArchivesSpace; rerunning "
-                   f"--update-only is safe (an applied change reads back as unchanged)")
+            msg = UnknownOutcome(f"Update outcome UNKNOWN for {catalog_number} (timeout/lost "
+                                 f"response) - verify the record in ArchivesSpace; rerunning "
+                                 f"--update-only is safe (an applied change reads back as "
+                                 f"unchanged)")
             logging.warning(msg)
             return None, changes, [msg]
 
@@ -1397,7 +1444,7 @@ def normalize_row(row: Dict) -> Dict:
 
 def make_row_result(row_num: int, row: Dict, status: str = "pending",
                     message: str = "", uri: str = None, changes: Dict = None,
-                    ref_id: str = None) -> Dict:
+                    ref_id: str = None, uncertain: bool = False) -> Dict:
     """One row's outcome record - shared by every processing path.
 
     Carries the record's ref_id when known (fetched after a create, read from
@@ -1413,6 +1460,8 @@ def make_row_result(row_num: int, row: Dict, status: str = "pending",
     }
     for column in col.REQUIRED_COLUMNS:
         result[column] = (row.get(column) or '').strip()
+    if uncertain:
+        result[UNCERTAIN] = True
     return result
 
 
@@ -1542,6 +1591,8 @@ def process_csv_row(row: Dict, row_num: int, client: ArchivesSpaceClient,
         
         if errors:
             result["status"] = "error"
+            if uncertain_errors(errors):     # read before the messages are joined
+                result[UNCERTAIN] = True
             result["message"] = "; ".join(errors)
             logging.error(f"Error creating {catalog_number}: {'; '.join(errors)}")
         elif ao_result:
@@ -1645,7 +1696,6 @@ def _preflight_update_only_row(row_num: int, row: Dict, client: ArchivesSpaceCli
         if original_format or supplies_dates:
             if original_format:
                 existing_extents = record.get('extents', [])
-                existing_types = [e.get('extent_type') for e in existing_extents]
                 if 'extents' in detected:
                     status = client.extent_type_status(original_format)
                     if status == "unavailable":
@@ -1657,10 +1707,12 @@ def _preflight_update_only_row(row_num: int, row: Dict, client: ArchivesSpaceCli
                         problems.append((row_num, row, f"Invalid extent type: '{original_format}'"))
                         return
                 if len(existing_extents) > 1 and 'extents' in detected:
+                    # the stored extent types are not quoted: they come from
+                    # the server's reply (the count and the CSV's own value are)
                     problems.append((row_num, row,
-                                     f"{catalog_number} has {len(existing_extents)} extents "
-                                     f"({', '.join(map(str, existing_types))}); the CSV cannot say "
-                                     f"which one to change to '{original_format}' - update extents manually"))
+                                     f"{catalog_number} has {len(existing_extents)} extents; the "
+                                     f"CSV cannot say which one to change to '{original_format}' "
+                                     f"- update extents manually"))
                     return
             if supplies_dates:
                 conflicts = multi_date_conflicts(record, detected)
@@ -1811,7 +1863,8 @@ def process_csv_file_update_only(filename: str, client: ArchivesSpaceClient,
                 row, client, resolved[row_num], dry_run,
                 expected_changes=plan[row_num]["changes"] if row_num in plan else None)
             if errors:
-                result = make_row_result(row_num, row, "error", "; ".join(errors))
+                result = make_row_result(row_num, row, "error", "; ".join(errors),
+                                         uncertain=uncertain_errors(errors))
             elif ao_result and ao_result.get('unchanged'):
                 result = make_row_result(row_num, row, "unchanged", "No changes needed",
                                          uri=resolved[row_num],
@@ -1838,7 +1891,8 @@ def process_csv_file_update_only(filename: str, client: ArchivesSpaceClient,
             logging.error(f"Interrupted by operator at row {row_num} - "
                           f"stopping; a partial report will be written")
             results.append(make_row_result(row_num, row, "error",
-                           "Interrupted by operator (Ctrl-C) mid-row - write outcome UNKNOWN (it may have committed); verify this record in ArchivesSpace before rerunning"))
+                           "Interrupted by operator (Ctrl-C) mid-row - write outcome UNKNOWN (it may have committed); verify this record in ArchivesSpace before rerunning",
+                           uncertain=True))
             break
         except Exception as e:
             result = make_row_result(row_num, row, "error", str(e))
@@ -2220,7 +2274,8 @@ def process_csv_file(filename: str, client: ArchivesSpaceClient,
             logging.error(f"Interrupted by operator at row {row_num} - "
                           f"stopping; a partial report will be written")
             results.append(make_row_result(row_num, row, "error",
-                           "Interrupted by operator (Ctrl-C) mid-row - write outcome UNKNOWN (it may have committed); verify this record in ArchivesSpace before rerunning"))
+                           "Interrupted by operator (Ctrl-C) mid-row - write outcome UNKNOWN (it may have committed); verify this record in ArchivesSpace before rerunning",
+                           uncertain=True))
             break
         except Exception as row_error:
             logging.error(f"Unexpected error at row {row_num}: {str(row_error)}")
@@ -2285,7 +2340,7 @@ def generate_reports(results: List[Dict], summary: Dict) -> bool:
     # records ride on the row results but belong in their own file - the
     # reports stay a compact receipt.
     report_rows = [
-        {**{k: v for k, v in r.items() if k not in ('record', 'top_container')},
+        {**{k: v for k, v in r.items() if k not in ('record', 'top_container', UNCERTAIN)},
          'staff_link': staff_link_for(r.get('uri'))}
         for r in results
     ]
@@ -2333,10 +2388,10 @@ def generate_reports(results: List[Dict], summary: Dict) -> bool:
                             f"{', '.join(map(str, containers_missing))}")
     try:
         # Write-then-rename: the final report path only ever holds a COMPLETE
-        # file. An interrupt mid-write leaves a .tmp (never mistakable for the
-        # audit trail), not a well-formed-looking truncated report.
-        tmp_path = CSV_REPORT + '.tmp'
-        with open(tmp_path, 'w', newline='', encoding='utf-8') as csvfile:
+        # file. The content goes to a temporary file only this run owns
+        # (col.save_via_temp); an error or interrupt mid-write removes it,
+        # and nothing already at a staging name is ever written through.
+        def write_csv_report(csvfile):
             # Row 1: provenance - the command, target and time, same as the
             # export files (every reader in the toolset skips '#' lines).
             csvfile.write(f"# {RUN_COMMAND} | target: {aspace_client.ACTIVE_ENV} | "
@@ -2349,7 +2404,7 @@ def generate_reports(results: List[Dict], summary: Dict) -> bool:
             writer = csv.DictWriter(csvfile, fieldnames=fieldnames, extrasaction='ignore')
             writer.writeheader()
             writer.writerows(report_rows)
-        os.replace(tmp_path, CSV_REPORT)
+        col.save_via_temp(CSV_REPORT, write_csv_report, newline='')
         logging.info(f"CSV report saved: {CSV_REPORT}")
         files["receipt CSV"] = ("saved", CSV_REPORT)
     except Exception as e:
@@ -2362,10 +2417,7 @@ def generate_reports(results: List[Dict], summary: Dict) -> bool:
             "summary": {k: v for k, v in summary.items() if not k.startswith("_")},
             "results": report_rows
         }
-        tmp_path = JSON_REPORT + '.tmp'
-        with open(tmp_path, 'w', encoding='utf-8') as jsonfile:
-            json.dump(report_data, jsonfile, indent=2)
-        os.replace(tmp_path, JSON_REPORT)
+        col.save_via_temp(JSON_REPORT, lambda jsonfile: json.dump(report_data, jsonfile, indent=2))
         logging.info(f"JSON report saved: {JSON_REPORT}")
         summary["report_file"] = JSON_REPORT
         files["import report"] = ("saved", JSON_REPORT)
@@ -2377,18 +2429,16 @@ def generate_reports(results: List[Dict], summary: Dict) -> bool:
     # the records file (snapshots as stored) comes after.
     if records or expected:
         try:
-            tmp_path = RECORDS_REPORT + '.tmp'
-            with open(tmp_path, 'w', encoding='utf-8') as f:
-                json.dump({"summary": {k: summary.get(k) for k in
-                                       ('command', 'environment', 'target', 'mode',
-                                        'keep_going', 'dry_run', 'start_time',
-                                        'snapshots_expected', 'snapshots_captured',
-                                        'snapshots_missing',
-                                        'containers_expected', 'containers_captured',
-                                        'containers_missing')
-                                       if k in summary},
-                           "records": records}, f, indent=2)
-            os.replace(tmp_path, RECORDS_REPORT)
+            records_data = {"summary": {k: summary.get(k) for k in
+                                        ('command', 'environment', 'target', 'mode',
+                                         'keep_going', 'dry_run', 'start_time',
+                                         'snapshots_expected', 'snapshots_captured',
+                                         'snapshots_missing',
+                                         'containers_expected', 'containers_captured',
+                                         'containers_missing')
+                                        if k in summary},
+                            "records": records}
+            col.save_via_temp(RECORDS_REPORT, lambda f: json.dump(records_data, f, indent=2))
             logging.info(f"Records file saved: {RECORDS_REPORT} ({len(records)} record(s))")
             files["records file"] = ("saved", RECORDS_REPORT)
         except Exception as e:
@@ -2423,9 +2473,11 @@ def print_summary(summary: Dict, elapsed_time: str = None,
     dry = summary.get('dry_run', False)
     rows_known = results is not None
     results = results or []
-    unknown = sum(1 for r in results if outcome_unknown(r))
-    held = sum(1 for r in results if held_row(r))
-    failed = max(summary.get('failed', 0) - unknown - held, 0)
+    # each error row counts once - held, else unknown, else failed - so the
+    # three never overlap; with no row list, the summary's failures stand
+    kinds = [error_kind(r) for r in results]
+    unknown, held = kinds.count("unknown"), kinds.count("held")
+    failed = kinds.count("failed") if rows_known else summary.get('failed', 0)
     not_reached = (max(summary.get('total_rows', 0) - len(results), 0)
                    if rows_known and summary.get('interrupted') else 0)
     aborted = summary.get('aborted', 0)
@@ -2477,14 +2529,26 @@ def print_summary(summary: Dict, elapsed_time: str = None,
 # MAIN EXECUTION
 # ==============================
 
+def error_kind(result: Dict) -> Optional[str]:
+    """How an error row counts - exactly one of "held", "unknown" or
+    "failed" (None for a row that is not an error). Held first: a held row
+    was never attempted, whatever its issue text says. Then "unknown": a
+    write whose outcome is not known, flagged where it happened (UNCERTAIN),
+    never inferred from the message. Anything else is a definite failure."""
+    if result.get("status") != "error":
+        return None
+    if held_row(result):
+        return "held"
+    if result.get(UNCERTAIN) is True:
+        return "unknown"
+    return "failed"
+
+
 def outcome_unknown(result: Dict) -> bool:
     """True for an error row whose write may or may not have landed - a lost
     response, a timeout, or Ctrl-C mid-write. Such a row is never "not
     created": it has to be checked in ArchivesSpace."""
-    message = result.get("message") or ""
-    return result.get("status") == "error" and (
-        "UNKNOWN" in message or "outcome unknown" in message
-        or "response was lost" in message)
+    return error_kind(result) == "unknown"
 
 
 REPORT_FILES = ("import report", "receipt CSV", "records file")
@@ -2565,8 +2629,8 @@ def print_next_step(summary: Dict, results: List[Dict] = None) -> None:
     results = results or []
     unknown = [r.get(col.CATALOG) or f"row {r.get('row_number')}"
                for r in results if outcome_unknown(r)]
-    held = sum(1 for r in results if held_row(r))
-    failed = sum(1 for r in results if r.get("status") == "error") - len(unknown) - held
+    held = sum(1 for r in results if error_kind(r) == "held")
+    failed = sum(1 for r in results if error_kind(r) == "failed")
     not_reached = (max(summary.get("total_rows", 0) - len(results), 0)
                    + sum(1 for r in results if r.get("status") == "aborted"))
     script = os.path.relpath(os.path.join(os.path.dirname(os.path.abspath(__file__)),

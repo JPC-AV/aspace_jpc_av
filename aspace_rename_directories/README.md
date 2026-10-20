@@ -302,8 +302,9 @@ problem or a missing folder shows the error and no RESULT.
 **Exit codes:** `0` every folder done or already up to date (or none found);
 `1` some folders refused, failed, partly done or of unknown outcome - or the
 run stopped before writing (a `creds.py` or login problem, a missing folder,
-or cancelled at the prompt); `2` an argument was rejected, nothing done;
-`130` interrupted with Ctrl-C (see below).
+or cancelled at the prompt), or writing the log failed after it opened
+(below); `2` an argument was rejected, nothing done; `130` interrupted with
+Ctrl-C (see below).
 
 ### Log file
 
@@ -314,6 +315,16 @@ folder list, the shared client's messages, and the full detail of any
 unexpected error (the screen shows one line and says the detail is in the
 log). Nothing is created for `-h`, an argument mistake or a `creds.py`
 problem: the run stops before the log starts.
+
+If writing or closing the log fails after it has opened - a full or
+disconnected disk - the run starts no further change: before the prompt it
+stops with nothing written; while writing it stops before the next change,
+keeping what was already done (a folder can be partly done - NEEDS ATTENTION
+says what to fix). It then says `NOT saved log:` instead of `Saved log:`,
+names the write error, adds "The log is incomplete. Retain the displayed
+outcomes before closing Terminal." and exits 1 (Ctrl-C keeps 130). Detail
+kept only in the log, such as an unexpected error's full traceback, may be
+lost.
 
 ```
 2026-09-30 10:15:02,118 [INFO] Command: python3 aspace-rename-directories.py -d /Volumes/Drive/one_inch

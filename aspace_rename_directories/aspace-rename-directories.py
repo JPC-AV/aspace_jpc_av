@@ -96,13 +96,69 @@ class ScreenFormatter(logging.Formatter):
         return f"{indent}{getattr(Colors, color)}{mark}{Colors.RESET} {text}"
 
 
+class LogFileHandler(logging.FileHandler):
+    """The run's log file. A write or flush that fails (a full or
+    disconnected disk) is recorded in `problem` - the first one, by kind -
+    instead of logging's own report on stderr; nothing about it is logged
+    through this handler. The run checks it before each change
+    (log_problem) and before saying the log was saved (finish_log)."""
+    problem = None
+
+    def _record(self, error):
+        if self.problem is None:
+            self.problem = (getattr(error, "strerror", None) or type(error).__name__
+                            if error is not None else "write failed")
+
+    def handleError(self, record):
+        self._record(sys.exc_info()[1])
+
+    def flush(self):
+        try:
+            super().flush()
+        except (OSError, ValueError) as e:
+            self._record(e)
+
+    def finish(self):
+        """Flush and close the file, then detach it so nothing more is
+        written: -> the problem, or None when every line reached the file."""
+        try:
+            self.close()
+        except (OSError, ValueError) as e:
+            self._record(e)
+        for logger in (logging.getLogger(), FILE_LOG):
+            logger.removeHandler(self)
+        return self.problem
+
+
+LOG_HANDLER = None   # this run's LogFileHandler, once setup_logging made it
+
+
+def log_problem():
+    """Why this run's log could not be written, or None."""
+    return LOG_HANDLER.problem if LOG_HANDLER is not None else None
+
+
+def finish_log():
+    """Close the log - flushing it - and only then say, on the screen (not in
+    the log it describes), whether it was saved whole. -> the problem."""
+    problem = LOG_HANDLER.finish() if LOG_HANDLER is not None else None
+    if problem:
+        print_saved([], failed=[("log", LOG_FILE)])
+        print_status("error", f"Writing the log failed ({problem}). The log is incomplete. "
+                              f"Retain the displayed outcomes before closing Terminal.")
+    else:
+        print_saved([("log", LOG_FILE)])
+    return problem
+
+
 def setup_logging(verbose=False):
     """Create the reports folder and this run's log file, and send every
     message to both: the screen (marks, no timestamps) and the file (every
     message, timestamped, plain - including the shared client's messages,
     which log through the same root logger)."""
+    global LOG_HANDLER
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    file_handler = logging.FileHandler(LOG_FILE)
+    file_handler = LOG_HANDLER = LogFileHandler(LOG_FILE)
     file_handler.setFormatter(PlainFormatter(LOG_FORMAT))
     screen = logging.StreamHandler(sys.stdout)
     screen.setFormatter(ScreenFormatter())
@@ -200,7 +256,8 @@ def get_colored_help():
         ("EXIT", f"""    {C.GREEN}0{C.RESET}  every folder done or already up to date (or none found)
     {C.RED}1{C.RESET}  some folders failed, are partly done or have an unknown outcome;
        or a creds.py or login problem; or cancelled at the yes prompt
-       (nothing written, nothing renamed)
+       (nothing written, nothing renamed); or writing the log failed after
+       it opened (the run stopped before its next change; "NOT saved log")
     {C.YELLOW}2{C.RESET}  a bad argument or combination - nothing was done
     {C.YELLOW}130{C.RESET} interrupted (Ctrl-C) - while planning nothing was written; after
        writing began, RESULT shows what each folder reached"""),
@@ -717,6 +774,9 @@ def plan_signature(prep):
 WRITE_WORDS = {"update": "ArchivesSpace update", "media": "media file rename",
                "rename": "folder rename"}
 WRITE_PLACES = {"update": "in ArchivesSpace", "media": "on disk", "rename": "on disk"}
+# A confirmed step, as a stop message names what was kept.
+STEP_WORDS = {"update": "the record update", "media": "the media rename",
+              "rename": "the folder rename"}
 # `writing` names the step in flight. It is cleared only AFTER the step is
 # recorded as done, so a Ctrl-C anywhere in between reads as UNKNOWN (the
 # safe side), never as "not done".
@@ -750,6 +810,13 @@ def apply_folder(client, prep, outcome, fail, dry_run=False, no_update=False, no
                 logging.info(f"Would update ArchivesSpace record: {'; '.join(changes)}")
                 outcome["done"].append("update")
             else:
+                # the intent goes to the log first: a log that cannot take it
+                # (a full disk) stops the change before it starts
+                FILE_LOG.info(f"Writing the record update for {directory}")
+                if log_problem():
+                    fail(outcome, f"Stopped before updating the record for {directory}: "
+                                  f"the log file could not be written - nothing changed")
+                    return
                 # None is the failure signal; a 200 with an empty body is
                 # still a success (the shared client already treats it so).
                 writing = "update"
@@ -783,6 +850,13 @@ def apply_folder(client, prep, outcome, fail, dry_run=False, no_update=False, no
                 logging.info(f"Would rename media file: {mkv_filename} → {mkv_target_name}")
                 outcome["done"].append("media")
             else:
+                FILE_LOG.info(f"Renaming media file: {mkv_filename} -> {mkv_target_name}")
+                if log_problem():
+                    fail(outcome, f"Stopped before renaming the media file of {directory}: "
+                                  f"the log file could not be written"
+                                  f"{' (the record update is kept)' if outcome['done'] else ''}"
+                                  f" - nothing renamed")
+                    return
                 writing = "media"
                 try:
                     rename_no_overwrite(old_mkv_path, new_mkv_path)
@@ -819,6 +893,20 @@ def apply_folder(client, prep, outcome, fail, dry_run=False, no_update=False, no
                 logging.info(f"Would rename directory: {directory} → {os.path.basename(dir_target)}")
                 outcome["done"].append("rename")
             else:
+                FILE_LOG.info(f"Renaming directory: {directory} -> {os.path.basename(dir_target)}")
+                if log_problem():
+                    kept = [STEP_WORDS[step] for step in outcome["done"]]
+                    manual = None
+                    if mkv_renamed_now:
+                        manual = (f"MANUAL FIX NEEDED: the media file inside {directory} was "
+                                  f"renamed to {mkv_target_name}, but the folder was not - "
+                                  f"rename the folder to {os.path.basename(dir_target)}, or the "
+                                  f"file back to {mkv_filename}, before rerunning.")
+                    fail(outcome, f"Stopped before renaming the folder {directory}: the log "
+                                  f"file could not be written"
+                                  f"{' (' + ' and '.join(kept) + ' kept)' if kept else ''}"
+                                  f" - the folder was not renamed", manual=manual)
+                    return
                 writing = "rename"
                 try:
                     rename_no_overwrite(dir_path, dir_target)
@@ -849,6 +937,17 @@ def apply_folder(client, prep, outcome, fail, dry_run=False, no_update=False, no
                     uncertain = False
                     manual = str(e) if isinstance(e, PlaceholderLeft) else None
                     if mkv_renamed_now:
+                        FILE_LOG.info(f"Rolling back the media file rename: {mkv_target_name} "
+                                      f"-> {mkv_filename}")
+                    if mkv_renamed_now and log_problem():
+                        # no new change once the log has failed - not even
+                        # this rollback: the media rename stays, for a person
+                        manual = (f"MANUAL FIX NEEDED: the folder rename failed and the media "
+                                  f"file was not renamed back, because the log file could not "
+                                  f"be written ({new_mkv_path}). Rename it back to "
+                                  f"{mkv_filename} before rerunning.")
+                        logging.error(manual)
+                    elif mkv_renamed_now:
                         writing = "rollback"
                         try:
                             rename_no_overwrite(new_mkv_path, old_mkv_path)
@@ -1094,6 +1193,19 @@ def rename_and_update_directories(client, target_dir, dry_run=False, no_rename=F
         outcome["manual"] = manual or outcome["manual"]
         counters["failed"] += 1
 
+    def log_stopped():
+        """True once this run's log could not be written: no new change is
+        started after that. Said once on the screen (printed - never through
+        the failed log)."""
+        if not log_problem():
+            return False
+        if not report.get("log_stopped"):
+            report["log_stopped"] = True
+            print()
+            print_status("error", f"The log file could not be written ({log_problem()}) - "
+                                  f"stopping before the next change")
+        return True
+
     # Find directories to process. In --single mode the operator named each
     # target explicitly, so a rejected target is a FAILURE (counted, non-zero
     # exit) - not a silent skip that can leave an all-invalid run exiting 0.
@@ -1215,6 +1327,9 @@ def rename_and_update_directories(client, target_dir, dry_run=False, no_rename=F
                 fail(outcome, f"{directory} changed after the PLAN - not written; rerun "
                               f"to see its current changes")
                 return
+            if not dry_run and log_stopped():
+                outcome["not_reached"] = True    # nothing changed: not reached
+                return
             applying = True
             apply_folder(client, prep, outcome, fail, dry_run, no_update, no_rename)
         except KeyboardInterrupt:
@@ -1234,6 +1349,8 @@ def rename_and_update_directories(client, target_dir, dry_run=False, no_rename=F
     if not planned_run:
         # One pass: dry runs, and callers that ask for no confirmation.
         for parent_path, directory in targets:
+            if not dry_run and log_stopped():
+                break                            # the rest: not reached
             outcome = new_outcome(directory)
             outcomes.append(outcome)
             folder_heading(directory)
@@ -1241,6 +1358,8 @@ def rename_and_update_directories(client, target_dir, dry_run=False, no_rename=F
                 run_one(parent_path, directory, outcome)
             finally:
                 _IN_FOLDER = False
+            if outcome.get("not_reached"):
+                outcomes.remove(outcome)
         return counters["failed"]
 
     # A real run: PLAN every folder first - read-only, detail to the log -
@@ -1267,6 +1386,11 @@ def rename_and_update_directories(client, target_dir, dry_run=False, no_rename=F
             planned.append((parent_path, directory, prep, problem))
     show(print_rename_plan, planned, no_update, no_rename, rename_mkv, media_format, early)
     counts = plan_counts(planned, early)
+    if log_stopped():
+        # the PLAN is on the screen, but the log already failed: nothing is
+        # asked and nothing written
+        report["log_stopped"] = "before writing"
+        return 0
     if counts["update"] or counts["rename"] or counts["media"]:
         if not confirm(plan_heading(counts)):
             FILE_LOG.info("Cancelled at the confirmation prompt - nothing written or renamed")
@@ -1277,17 +1401,23 @@ def rename_and_update_directories(client, target_dir, dry_run=False, no_rename=F
     report["phase"] = "writing"
     show(print_section, "WRITING")
     for parent_path, directory, planned_prep, problem in planned:
-        outcome = new_outcome(directory)
-        outcomes.append(outcome)
         if problem:
             # refused in the PLAN: left as it is (the PLAN said why)
+            outcome = new_outcome(directory)
+            outcomes.append(outcome)
             fail(outcome, problem, log=False)
             continue
+        if log_stopped():
+            continue                             # not reached: nothing done to it
+        outcome = new_outcome(directory)
+        outcomes.append(outcome)
         folder_heading(directory)
         try:
             run_one(parent_path, directory, outcome, planned_prep)
         finally:
             _IN_FOLDER = False
+        if outcome.get("not_reached"):
+            outcomes.remove(outcome)
 
     return counters["failed"]
 
@@ -1699,7 +1829,7 @@ def main():
     # the log's path.
     if args.directory and not os.path.isdir(args.directory):
         logging.error(f"Target directory does not exist: {args.directory}")
-        show(print_saved, [("log", LOG_FILE)])
+        finish_log()
         print()
         sys.exit(1)
 
@@ -1708,7 +1838,7 @@ def main():
     client = ASpaceClient()
     if not client.login():
         logging.error(f"Could not log in: {client.login_problem}. Exiting the script.")
-        show(print_saved, [("log", LOG_FILE)])
+        finish_log()
         print()
         sys.exit(1)  # pre-loop failure - nothing was processed
 
@@ -1752,13 +1882,16 @@ def main():
             logging.error("Interrupted by operator (Ctrl-C) while logging out")
             logout_interrupted = True
 
-    if report.get("cancelled") or (interrupted and report.get("phase") == "planning"):
+    if (report.get("cancelled") or report.get("log_stopped") == "before writing"
+            or (interrupted and report.get("phase") == "planning")):
         # Nothing was written and nothing renamed - no RESULT, which would
         # read as work done.
         print()
-        print_status("warning", "Interrupted while planning" if interrupted else "Cancelled")
+        print_status("warning", "Interrupted while planning" if interrupted
+                     else "Cancelled" if report.get("cancelled")
+                     else "Stopped before writing: the log file could not be written")
         print(f"  {Colors.BOLD}Nothing written to ArchivesSpace, nothing renamed.{Colors.RESET}")
-        show(print_saved, [("log", LOG_FILE)])
+        finish_log()
         print()
         sys.exit(130 if interrupted or logout_interrupted else 1)
 
@@ -1767,16 +1900,20 @@ def main():
     minutes, seconds = divmod(remainder, 60)
     elapsed_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
-    show(print_rename_result, report, args.dry_run, elapsed_str, stopped=stopped,
+    show(print_rename_result, report, args.dry_run, elapsed_str,
+         stopped=stopped or bool(report.get("log_stopped")),
          interrupted=interrupted, logout_interrupted=logout_interrupted)
-    show(print_saved, [("log", LOG_FILE)])
+    # Closed and checked before it is announced: "Saved log" only for a
+    # log that holds the whole run.
+    log_failed = finish_log()
     print()
 
     # Non-zero exit when any directory did not finish (failed, partly done or
-    # of unknown outcome), so automation/monitoring can detect it.
+    # of unknown outcome) or the log is incomplete, so automation/monitoring
+    # can detect it. Ctrl-C keeps its 130 first.
     if interrupted or logout_interrupted:
         sys.exit(130)
-    sys.exit(1 if failed_count else 0)
+    sys.exit(1 if failed_count or log_failed else 0)
 
 if __name__ == "__main__":
     main()  # Run the main function

@@ -180,8 +180,12 @@ def build_row(record, parent_refid, depth=0, path=""):
                            or matching[0].get("date_type") != "single"):
             # a range (or a non-single/untyped date): a one-value CSV cell
             # cannot express it, so --update-only will refuse to change it
+            # the stored date_type is named only from the standard list,
+            # never quoted (it comes from the server's reply)
+            kind = col.date_type_text(matching[0].get("date_type"))
             shape = ("has an end date" if matching[0].get("end")
-                     else f"has date_type {matching[0].get('date_type') or 'missing'}")
+                     else "has an unrecognized date_type" if kind == "unrecognized"
+                     else f"has date_type {kind}")
             warnings.append(f"'{label}' date {shape} - --update-only will refuse to change it")
 
     extents = record.get("extents") or []
@@ -801,14 +805,13 @@ def write_filled_csv(headers, rows, path, provenance=None, extra_columns=()):
     for extra in reversed(extra_columns):
         if extra not in fieldnames:
             fieldnames.insert(at, extra)
-    tmp_path = path + ".tmp"
-    with open(tmp_path, "w", newline="", encoding="utf-8") as f:
+    def write(f):
         if provenance:
             f.write(f"# {provenance}\n")
         writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(rows)
-    os.replace(tmp_path, path)
+    col.save_via_temp(path, write, newline="")
 
 
 def export_records(client, level, parent_filter_refid=None):
@@ -989,14 +992,14 @@ def write_export_csv(rows, path, extra_headers=(), provenance=None):
     origin; every tool's CSV reader skips '#' lines (col.open_csv)."""
     fieldnames = [c for c in EXPORT_COLUMNS
                   if c not in OPTIONAL_EXPORT_COLUMNS or c in extra_headers]
-    tmp_path = path + ".tmp"
-    with open(tmp_path, "w", newline="", encoding="utf-8") as f:
+
+    def write(f):
         if provenance:
             f.write(f"# {provenance}\n")
         writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(rows)
-    os.replace(tmp_path, path)
+    col.save_via_temp(path, write, newline="")
 
 
 def fill_output_paths(sheet_path):
@@ -1460,8 +1463,7 @@ def write_check_csv(outcomes, sheet, path, provenance=None):
         values = sorted({r[field] or "" for r in o["rows"]})
         return " / ".join(values)
 
-    tmp_path = path + ".tmp"
-    with open(tmp_path, "w", newline="", encoding="utf-8") as f:
+    def write(f):
         if provenance:
             f.write(f"# {provenance}\n")
         writer = csv.writer(f)
@@ -1473,7 +1475,7 @@ def write_check_csv(outcomes, sheet, path, provenance=None):
                              cell(o, "created", col.CREATED_LOOKUP),
                              cell(o, "hold", col.HOLD), cell(o, "issue", col.ISSUE),
                              "; ".join(o["facts"])])
-    os.replace(tmp_path, path)
+    col.save_via_temp(path, write, newline="")
 
 
 def run_check(list_path, csv_path=None, source=None):
