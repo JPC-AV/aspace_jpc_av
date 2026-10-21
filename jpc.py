@@ -472,7 +472,8 @@ COMMANDS = {
                     was checked. Or the --output CSV could not be saved;
                     the check itself ran and its result is on screen.
     {warn}{bold}2{reset}    Review     Something needs review or could not be checked.
-                    Also: an argument was rejected.
+                    Also: an argument was rejected, or a creds.py setting
+                    was refused before anything ran.
     {warn}{bold}130{reset}  Stopped    Interrupted with Ctrl-C. Airtable and ArchivesSpace
                     are unchanged. With --output, a file at PATH may be an
                     older report - its presence does not mean this run saved
@@ -575,7 +576,8 @@ COMMANDS = {
                     If the ready file fails after the review file was saved,
                     the message names the review file to delete.
     {warn}{bold}2{reset}    Review     Some rows need human review - expected; both files
-                    are saved. Also: an argument was rejected, or an output
+                    are saved. Also: an argument was rejected, a creds.py
+                    setting was refused before anything ran, or an output
                     file already exists (nothing is saved).
     {warn}{bold}130{reset}  Stopped    Interrupted with Ctrl-C. Each file is saved whole or
                     not at all, but not as a pair. The review file is saved
@@ -1436,7 +1438,8 @@ COMMANDS = {
                     missing folder, or cancelled at the yes prompt (nothing
                     written, nothing renamed). Or writing the log failed
                     after it opened: the run stopped before its next change.
-    {warn}{bold}2{reset}    Refused    An argument was rejected; nothing was done.
+    {warn}{bold}2{reset}    Refused    An argument was rejected, or a creds.py setting was
+                    refused before anything ran; nothing was done.
     {warn}{bold}130{reset}  Stopped    Interrupted with Ctrl-C. While planning, nothing was
                     written; after writing began, RESULT shows what each
                     folder reached.""",
@@ -1687,8 +1690,12 @@ def _refusal(verb, arg):
         return f"--env is not used by jpc-{verb} ({reason})"
     if not arg.startswith("-"):
         wanted = " or ".join(f"{flag} {metavar}" for flag, metavar, _, _ in input_flags(verb))
-        return (f"unexpected {arg!r} - give the input as {wanted}, "
-                f"and flags only from: {', '.join(allowed)}")
+        return (f"unexpected word (not shown, in case it is a password) - give the input as "
+                f"{wanted} (in quotes if it has spaces), and flags only from: "
+                f"{', '.join(allowed)}")
+    if name not in known_flags():
+        return (f"an unknown option (not shown, in case it is a password) is not allowed "
+                f"with jpc-{verb} - allowed: {', '.join(allowed)}")
     hint = spec.get("elsewhere", {}).get(name) or ELSEWHERE.get(name)
     if "=" in arg:
         hint = f"write it as {name} VALUE (two words)" if name in allowed else hint
@@ -1701,6 +1708,16 @@ def allowed_flags(verb):
     spec = COMMANDS[verb]
     flags = [flag for flag, _, _, _ in input_flags(verb)] + list(spec["extras"])
     return flags + (["--env"] if spec["aspace"] else [])
+
+
+def known_flags():
+    """Every option name the launcher declares - any command's own flags,
+    --env and every name with a refusal hint. A refusal names an option
+    only when it is one of these; anything else typed is not shown."""
+    names = {"--env"} | set(ELSEWHERE)
+    for verb, spec in COMMANDS.items():
+        names.update(allowed_flags(verb), spec.get("elsewhere", {}))
+    return names
 
 
 def build(verb, value, env, extras, flag=None):
@@ -2074,7 +2091,7 @@ def overview(args=None):
     word = rest[0]
     if word in COMMANDS:
         return refuse(None, f"the command is jpc-{word} (with a hyphen): jpc-{word} --help")
-    return refuse(None, f"unknown {shown(word)!r} - the commands are "
+    return refuse(None, "unknown word (not shown, in case it is a password) - the commands are "
                         f"{', '.join('jpc-' + v for v in ORDER)} (jpc --help lists them)")
 
 

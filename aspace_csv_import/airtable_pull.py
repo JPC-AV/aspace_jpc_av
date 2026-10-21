@@ -200,6 +200,18 @@ def _error_explanation(resp):
     return explanation or "details not shown"
 
 
+# Airtable view types a refusal may name (not claimed complete): anything
+# else in a schema reply's view type is described, never quoted - it is
+# text from the reply, not a fixed description.
+VIEW_TYPES = frozenset({"grid", "form", "calendar", "gallery", "kanban", "timeline", "block"})
+
+
+def known_view_type(value):
+    """The view type if it is one listed above, else None - checked as text
+    first, so an odd value (a list, an object) is never looked up."""
+    return value if isinstance(value, str) and value in VIEW_TYPES else None
+
+
 def fetch_view_columns(token, view_name):
     """Resolve the view by exact name (or view ID) and return
     (view, [(field_id, field_name, field_type), ...]) in the view's column order."""
@@ -212,17 +224,21 @@ def fetch_view_columns(token, view_name):
     views = table.get("views", [])
     view = next((v for v in views if v.get("name") == view_name or v.get("id") == view_name), None)
     if view is None:
-        names = "\n".join(f"      {v.get('name')}" + ("" if v.get("type") == "grid"
-                                                      else f"  ({v.get('type')} - not pullable)")
-                          for v in views)
+        names = "\n".join(f"      {v.get('name')}" + (
+            "" if v.get("type") == "grid"
+            else f"  ({known_view_type(v.get('type')) or 'unrecognized type'} - not pullable)")
+            for v in views)
         raise PullError(f"no view named '{view_name}' in {table.get('name')} "
                         f"(names must match exactly). Views:\n{names}")
     if view.get("type") != "grid":
-        raise PullError(f"view '{view_name}' is a {view.get('type')} view - only grid views "
-                        f"can be pulled (Airtable reports columns for grid views only)")
+        kind = known_view_type(view.get("type"))
+        raise PullError(f"view '{view_name}' is "
+                        + (f"a {kind} view" if kind else "a view of an unrecognized type (not shown)")
+                        + " - only grid views can be pulled (Airtable reports columns for grid "
+                          "views only)")
 
     visible = view.get("visibleFieldIds")
-    if not visible:
+    if not isinstance(visible, list) or not visible:
         raise PullError(f"Airtable did not report the columns of view '{view_name}'")
     # The primary field is always shown in a grid view; make sure it leads.
     primary = table.get("primaryFieldId")
@@ -230,9 +246,11 @@ def fetch_view_columns(token, view_name):
         visible = [primary] + list(visible)
 
     fields = {f.get("id"): f for f in table.get("fields", [])}
-    missing = [fid for fid in visible if fid not in fields]
+    # an ID that is not text is never looked up, only counted
+    missing = [fid for fid in visible if not isinstance(fid, str) or fid not in fields]
     if missing:
-        raise PullError(f"view lists field(s) the table schema does not: {', '.join(missing)}")
+        raise PullError(f"view lists {len(missing)} field(s) the table schema does not "
+                        f"(field IDs not shown)")
     # The hold columns travel with every pull, even when the view hides
     # them: whether an item is held must never depend on the view's layout.
     by_name = {f.get("name"): fid for fid, f in fields.items()}

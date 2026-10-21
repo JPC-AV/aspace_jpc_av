@@ -360,7 +360,15 @@ def select_environment(name: str) -> None:
         kind = url_problem(value)
         if kind:
             raise ValueError(_url_refusal(name, field_name, kind, value))
+    # The repository and resource IDs, by login()'s own rule (a value that
+    # is set must be digits), before anything is assigned or shown: a
+    # password pasted into one never reaches a Target line or a log. A
+    # missing one keeps its existing later messages; nothing is converted.
     repo_id, resource_id = env.get("repo_id"), env.get("resource_id")
+    for field_name, value in (("repo_id", repo_id), ("resource_id", resource_id)):
+        if value and not str(value).isdigit():
+            raise ValueError(f"Environment {name!r}: {field_name} must be digits only "
+                             f"(value not shown) - see creds_template.py")
     ACTIVE_ENV = name
     ASPACE_URL = env.get("baseURL")
     ASPACE_USERNAME = env.get("user")
@@ -529,12 +537,13 @@ class ASpaceClient:
         self.last_failure_definitive = True
 
     # -- session ------------------------------------------------------------
-    def _url_unusable(self) -> bool:
-        """True when the client's CURRENT base URL is unsafe to use - checked
-        at every use, not only when the client was made, so a URL changed
-        afterwards is caught before any request is built. A missing one is
-        left to the existing checks."""
-        return self.base_url not in (None, "") and url_problem(self.base_url) is not None
+    def _url_unusable(self, base_url) -> bool:
+        """True when `base_url` - the caller's one reading of the client's
+        CURRENT base URL, taken at each request attempt and logout - is
+        unsafe to use. The caller requests exactly that reading, so a URL
+        changed afterwards is checked by the next attempt and never used by
+        this one. A missing one is left to the existing checks."""
+        return base_url not in (None, "") and url_problem(base_url) is not None
 
     def _session_header_unusable(self) -> bool:
         """True when a session header is installed but is not a usable token
@@ -653,14 +662,16 @@ class ASpaceClient:
     def logout(self) -> bool:
         if not self.session_token:
             return True
-        if self._url_unusable():
+        # one reading, as in login: the value checked is the value requested
+        base_url = self.base_url
+        if self._url_unusable(base_url):
             logging.warning(f"Logout not attempted: {URL_REFUSED}")
             return False
         if self._session_header_unusable():
             logging.warning(f"Logout not attempted: {SESSION_REFUSED}")
             return False
         try:
-            response = self.http.post(f"{self.base_url}/logout", timeout=TIMEOUT,
+            response = self.http.post(f"{base_url}/logout", timeout=TIMEOUT,
                                       allow_redirects=False)
         except requests.RequestException as e:
             logging.warning(f"Logout error: {type(e).__name__}")
@@ -709,7 +720,11 @@ class ASpaceClient:
             logging.error(f"{method} refused: the endpoint is not a path on the "
                           f"configured server (not shown)")
             return None
-        if self._url_unusable():
+        # One reading for this attempt: the value checked is the value
+        # requested. Each retry, and the resend after a 412 re-login, is a
+        # new attempt with its own reading and check.
+        base_url = self.base_url
+        if self._url_unusable(base_url):
             # nothing was sent: a definite local failure (for a GET,
             # _request restores the earlier write's status)
             logging.error(f"{method} {endpoint} refused: {URL_REFUSED}")
@@ -720,7 +735,7 @@ class ASpaceClient:
             return None
         if method not in ("GET", "POST", "DELETE"):
             raise ValueError(f"Unsupported HTTP method: {method}")
-        url = f"{self.base_url}{endpoint}"
+        url = f"{base_url}{endpoint}"
         try:
             # Never follow redirects: a 3xx would re-send a write to a
             # server-chosen location AFTER the scope locks approved the

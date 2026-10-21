@@ -359,8 +359,8 @@ def check_schema(token):
         matches = [f for f in table.get("fields", []) if f.get("name") == name]
         if len(matches) != 1:
             raise PullError(f"{table.get('name')} has no field named {name!r}")
-        if matches[0].get("type") != ftype:
-            raise PullError(f"{table.get('name')}.{name} is a {matches[0].get('type')} field, "
+        if matches[0].get("type") != ftype:   # the reply's type itself is never shown
+            raise PullError(f"{table.get('name')}.{name} has another field type (not shown), "
                             f"expected {ftype} - nothing written")
         return matches[0]
 
@@ -382,8 +382,8 @@ def check_schema(token):
         raise PullError(misspelled + " - nothing written")
     hold = import_fields.get(col.HOLD)
     if hold is not None and hold.get("type") != "checkbox":
-        raise PullError(f"{col.HOLD} is a {hold.get('type')} field, expected checkbox "
-                        f"- nothing written")
+        raise PullError(f"{col.HOLD} has another field type (not shown), expected "
+                        f"checkbox - nothing written")
     issue = import_fields.get(col.ISSUE)
     return {
         "hold": hold["id"] if hold else None,

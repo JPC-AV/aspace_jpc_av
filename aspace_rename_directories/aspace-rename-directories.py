@@ -258,7 +258,8 @@ def get_colored_help():
        or a creds.py or login problem; or cancelled at the yes prompt
        (nothing written, nothing renamed); or writing the log failed after
        it opened (the run stopped before its next change; "NOT saved log")
-    {C.YELLOW}2{C.RESET}  a bad argument or combination - nothing was done
+    {C.YELLOW}2{C.RESET}  a bad argument or combination, or a creds.py setting refused
+       before anything ran - nothing was done
     {C.YELLOW}130{C.RESET} interrupted (Ctrl-C) - while planning nothing was written; after
        writing began, RESULT shows what each folder reached"""),
     ])

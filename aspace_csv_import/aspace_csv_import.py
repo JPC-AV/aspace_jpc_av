@@ -1127,6 +1127,29 @@ def positive_id(value) -> bool:
     return type(value) is int and value > 0
 
 
+# A ref_id the compact outputs (the status line, the receipt CSV and JSON)
+# may show: text in ArchivesSpace's published ref_id shape - letters,
+# digits and . _ : -, 1 to 255 characters. Deliberately not the rename
+# tool's 32-hex rule: imported records carry other ref_ids (newref77).
+REF_ID_TEXT_RE = re.compile(r"[A-Za-z0-9._:-]{1,255}")
+
+
+def usable_ref_id(value) -> str:
+    """value when it is a usable textual ref_id, else ''."""
+    return value if isinstance(value, str) and REF_ID_TEXT_RE.fullmatch(value) else ""
+
+
+def compact_ref_id(value, uri: str) -> str:
+    """The ref_id a row's compact outputs carry. A missing or empty one is
+    blank quietly; any other unusable value is blank with one fixed warning,
+    never shown. The record itself is kept as read (the records file)."""
+    ref_id = usable_ref_id(value)
+    if not ref_id and value not in (None, ""):
+        logging.warning(f"{uri} has an unusable ref_id (not shown) - left blank in the "
+                        f"status line and receipts (the records file keeps the record as read)")
+    return ref_id
+
+
 def in_repository(value, collection: str) -> bool:
     """True only for exactly /repositories/<configured repo>/<collection>/<n>.
     A link taken from a reply (a parent, a container) is followed only then:
@@ -1255,9 +1278,10 @@ def create_archival_object(row: Dict, client: ArchivesSpaceClient,
             # ref_id blank, never as a failure.
             try:
                 created = client.get(result['uri'])
-                if (record_identity_ok(created, result['uri'], catalog_number)
-                        and created.get('ref_id')):
-                    result['ref_id'] = created['ref_id']
+                if record_identity_ok(created, result['uri'], catalog_number):
+                    # the snapshot needs only the record's identity; its
+                    # compact ref_id is separate (blank when missing or unusable)
+                    result['ref_id'] = compact_ref_id(created.get('ref_id'), result['uri'])
                     result['record'] = created  # the read-back, for the records file
                     result['top_container'] = fetch_linked_container(client, created, catalog_number)
                 else:
@@ -1365,7 +1389,9 @@ def update_archival_object(row: Dict, client: ArchivesSpaceClient,
         return None, {}, [
             f"Record at {existing_uri} no longer matches item {catalog_number} "
             f"({mismatch}) - refusing to update"]
-    
+    # its compact ref_id, read once; existing_obj (the update payload) is untouched
+    ref_id = compact_ref_id(existing_obj.get("ref_id"), existing_uri)
+
     # Check for date errors before proceeding (non-strict: an unchanged
     # legacy date outside the range must not block an unrelated edit)
     dates, date_errors = create_date_objects(row, strict_range=False)
@@ -1387,8 +1413,7 @@ def update_archival_object(row: Dict, client: ArchivesSpaceClient,
     
     if not changes:
         logging.info(f"No changes needed for: {catalog_number}")
-        unchanged = {"uri": existing_uri, "unchanged": True,
-                     "ref_id": existing_obj.get("ref_id", "")}
+        unchanged = {"uri": existing_uri, "unchanged": True, "ref_id": ref_id}
         if not dry_run:
             # the verified record IS its own snapshot - but a dry run writes
             # no records file at all, so it collects nothing either
@@ -1539,13 +1564,13 @@ def update_archival_object(row: Dict, client: ArchivesSpaceClient,
     if dry_run:
         logging.info(f"[DRY RUN] Would update archival object: {catalog_number} at {existing_uri}")
         return {"uri": existing_uri, "dry_run": True, "updated": True,
-                "ref_id": existing_obj.get("ref_id", "")}, changes, []
+                "ref_id": ref_id}, changes, []
     else:
         result = client.update_record(existing_uri, existing_obj)
 
         if result is not None:  # a 2xx with an empty body is still a success
             logging.info(f"Successfully updated archival object: {catalog_number}")
-            result["ref_id"] = existing_obj.get("ref_id", "")
+            result["ref_id"] = ref_id
             # Read the record back as stored (lock_version, system fields,
             # server-side normalization) rather than trusting what was sent.
             try:
@@ -1601,7 +1626,7 @@ def make_row_result(row_num: int, row: Dict, status: str = "pending",
         "status": status,
         "message": message,
         "uri": uri,
-        "ref_id": ref_id or '',
+        "ref_id": usable_ref_id(ref_id),     # compact outputs: a usable ref_id or blank
         "changes": changes or {}
     }
     for column in col.REQUIRED_COLUMNS:
@@ -1744,7 +1769,7 @@ def process_csv_row(row: Dict, row_num: int, client: ArchivesSpaceClient,
         elif ao_result:
             result["status"] = "created"
             result["uri"] = ao_result.get('uri', '')
-            result["ref_id"] = ao_result.get('ref_id', '')
+            result["ref_id"] = usable_ref_id(ao_result.get('ref_id'))
             if ao_result.get('record'):
                 result["record"] = ao_result['record']
                 result["top_container"] = ao_result.get('top_container')

@@ -825,6 +825,26 @@ aborts with no writes.
 
 ## Version History
 
+- **v3.6.10** (2026): write-back rechecks, truthful importer logs, values
+  not repeated
+  - The write-back reads each batch's rows again just before writing it
+    (and after any rate-limit wait) and leaves changed rows alone; a failed
+    screen output stops further writes and still tries to save the receipt
+  - The CSV importer checks its log before the yes prompt and every catalog
+    write: if the log cannot be written it sends no further writes, keeps
+    each row's outcome and says "NOT saved log" (exit 1; lost receipts and
+    Ctrl-C keep 3 and 130)
+  - A repo_id or resource_id that is not digits is refused by name when the
+    environment is chosen, before anything is shown (jpc-check, jpc-fill and
+    jpc-rename then exit 2); jpc- commands no longer repeat a stray word or
+    an unknown option name
+  - Airtable schema refusals describe an unexpected view or field type, and
+    count unknown column IDs, instead of quoting them; a ref ID that is not
+    plain text is left out of the importer's status line and receipts; each
+    ArchivesSpace request uses the one URL it checked
+  - After pulling: nothing to reinstall; reinstalling only refreshes the
+    version `python -m pip show jpc-av-tools` reports
+
 - **v3.6.9** (2026): honest rename logs, safer report saving
   - The rename tool notices when writing its log fails after the log
     opened: it starts no further change, says the log was NOT saved and
