@@ -59,7 +59,7 @@ More detailed descriptions of each file and usage in directory-specific README.m
 | `aspace_csv_import.py` | Run via command line | Main script for importing CSV metadata to ArchivesSpace. |
 | `aspace_csv_export.py` | Run via command line | Exports AV records to an import-shaped CSV in tree order with hierarchy and audit columns; `--mads-live` checks MADS; `--check` says which catalog numbers are in ArchivesSpace and whether an Airtable pull agrees; `--fill-parents` fills parent ref IDs. Read-only. |
 | `airtable_pull.py` | Run via command line | Saves one Airtable view of `<<< ASpace_import >>>` as a CSV. Read-only. |
-| `airtable_writeback.py` | Run via command line | After a production create run, records each created item's parent and `ASpace Item Record Created` = Yes in Airtable, after you confirm. |
+| `airtable_writeback.py` | Run via command line | After a production create run, records each created item's parent, its own ref ID (`ASpace Item RefID`) and `ASpace Item Record Created` = Yes in Airtable, after you confirm. |
 | `check_mads.py` | Run via command line | Checks which catalog numbers are live in MADS (public URLs only), from a list or a batch folder. Everyday runs: `jpc-mads`. |
 | `check_extent_types.py` | Run via command line | Troubleshooting: lists valid extent types in your ASpace instance. The import's dry run already checks formats. |
 | `sheet_rules.py` | Backend | The sheet contract: column names and the validation rules every tool applies. |
@@ -323,7 +323,7 @@ python3 aspace_csv_export.py --level item --mads-live
 
 ### airtable_pull and airtable_writeback
 
-`airtable_pull.py VIEW` saves one grid view of the Airtable `<<< ASpace_import >>>` table as a CSV (read-only). After a real production create run, `airtable_writeback.py REPORT.json --run` records the results in Airtable: each created row's parent and `ASpace Item Record Created` = Yes. It lists every change row by row and writes only after you type `yes`. Tokens go in `creds.py` as `airtable_pat_read_only` (all reads) and `airtable_pat_write` (writes only).
+`airtable_pull.py VIEW` saves one grid view of the Airtable `<<< ASpace_import >>>` table as a CSV (read-only). After a real production create run, `airtable_writeback.py REPORT.json --run` records the results in Airtable: each created row's parent, its own ref ID (`ASpace Item RefID`) and `ASpace Item Record Created` = Yes. It lists every change row by row and writes only after you type `yes`. Tokens go in `creds.py` as `airtable_pat_read_only` (all reads) and `airtable_pat_write` (writes only).
 
 ```bash
 cd aspace_csv_import

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 Write a finished import run back to Airtable: for every record the run
-really created in production, put its parent ref ID into
-<<< ASpace_import >>> and set ASpace Item Record Created to Yes in
+really created in production, put its parent ref ID and its own ref ID
+into <<< ASpace_import >>> and set ASpace Item Record Created to Yes in
 ((( ASpace_tracking ))).
 
 Preview by default; --run writes. Reads with airtable_pat_read_only,
@@ -18,6 +18,7 @@ import os
 import re
 import secrets
 import shlex
+import shutil
 import stat
 import sys
 import time
@@ -40,6 +41,7 @@ IMPORT_TABLE_ID = pull.TABLE_ID          # <<< ASpace_import >>>
 TRACKING_TABLE_ID = "tbl1E9gmY6VgMq4Ya"  # ((( ASpace_tracking )))
 
 PARENT_FIELD = "ASpace Parent RefID"            # text, in ASpace_import
+ITEM_REFID_FIELD = "ASpace Item RefID"          # text, in ASpace_import: the item's own ref ID
 IMPORT_LINK_FIELD = "CATALOG_NUMBER"            # link to JPCA-AV_SOURCE
 TRACKING_LINK_FIELD = "JPCA-AV_SOURCE"          # link to JPCA-AV_SOURCE
 CREATED_FIELD = "ASpace Item Record Created"    # single select, in ASpace_tracking
@@ -58,6 +60,10 @@ AIRTABLE_PAT_WRITE = (creds_loader.setting("airtable_pat_write", "")
 WRITE_TOKEN = ("The Airtable write token", "airtable_pat_write", "AIRTABLE_PAT_WRITE")
 
 REF_ID_RE = re.compile(r"[0-9a-f]{32}")
+# The item's own ref ID, in the shape the importer's receipts accept:
+# ArchivesSpace's published ref_id shape - not the parent's 32-hex rule
+# above, since imported records carry other ref IDs (newref77)
+ITEM_REF_ID_RE = re.compile(r"[A-Za-z0-9._:-]{1,255}")
 # An Airtable record ID ("rec" and letters/digits) - the only text a re-check
 # puts into a formula: nothing that could quote or call anything
 AIRTABLE_ID_RE = re.compile(r"rec[A-Za-z0-9]{1,30}")
@@ -66,6 +72,7 @@ from console import (Colors, print_status, print_run_header,  # shared display  
                      print_result, print_saved, print_next_step, render_options,
                      help_screen, styled_parser, progress_count, close_progress,
                      started_by)
+import console  # noqa: E402 - the write progress line is closed by close_progress()
 PullError = pull.PullError
 
 
@@ -103,21 +110,26 @@ def get_colored_help():
         ("DESCRIPTION", f"""    After a real production import, records its results in Airtable. For each
     row the run CREATED:
       - {PARENT_FIELD} in {IMPORT_LABEL} gets the parent the import used
+      - {ITEM_REFID_FIELD} in {IMPORT_LABEL} gets the item's own ref ID,
+        from the record the import read back
       - {CREATED_FIELD} in {TRACKING_LABEL} is set to {CREATED_VALUE}
-    The parent is written and confirmed first; {CREATED_VALUE} is set only after.
+    The parent and item ref ID are written and confirmed first; {CREATED_VALUE} is set
+    only after. A blank {ITEM_REFID_FIELD} is filled on a later run too, even
+    when the parent and {CREATED_VALUE} are already there; an existing {CREATED_VALUE} is kept.
 
     Each batch's rows are read again just before they are written, and
-    again after any rate-limit wait. A row whose links, hold, parent or
-    {CREATED_VALUE} changed since the PLAN is left alone ("changed"); {CREATED_VALUE} is set only
-    while the parent read back is the import's. An edit made between that
-    read and the write can still be overwritten - Airtable cannot make a
-    write conditional.
+    again after any rate-limit wait. A row whose links, hold, parent, item
+    ref ID or {CREATED_VALUE} changed since the PLAN is left alone ("changed"); {CREATED_VALUE} is
+    set only while the parent and item ref ID read back are the import's.
+    An edit made between that read and the write can still be overwritten -
+    Airtable cannot make a write conditional. While writing, the run shows
+    each step and how many of its batches are done.
 
     Rows the run skipped, updated or refused are left alone. A row whose
-    Airtable parent already differs, that matches no row or several, that is
-    on hold in Airtable now, or whose read-back snapshot is missing, does not
-    match or is outside the report's resource, is listed for review and not
-    touched.
+    Airtable parent or item ref ID already differs, that matches no row or
+    several, that is on hold in Airtable now, whose item ref ID is missing
+    or unusable, or whose read-back snapshot is missing, does not match or
+    is outside the report's resource, is listed for review and not touched.
 
     Before Airtable is read, the report must be a real production create run
     whose recorded ArchivesSpace target (server URL, repository, resource)
@@ -134,8 +146,8 @@ def get_colored_help():
         ("EXAMPLES", f"""    {C.GREEN}${C.RESET} python3 aspace_csv_import/airtable_writeback.py import_reports/import_report_<stamp>.json --run
     {C.GREEN}${C.RESET} python3 aspace_csv_import/airtable_writeback.py REPORT.json --exclude-catalog JPC_AV_13500 --run"""),
         ("OUTPUT", """    With --run: airtable_writeback_<stamp>.csv next to the report - each row's
-    outcome (done / already done / partial / unknown / not started / changed
-    / review). "unknown" means a write may or may not have landed (lost
+    outcome (done / already done / partial / not confirmed / unknown / not
+    started / changed / review). "unknown" means a write may or may not have landed (lost
     response, server error, Ctrl-C); run the same command again to settle it.
     If the screen output fails (a closed pipe), nothing more is written; the
     run still tries to save the file and, when stderr is available, says
@@ -236,6 +248,24 @@ def load_records(summary):
     return records
 
 
+def item_ref_id(row, obj):
+    """The item's own ref ID - taken from its identity-verified read-back
+    snapshot, never from the parent ref ID or the record URI - and None,
+    or None and why the row is for review. The report row's ref_id, when
+    filled, must be usable and the same. No value is quoted, and the
+    snapshot is only read."""
+    ref = obj.get("ref_id")
+    if not (isinstance(ref, str) and ITEM_REF_ID_RE.fullmatch(ref)):
+        return None, "no usable item ref ID in the read-back snapshot"
+    compact = row.get("ref_id")
+    if compact not in (None, ""):
+        if not (isinstance(compact, str) and ITEM_REF_ID_RE.fullmatch(compact)):
+            return None, "the report's item ref ID is not usable"
+        if compact != ref:
+            return None, "the report's item ref ID differs from the read-back snapshot"
+    return ref, None
+
+
 def load_report(path, exclude=()):
     """(candidates, review, counts, excluded) from a real production import report.
 
@@ -244,8 +274,8 @@ def load_report(path, exclude=()):
     create run with a valid ArchivesSpace target, agree with each other, and
     match creds.py's production entry; otherwise the whole report stops.
 
-    candidates: [{catalog, parent, uri}] for rows the run created and read
-    back. review: [(catalog, note)] for created rows that cannot be written
+    candidates: [{catalog, parent, uri, title, item_ref}] for rows the run
+    created and read back. review: [(catalog, note)] for created rows that cannot be written
     back safely. counts: statuses of the rows left alone. excluded: the
     --exclude-catalog numbers, each of which must be a created row in the
     report - they are dropped before any Airtable planning.
@@ -338,8 +368,13 @@ def load_report(path, exclude=()):
         elif not (isinstance(resource, dict) and resource.get("ref") == resource_uri):
             review.append((catalog, "the read-back snapshot is not in the report's resource"))
         else:
-            candidates.append({"catalog": catalog, "parent": parent, "uri": uri,
-                               "title": (r.get(col.TITLE) or "").strip()})
+            item_ref, problem = item_ref_id(r, obj)
+            if problem:
+                review.append((catalog, problem))
+            else:
+                candidates.append({"catalog": catalog, "parent": parent, "uri": uri,
+                                   "title": (r.get(col.TITLE) or "").strip(),
+                                   "item_ref": item_ref})
     return candidates, review, counts, excluded
 
 # ==============================
@@ -365,6 +400,7 @@ def check_schema(token):
         return matches[0]
 
     parent = field(IMPORT_TABLE_ID, PARENT_FIELD, "singleLineText")
+    item_ref = field(IMPORT_TABLE_ID, ITEM_REFID_FIELD, "singleLineText")   # never created here
     import_link = field(IMPORT_TABLE_ID, IMPORT_LINK_FIELD, "multipleRecordLinks")
     tracking_link = field(TRACKING_TABLE_ID, TRACKING_LINK_FIELD, "multipleRecordLinks")
     created = field(TRACKING_TABLE_ID, CREATED_FIELD, "singleSelect")
@@ -388,7 +424,7 @@ def check_schema(token):
     return {
         "hold": hold["id"] if hold else None,
         "issue": issue["id"] if issue else None,
-        "parent": parent["id"], "import_link": import_link["id"],
+        "parent": parent["id"], "item_ref": item_ref["id"], "import_link": import_link["id"],
         "tracking_link": tracking_link["id"], "created": created["id"],
         "source_table": source_id, "source_primary": source.get("primaryFieldId"),
         "source_name": source.get("name", source_id),
@@ -439,15 +475,16 @@ def select_name(value):
 def build_plan(token, candidates):
     """Re-read Airtable and decide, per candidate, what (if anything) to write.
 
-    Each plan entry: catalog, parent, import_rec, tracking_rec, set_parent,
-    set_created, note (non-empty = review, nothing written)."""
+    Each plan entry: catalog, parent, item_ref, import_rec, tracking_rec,
+    set_parent, set_item, set_created, note (non-empty = review, nothing
+    written)."""
     ids = check_schema(token)
     print_status("info", "Reading Airtable - three tables, about a minute each...")
     sources = read_table(token, ids["source_table"], [ids["source_primary"]],
                          ids["source_name"], as_text=True)
     imports = read_table(token, IMPORT_TABLE_ID,
-                         [f for f in (ids["import_link"], ids["parent"], ids["hold"],
-                                      ids["issue"]) if f],
+                         [f for f in (ids["import_link"], ids["parent"], ids["item_ref"],
+                                      ids["hold"], ids["issue"]) if f],
                          IMPORT_LABEL)
     trackings = read_table(token, TRACKING_TABLE_ID, [ids["tracking_link"], ids["created"]],
                            TRACKING_LABEL)
@@ -473,7 +510,7 @@ def build_plan(token, candidates):
     plan = []
     for c in candidates:
         entry = {**c, "import_rec": None, "tracking_rec": None,
-                 "set_parent": False, "set_created": False, "note": ""}
+                 "set_parent": False, "set_item": False, "set_created": False, "note": ""}
         plan.append(entry)
         source_ids = by_catalog.get(c["catalog"], [])
         if len(source_ids) != 1:
@@ -506,9 +543,17 @@ def build_plan(token, candidates):
             entry["note"] = (f"Airtable already has parent {current}; the import used "
                              f"{c['parent']} - left alone")
             continue
+        # the item's own ref ID: written only into a blank cell, never over
+        # another value - and Airtable's value is not quoted
+        current_item = _text(imp.get("fields", {}).get(ids["item_ref"]))
+        if current_item is None or (current_item and current_item != c["item_ref"]):
+            entry["note"] = f"Airtable already has a different {ITEM_REFID_FIELD} - left alone"
+            continue
         created_now = select_name(trk.get("fields", {}).get(ids["created"]))
         entry["current_parent"], entry["current_created"] = current, created_now
+        entry["current_item"] = current_item
         entry["set_parent"] = not current
+        entry["set_item"] = not current_item
         entry["set_created"] = created_now != CREATED_VALUE
     return plan, ids
 
@@ -554,11 +599,12 @@ def recheck(token, ids, rows, phase):
     changed: {catalog: what changed} for rows the PLAN no longer authorizes -
     their source record, import or tracking row is gone or relinked, the
     item is on hold, or a field changed. The words are fixed; no cell value
-    is quoted. satisfied: catalogs whose approved value is already there, so
-    their write is skipped. Before a parent write ("parent") the cell may
-    still be blank or already the approved parent; before Yes ("created") it
-    must be the approved parent - a cleared or changed parent stops the Yes.
-    A failed read raises PullError; nothing has been sent for these rows."""
+    is quoted. satisfied: catalogs whose approved values are already there,
+    so their write is skipped. Before the parent and item ref ID write
+    ("parent") each cell may still be blank or already the approved value;
+    before Yes ("created") both must be the approved values - a cleared or
+    changed parent or item ref ID stops the Yes. A failed read raises
+    PullError; nothing has been sent for these rows."""
     changed, ready = {}, []
     for e in rows:
         if all(AIRTABLE_ID_RE.fullmatch(str(e.get(k))) for k in
@@ -571,7 +617,8 @@ def recheck(token, ids, rows, phase):
     sources = read_records(token, ids["source_table"], [e["source_rec"] for e in ready],
                            [ids["source_primary"]], as_text=True)
     imports = read_records(token, IMPORT_TABLE_ID, [e["import_rec"] for e in ready],
-                           [f for f in (ids["import_link"], ids["parent"], ids["hold"]) if f])
+                           [f for f in (ids["import_link"], ids["parent"], ids["item_ref"],
+                                        ids["hold"]) if f])
     trackings = read_records(token, TRACKING_TABLE_ID, [e["tracking_rec"] for e in ready],
                              [ids["tracking_link"], ids["created"]])
     satisfied = set()
@@ -595,6 +642,11 @@ def recheck(token, ids, rows, phase):
                        else {e["parent"]})
             if parent not in allowed:
                 facts.append(f"{PARENT_FIELD} changed")
+            item = _text(imp.get(ids["item_ref"]))
+            allowed = ({e["current_item"], e["item_ref"]} if phase == "parent"
+                       else {e["item_ref"]})
+            if item not in allowed:
+                facts.append(f"{ITEM_REFID_FIELD} changed")
         if trk is None:
             facts.append(f"its {TRACKING_LABEL} row is gone")
         else:
@@ -607,7 +659,8 @@ def recheck(token, ids, rows, phase):
                 facts.append(f"{CREATED_FIELD} changed")
         if facts:
             changed[e["catalog"]] = "; ".join(facts)
-        elif phase == "parent" and _text(imp.get(ids["parent"])) == e["parent"]:
+        elif (phase == "parent" and _text(imp.get(ids["parent"])) == e["parent"]
+              and _text(imp.get(ids["item_ref"])) == e["item_ref"]):
             satisfied.add(e["catalog"])
         elif phase == "created" and select_name(trk.get(ids["created"])) == CREATED_VALUE:
             satisfied.add(e["catalog"])
@@ -695,15 +748,20 @@ def airtable_patch(table_id, records, token):
 INTERRUPTED = "interrupted (Ctrl-C) - rerun to re-check and finish"
 
 
+NOT_CONFIRMED = "not confirmed"   # sent, but the reply did not show the value
+
+
 def initial_outcome(e):
-    """A row's outcome before anything is written for it."""
+    """A row's outcome before anything is written for it: already done only
+    when none of its three fields needs writing."""
     return "review" if e["note"] else (
-        "already done" if not (e["set_parent"] or e["set_created"]) else "not started")
+        "already done" if not (e["set_parent"] or e["set_item"] or e["set_created"])
+        else "not started")
 
 
 def complete_partials(plan):
-    """A row whose parent was just confirmed and whose Yes was already set
-    is complete (never a row whose outcome is unknown)."""
+    """A row whose parent and item ref ID were just confirmed and whose Yes
+    was already set is complete (never a row whose outcome is unknown)."""
     for e in plan:
         if e["outcome"] == "partial" and not e["set_created"]:
             e["outcome"] = "done"
@@ -725,35 +783,80 @@ def stop_if_output_lost():
                             f"to Airtable")
 
 
+def show_progress(text, last=False, brief=None):
+    """One step of the write progress, flushed at once. In a terminal the
+    batch updates are ONE line replaced in place - in their `brief` wording,
+    cut to the terminal's width (80 columns when unknown) so that a line
+    never wraps into a second one the next update could not clear; the next
+    warning or the RESULT closes it (close_progress). A step's closing line
+    (last) ends it as an ordinary finished line, in full. Anywhere else each
+    step is its own line, in full. It goes through the run's Screen, so a
+    failed progress line stops the next send (stop_if_output_lost) like any
+    other lost output."""
+    if not sys.stdout.isatty():
+        print_status("info", text)
+        sys.stdout.flush()
+    elif last:
+        print("\r\033[K", end="")              # the in-place line, cleared
+        console._PROGRESS_OPEN = False
+        print_status("info", text)
+        sys.stdout.flush()
+    else:
+        room = max(shutil.get_terminal_size((80, 24)).columns - 5, 20)  # "[>] ", one spare
+        line = brief or text
+        if len(line) > room:
+            line = line[:room - 3] + "..."
+        print(f"\r{Colors.CYAN}[>]{Colors.RESET} {line}\033[K", end="", flush=True)
+        console._PROGRESS_OPEN = True
+
+
 def execute(plan, ids, token, inflight=None, *, recheck):
-    """Parents first (confirmed from the write's response), then Yes for rows
-    whose parent is in place. Sets each entry's outcome; stops on the first
-    refusal, lost response or Ctrl-C and returns its message (None when
-    everything went through). A batch whose write may or may not have
-    landed is marked "unknown" - a rerun re-reads Airtable and settles it.
-    `inflight`, when given, is the list the batch being written is kept in,
-    so the caller still knows it if a second Ctrl-C escapes this function.
+    """The parent and item ref ID first (one write per row, confirmed from
+    the write's response), then Yes for rows whose parent and item ref ID
+    are in place; an existing Yes is never written again. Sets each entry's
+    outcome; stops on the first refusal, lost response or Ctrl-C and returns
+    its message (None when everything went through). A batch whose write
+    may or may not have landed is marked "unknown" - a rerun re-reads
+    Airtable and settles it. `inflight`, when given, is the list the batch
+    being written is kept in, so the caller still knows it if a second
+    Ctrl-C escapes this function.
 
     recheck(rows, phase) -> (changed, satisfied) reads a batch's rows again
     just before it is sent, and again after every rate-limit wait (see
     recheck()). A changed row is left alone - "changed", or "partial" with
-    its note when this run already wrote its parent - and never replaced by
-    another row or a new plan; a satisfied write is skipped. It runs while
-    no batch is in flight, so its failure or a Ctrl-C during it makes no row
-    unknown. So does a failure of the screen output, checked before each send."""
+    its note when this run already wrote its parent or item ref ID - and
+    never replaced by another row or a new plan; a satisfied write is
+    skipped. It runs while no batch is in flight, so its failure or a Ctrl-C
+    during it makes no row unknown. So does a failure of the screen output,
+    checked before each send.
+
+    Progress: each step is announced with its rows and batches; a line is
+    flushed before each batch is re-checked (the first, and again after a
+    rate-limit wait) and after its reply - only once the batch's outcomes
+    are recorded and it is no longer in flight, so a progress line that
+    fails or is interrupted never costs a confirmed fact."""
     for e in plan:
         e["outcome"] = initial_outcome(e)
-        e["parent_ok"] = not e["note"] and not e["set_parent"]
+        e["meta_ok"] = not e["note"] and not (e["set_parent"] or e["set_item"])
         e["wrote"] = False            # did this run write anything to the row
     # the batch being written; its outcome is unknown if interrupted
     batch = inflight if inflight is not None else []
+    meta_todo = [e for e in plan if not e["note"] and (e["set_parent"] or e["set_item"])]
+    steps = bool(meta_todo) + any(not e["note"] and e["set_created"] for e in plan)
+    step = [0]
 
-    def send(rows, phase, table_id, record, field, value):
+    def send(rows, phase, table_id, record, fields, where, tally):
         """Re-check `rows`, then PATCH the ones still authorized and not
-        already in place - each row's `record` ID, `field` set to value(row);
-        after a 429, wait, re-check and try again.
+        already in place - each row's `record` ID with fields(row); after a
+        429, wait, re-check and try again. where = (step name, its short
+        name for a terminal line, batch, of n).
         -> (rows sent, the reply's records by ID)."""
+        name, short, k, n = where
         for attempt in range(pull.RATE_LIMIT_RETRIES + 1):
+            show_progress(f"{name}: batch {k}/{n} - re-checking {len(rows)} row(s)"
+                          f"{' again after the rate-limit wait' if attempt else ''}...",
+                          brief=(f"{short}: batch {k}/{n}, {'rate limit: ' if attempt else ''}"
+                                 f"re-checking {len(rows)} rows..."))
             stop_if_output_lost()
             changed, satisfied = recheck(rows, phase)
             for e in rows:
@@ -762,10 +865,13 @@ def execute(plan, ids, token, inflight=None, *, recheck):
                                  f"{'Yes not set' if e['wrote'] else 'left alone'}; run the "
                                  f"same command again to see the current plan")
                     e["outcome"] = "partial" if e["wrote"] else "changed"
+                    tally["changed"] += 1
                 elif e["catalog"] in satisfied and phase == "parent":
-                    e["parent_ok"] = True     # already the approved parent: not written
+                    e["meta_ok"] = True       # already the approved values: not written
+                    tally["in place"] += 1
                 elif e["catalog"] in satisfied:
                     e["outcome"] = "done" if e["wrote"] else "already done"
+                    tally["in place"] += 1
             rows = [e for e in rows if e["catalog"] not in changed
                     and e["catalog"] not in satisfied]
             if not rows:
@@ -773,7 +879,7 @@ def execute(plan, ids, token, inflight=None, *, recheck):
             stop_if_output_lost()
             batch[:] = rows
             try:
-                back = airtable_patch(table_id, [{"id": e[record], "fields": {field: value(e)}}
+                back = airtable_patch(table_id, [{"id": e[record], "fields": fields(e)}
                                                  for e in rows], token)
             except RateLimited:
                 batch.clear()                 # refused: definitely not applied
@@ -786,32 +892,67 @@ def execute(plan, ids, token, inflight=None, *, recheck):
             return rows, back
         return [], {}
 
+    def write_step(name, short, what, todo, phase, table_id, record, fields, confirmed):
+        """One step: announce it, send its batches, record each sent row's
+        confirmed outcome (confirmed(row, reply fields) -> outcome, ok) and
+        show progress after each batch is no longer in flight."""
+        step[0] += 1
+        n = -(-len(todo) // PATCH_BATCH)
+        print_status("info", f"Writing {step[0]} of {steps}: {what} - {len(todo)} row(s) "
+                             f"in {n} batch(es)")
+        tally = {"confirmed": 0, "not confirmed": 0, "in place": 0, "changed": 0}
+        for k, i in enumerate(range(0, len(todo), PATCH_BATCH), 1):
+            sent, back = send(todo[i:i + PATCH_BATCH], phase, table_id, record, fields,
+                              (name, short, k, n), tally)
+            for e in sent:
+                e["wrote"] = True
+                e["outcome"], ok = confirmed(e, back.get(e[record], {}).get("fields", {}))
+                tally["confirmed" if ok else "not confirmed"] += 1
+            batch.clear()                     # recorded: no longer in flight
+            show_progress(f"{name}: batch {k}/{n} done - {tally['confirmed']} of "
+                          f"{len(todo)} row(s) written and confirmed so far...",
+                          brief=f"{short}: batch {k}/{n} done, {tally['confirmed']}/{len(todo)} "
+                                f"confirmed...")
+            time.sleep(pull.PAGE_PAUSE)
+        show_progress(f"{name}: {n}/{n} batch(es) done - {tally['confirmed']} written and "
+                      f"confirmed, {tally['in place']} already in place, {tally['changed']} "
+                      f"changed (left alone)"
+                      + (f", {tally['not confirmed']} not confirmed"
+                         if tally["not confirmed"] else ""), last=True)
+
+    def metadata(e):
+        return {**({ids["parent"]: e["parent"]} if e["set_parent"] else {}),
+                **({ids["item_ref"]: e["item_ref"]} if e["set_item"] else {})}
+
+    def metadata_confirmed(e, got):
+        # BOTH approved values must show in the reply, whichever was sent: an
+        # edit after the re-check can change the field not written (with Yes
+        # already set, nothing re-checks it later). Otherwise not confirmed -
+        # unfinished; nothing is rewritten and an existing Yes is left alone.
+        e["meta_ok"] = ((got.get(ids["parent"]) or "") == e["parent"]
+                        and (got.get(ids["item_ref"]) or "") == e["item_ref"])
+        return ("partial" if e["meta_ok"] else NOT_CONFIRMED), e["meta_ok"]
+
+    def yes_confirmed(e, got):
+        ok = select_name(got.get(ids["created"])) == CREATED_VALUE
+        return ("done" if ok else "partial"), ok
+
     try:
-        todo = [e for e in plan if not e["note"] and e["set_parent"]]
-        for i in range(0, len(todo), PATCH_BATCH):
-            sent, back = send(todo[i:i + PATCH_BATCH], "parent", IMPORT_TABLE_ID,
-                              "import_rec", ids["parent"], lambda e: e["parent"])
-            for e in sent:
-                got = (back.get(e["import_rec"], {}).get("fields", {}).get(ids["parent"]) or "")
-                e["wrote"] = True
-                e["parent_ok"] = got == e["parent"]
-                e["outcome"] = "partial" if e["parent_ok"] else "parent not confirmed"
-            batch.clear()
-            time.sleep(pull.PAGE_PAUSE)
-        for e in plan:                    # a parent found already in place, nothing else to do
-            if (e["set_parent"] and not e["note"] and e["parent_ok"] and not e["wrote"]
-                    and not e["set_created"]):
+        if meta_todo:
+            write_step("Parent and item ref ID", "Parent + item ref ID",
+                       f"{PARENT_FIELD} and {ITEM_REFID_FIELD} "
+                       f"in {IMPORT_LABEL}", meta_todo, "parent", IMPORT_TABLE_ID,
+                       "import_rec", metadata, metadata_confirmed)
+        for e in plan:                    # found already in place, nothing else to do
+            if ((e["set_parent"] or e["set_item"]) and not e["note"] and e["meta_ok"]
+                    and not e["wrote"] and not e["set_created"]):
                 e["outcome"] = "already done"
-        todo = [e for e in plan if not e["note"] and e["parent_ok"] and e["set_created"]]
-        for i in range(0, len(todo), PATCH_BATCH):
-            sent, back = send(todo[i:i + PATCH_BATCH], "created", TRACKING_TABLE_ID,
-                              "tracking_rec", ids["created"], lambda e: CREATED_VALUE)
-            for e in sent:
-                got = select_name(back.get(e["tracking_rec"], {}).get("fields", {}).get(ids["created"]))
-                e["wrote"] = True
-                e["outcome"] = "done" if got == CREATED_VALUE else "partial"
-            batch.clear()
-            time.sleep(pull.PAGE_PAUSE)
+        todo = [e for e in plan if not e["note"] and e["meta_ok"] and e["set_created"]]
+        if todo:
+            write_step(f"{CREATED_FIELD} = {CREATED_VALUE}", CREATED_VALUE,
+                       f"{CREATED_FIELD} = {CREATED_VALUE} in {TRACKING_LABEL}", todo,
+                       "created", TRACKING_TABLE_ID, "tracking_rec",
+                       lambda e: {ids["created"]: CREATED_VALUE}, yes_confirmed)
     except UncertainWrite as err:
         for e in batch:
             e["outcome"] = "unknown"
@@ -825,6 +966,7 @@ def execute(plan, ids, token, inflight=None, *, recheck):
         return str(err)
     finally:
         complete_partials(plan)
+        close_progress()      # a progress line still open ends before anything else shows
     return None
 
 
@@ -860,13 +1002,13 @@ def outcomes_text(plan, review, excluded, provenance):
     f = io.StringIO(newline="")
     f.write(f"# {provenance}\n")
     w = csv.writer(f)
-    w.writerow([col.CATALOG, col.PARENT_REFID, "outcome", "note"])
+    w.writerow([col.CATALOG, col.PARENT_REFID, ITEM_REFID_FIELD, "outcome", "note"])
     for catalog in excluded:
-        w.writerow([catalog, "", "excluded", "--exclude-catalog"])
+        w.writerow([catalog, "", "", "excluded", "--exclude-catalog"])
     for catalog, note in review:
-        w.writerow([catalog, "", "review", note])
+        w.writerow([catalog, "", "", "review", note])
     for e in plan:
-        w.writerow([e["catalog"], e["parent"], e["outcome"], e["note"]])
+        w.writerow([e["catalog"], e["parent"], e["item_ref"], e["outcome"], e["note"]])
     return f.getvalue()
 
 
@@ -1088,14 +1230,27 @@ def tell_receipt(out_path, saved, save_problem, during_writes, unfinished):
 # MAIN EXECUTION
 # ==============================
 
+def writes_label(e):
+    """What a planned row will write, e.g. "parent + item ref ID + Yes" or
+    "item ref ID only" (a backfill: its parent and Yes already in place)."""
+    names = [name for name, due in (("parent", e["set_parent"]), ("item ref ID", e["set_item"]),
+                                    (CREATED_VALUE, e["set_created"])) if due]
+    return " + ".join(names) + (" only" if len(names) == 1 else "")
+
+
 def summarize(plan, review):
-    ready = [e for e in plan if not e["note"]]
-    counts = {
-        "parent + Yes": sum(1 for e in ready if e["set_parent"] and e["set_created"]),
-        "Yes only (parent already right)": sum(1 for e in ready if not e["set_parent"] and e["set_created"]),
-        "parent only (Yes already set)": sum(1 for e in ready if e["set_parent"] and not e["set_created"]),
-        "already done": sum(1 for e in ready if not (e["set_parent"] or e["set_created"])),
-    }
+    """PLAN counts: each kind of planned write that occurs (every field a row
+    still needs, the item ref ID-only backfills included), then the rows
+    already done."""
+    counts = {}
+    for e in plan:
+        if not e["note"] and (e["set_parent"] or e["set_item"] or e["set_created"]):
+            counts[writes_label(e)] = counts.get(writes_label(e), 0) + 1
+    order = ["parent + item ref ID + Yes", "item ref ID + Yes", "parent + Yes", "Yes only",
+             "parent + item ref ID", "item ref ID only", "parent only"]
+    counts = {label: counts[label] for label in order if label in counts}
+    counts["already done"] = sum(1 for e in plan if not e["note"] and not
+                                 (e["set_parent"] or e["set_item"] or e["set_created"]))
     return counts, review + [(e["catalog"], e["note"]) for e in plan if e["note"]]
 
 
@@ -1104,18 +1259,22 @@ def print_changes(plan):
     actually are - a parent written into a blank cell vs one already there,
     the flag changed to Yes vs already Yes - so the change can be checked
     row by row before anything is written."""
-    pending = [e for e in plan if not e["note"] and (e["set_parent"] or e["set_created"])]
+    pending = [e for e in plan if not e["note"]
+               and (e["set_parent"] or e["set_item"] or e["set_created"])]
     if not pending:
         return
     print(f"\n  {Colors.BOLD}Changes, row by row{Colors.RESET}  "
-          f"{Colors.DIM}({PARENT_FIELD} | {CREATED_FIELD} | title){Colors.RESET}")
+          f"{Colors.DIM}({PARENT_FIELD} | {ITEM_REFID_FIELD} | {CREATED_FIELD} | "
+          f"title){Colors.RESET}")
     for e in pending:
         parent = (f"(blank) -> {e['parent']}" if e["set_parent"]
                   else f"{e['parent']} (already set)")
+        item = (f"(blank) -> {e['item_ref']}" if e["set_item"]
+                else f"{e['item_ref']} (already set)")
         created = (f"{e.get('current_created') or '(blank)'} -> {CREATED_VALUE}"
                    if e["set_created"] else f"already {CREATED_VALUE}")
-        print(f"    {e['catalog']}  parent {parent}  |  created {created}  |  "
-              f"{e.get('title') or '(no title)'}")
+        print(f"    {e['catalog']}  parent {parent}  |  item ref ID {item}  |  "
+              f"created {created}  |  {e.get('title') or '(no title)'}")
 
 
 def confirm(report, plan, excluded, review_count):
@@ -1123,14 +1282,19 @@ def confirm(report, plan, excluded, review_count):
     Anything else - no, blank, closed input, Ctrl-C - writes nothing; so
     does a PLAN or prompt that could not be shown (the screen output
     failed), whatever is typed."""
-    pending = [e for e in plan if not e["note"] and (e["set_parent"] or e["set_created"])]
+    pending = [e for e in plan if not e["note"]
+               and (e["set_parent"] or e["set_item"] or e["set_created"])]
     n_parent = sum(1 for e in pending if e["set_parent"])
+    n_item = sum(1 for e in pending if e["set_item"])
+    n_backfill = sum(1 for e in pending if writes_label(e) == "item ref ID only")
     n_yes = sum(1 for e in pending if e["set_created"])
     print(f"\n  {Colors.BOLD}About to write to Airtable{Colors.RESET}")
     print(f"    Report:   {report} (production import)")
     print(f"    Rows:     {len(pending)} to write, {review_count} for review, "
           f"{len(excluded)} excluded")
     print(f"    Fields:   {PARENT_FIELD} in {IMPORT_LABEL} ({n_parent} row(s))")
+    print(f"              {ITEM_REFID_FIELD} in {IMPORT_LABEL} ({n_item} row(s)"
+          + (f", {n_backfill} of them item ref ID only" if n_backfill else "") + ")")
     print(f"              {CREATED_FIELD} = {CREATED_VALUE} in {TRACKING_LABEL} "
           f"({n_yes} row(s))")
     sys.stdout.flush()              # the PLAN must have reached the screen
@@ -1261,7 +1425,8 @@ def run():
         for catalog, note in to_review:
             print_status("warning", f"{catalog}: {note}", indent=1)
 
-    pending = [e for e in plan if not e["note"] and (e["set_parent"] or e["set_created"])]
+    pending = [e for e in plan if not e["note"]
+               and (e["set_parent"] or e["set_item"] or e["set_created"])]
     print_changes(plan)
     if not args.run:
         if pending:
@@ -1352,7 +1517,7 @@ def run():
 
 
 def count_unfinished(plan):
-    return sum(1 for e in plan if e["outcome"] in ("partial", "parent not confirmed",
+    return sum(1 for e in plan if e["outcome"] in ("partial", NOT_CONFIRMED,
                                                    "unknown", "not started", "changed"))
 
 
@@ -1375,8 +1540,10 @@ def show_result(plan, to_review, error, out_path, saved, save_problem, after_wri
         tally[e["outcome"]] = tally.get(e["outcome"], 0) + 1
     print_result([("Done", tally.get("done", 0), "ok"),
                   ("Already done", tally.get("already done", 0), "neutral"),
-                  ("Partial (parent written, Yes not yet)", tally.get("partial", 0), "attention"),
-                  ("Parent not confirmed", tally.get("parent not confirmed", 0), "attention"),
+                  ("Partial (parent/item ref ID written, Yes not yet)", tally.get("partial", 0),
+                   "attention"),
+                  ("Not confirmed (parent or item ref ID)", tally.get(NOT_CONFIRMED, 0),
+                   "attention"),
                   ("Outcome unknown", tally.get("unknown", 0), "unknown"),
                   ("Not started", tally.get("not started", 0), "attention"),
                   ("Changed since the PLAN (left alone)", tally.get("changed", 0), "attention"),

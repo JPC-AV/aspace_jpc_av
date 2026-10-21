@@ -1012,14 +1012,18 @@ COMMANDS = {
             "how": """    {bold}What it writes{reset}
 {jpc_av_definition}
 
-      For each row the import created, two Airtable fields:
+      For each row the import created, three Airtable fields:
 
         • ASpace Parent RefID in <<< ASpace_import >>> - the parent the
           import used. Written only into a cell that is blank when it is
           read just before the write; a parent found there is never
           replaced.
+        • ASpace Item RefID in <<< ASpace_import >>> - the item's own ref
+          ID, from the record the import read back (not its parent's).
+          Written the same way, never over another value. A later run
+          fills a blank one even when the parent and Yes are already set.
         • ASpace Item Record Created in ((( ASpace_tracking ))) - set to
-          Yes.
+          Yes. A Yes already there is kept.
 
       Rows the import skipped, refused or failed are left alone.
       ArchivesSpace is never contacted: jpc-writeback reads the import
@@ -1041,7 +1045,8 @@ COMMANDS = {
         • The report has a valid JPC_AV_xxxxx and parent RefID for it,
           only once, with a production record URI and a matching read-back
           snapshot of the record in the report's resource (from the
-          import's records file).
+          import's records file), whose own ref ID is usable - and the
+          same as the report's ref ID when the report has one.
         • Exactly one JPCA-AV_SOURCE row (the table CATALOG_NUMBER links
           to) is named with the JPC_AV_xxxxx, and exactly one
           <<< ASpace_import >>> row and one ((( ASpace_tracking ))) row link
@@ -1050,6 +1055,9 @@ COMMANDS = {
           ticked after the import counts too.
         • Airtable's ASpace Parent RefID is blank, or already the parent
           the import used.
+        • Airtable's ASpace Item RefID is blank, or already the item's own
+          ref ID. That field must exist as single line text; otherwise the
+          run stops with nothing written.
 
     {bold}Leaving rows out{reset}
       --exclude-catalog JPC_AV_xxxxx drops one created row before Airtable
@@ -1062,7 +1070,8 @@ COMMANDS = {
       Without --run, jpc-writeback shows the PLAN - counts, the rows for
       review and every change, row by row:
 
-          JPC_AV_xxxxx  parent (blank) -> REFID  |  created No -> Yes  |  title
+          JPC_AV_xxxxx  parent (blank) -> REFID  |  item ref ID (blank)
+            -> ITEMREF  |  created No -> Yes  |  title
 
       then the command to run with --run. Nothing is written and nothing
       is saved.
@@ -1074,23 +1083,28 @@ COMMANDS = {
       Only yes writes. When nothing is left to write, nothing is asked.
 
     {bold}During writing{reset}
-      Parents are written first, ten rows at a time, each confirmed from
-      Airtable's reply; then Yes, only for rows whose parent is in place.
-      The run stops at the first refused write, lost reply or Ctrl-C. Rows
-      in a batch whose reply was lost are "unknown": the write may or may
-      not have landed.
+      The parent and item ref ID are written first, ten rows at a time,
+      each confirmed from Airtable's reply; then Yes, only for rows whose
+      parent and item ref ID are in place. While writing, the run shows
+      each step and its batches - re-checking, then how many rows are
+      written and confirmed so far. The run stops at the first refused
+      write, lost reply or Ctrl-C. Rows in a batch whose reply was lost are
+      "unknown": the write may or may not have landed.
 
       Just before each batch is written - and again after any rate-limit
-      wait - its rows are read again. A row whose links, hold, parent or
-      Yes changed since the PLAN is left alone and counted as changed (or
-      partial, if this run already wrote its parent); Yes is set only
-      while the parent read back is the import's. A write already in place
-      is skipped. Nothing is replaced by a new plan - run the same command
-      again to see one. An edit made between that read and the write can
-      still be overwritten: Airtable cannot make a write conditional.
+      wait - its rows are read again. A row whose links, hold, parent, item
+      ref ID or Yes changed since the PLAN is left alone and counted as
+      changed (or partial, if this run already wrote its parent or item ref
+      ID); Yes is set only while the parent and item ref ID read back are
+      the import's. A write already in place is skipped. Nothing is
+      replaced by a new plan - run the same command again to see one. An
+      edit made between that read and the write can still be overwritten:
+      Airtable cannot make a write conditional.
 
       Running the same command again is safe: it re-reads Airtable, writes
-      only what is still missing, and counts finished rows as already done.""",
+      only what is still missing - a blank ASpace Item RefID included, even
+      when the parent and Yes are already set - and counts finished rows as
+      already done.""",
             "output": """    A preview saves nothing; its PLAN is on screen only.
 
     A --run past the yes prompt (or with nothing left to write) saves,
@@ -1098,8 +1112,8 @@ COMMANDS = {
 
       • {cyan}airtable_writeback_YYYYMMDD_HHMMSS_PID.csv{reset}
         One line per row the import created: CATALOG_NUMBER, ASpace Parent
-        RefID, outcome and note. The first line records the command and
-        the time.
+        RefID, ASpace Item RefID, outcome and note. The first line records
+        the command and the time.
 
       A run cancelled at the yes prompt wrote nothing and saves nothing.
       Once writing has begun, an interrupted run still tries to save
@@ -1113,10 +1127,11 @@ COMMANDS = {
 
 {run_stamp}
 
-    Outcomes: done; already done; partial (parent written, Yes not yet);
-    parent not confirmed; unknown (a write may or may not have landed);
-    not started; changed (changed in Airtable after the PLAN - left
-    alone); review; excluded.
+    Outcomes: done; already done; partial (parent or item ref ID written,
+    Yes not yet); not confirmed (the reply did not confirm both the
+    expected parent and item ref ID); unknown (a write may or may not have
+    landed); not started; changed (changed in Airtable after the PLAN -
+    left alone); review; excluded.
 
     RESULT counts them, except excluded rows - the PLAN counts those. The
     saved file's path is printed ("Saved write-back outcomes: ..."); if it
@@ -1132,8 +1147,8 @@ COMMANDS = {
       {command}jpc-writeback --report REPORT --run{reset}
 
     {bold}Unfinished rows{reset}
-      Partial, parent not confirmed, unknown, not started or changed: run
-      the same --run command again. It re-reads Airtable, shows the
+      Partial, not confirmed, unknown, not started or changed: run the
+      same --run command again. It re-reads Airtable, shows the
       current plan and finishes what is left.
 
     {bold}Rows for review{reset}
@@ -1145,11 +1160,15 @@ COMMANDS = {
           ArchivesSpace and correct whichever is wrong. If Airtable was
           wrong, run the same command again; if the record moved, set Yes
           by hand.
+        • Airtable already has a different ASpace Item RefID - compare it
+          with the record in ArchivesSpace and correct whichever is wrong,
+          then run the same command again.
         • JPCA-AV_SOURCE row(s) named it, row(s) link to it, or a row links
           several items - fix those records in Airtable, then run the same
           command again.
         • no matching read-back snapshot, a snapshot outside the report's
-          resource, or not a production archival object - confirm the
+          resource, no usable item ref ID or one that differs from the
+          report's, or not a production archival object - confirm the
           record in ArchivesSpace, then update Airtable by hand: see
           "JPC_AV_xxxxx already in ArchivesSpace" in {command}jpc-check --help{reset}.
 

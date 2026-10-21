@@ -756,8 +756,11 @@ environment is configured; use `--env sandbox` for a trial run.
    python airtable_writeback.py <reports>/import_report_<stamp>.json --run
    ```
    Reads Airtable, lists every change row by row - each tape's parent
-   (`(blank) -> ref` or `already set`) and `ASpace Item Record Created`
+   (`(blank) -> ref` or `already set`), its own ref ID in `ASpace Item
+   RefID` (the same; a blank one is filled on later runs too, even when
+   the parent and Yes are already set) and `ASpace Item Record Created`
    (`No -> Yes` or `already Yes`) - and writes only after you type `yes`.
+   While writing it shows each step and how many batches are done.
    Each batch's rows are read again just before they are written; a row
    that changed in Airtable since the PLAN is left alone ("changed") - run
    the command again to see the current plan.
@@ -824,6 +827,21 @@ aborts with no writes.
 | "Invalid extent type" | Check Original Format matches ASpace dropdown exactly |
 
 ## Version History
+
+- **v3.7.0** (2026): the write-back records each item's own ref ID and
+  shows its progress
+  - The write-back also fills `ASpace Item RefID` in
+    `<<< ASpace_import >>>` with the item's own ref ID, taken from the
+    record the import read back (not the parent's ref ID or the URI). It
+    is written only into a blank cell, with the parent, and confirmed
+    before Yes; a row whose cell already holds another value, or whose
+    item ref ID is missing or unusable, is left for review. A later run
+    fills a blank one on rows already written back. The field must exist
+    in Airtable as single line text, or the run stops with nothing written
+  - While writing, the write-back shows each step and how many of its
+    batches are done - re-checking, then rows written and confirmed so far
+  - After pulling: nothing to reinstall; reinstalling only refreshes the
+    version `python -m pip show jpc-av-tools` reports
 
 - **v3.6.10** (2026): write-back rechecks, truthful importer logs, values
   not repeated
