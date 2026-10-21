@@ -102,8 +102,9 @@ def get_colored_help():
     {C.YELLOW}2{C.RESET}  a bad argument
     {C.RED}1{C.RESET}  nothing saved: no token, a view or token problem, an empty view, or a
        pull of this view already saved this minute"""),
-        ("NEXT STEP", f"""    Creating records:  {C.GREEN}${C.RESET} python3 aspace_csv_import/aspace_csv_export.py --fill-parents FILE --env production
-    Updating records:  {C.GREEN}${C.RESET} python3 aspace_csv_import/aspace_csv_import.py --update-only -n -f FILE --env production"""),
+        ("NEXT STEP", f"""    Creating records:  {C.GREEN}${C.RESET} python3 aspace_csv_import/aspace_csv_export.py --fill-parents FILE --env ENV
+    Updating records:  {C.GREEN}${C.RESET} python3 aspace_csv_import/aspace_csv_import.py --update-only -n -f FILE --env ENV
+    Replace ENV with production or sandbox - the ArchivesSpace to use."""),
     ])
 
 
@@ -434,20 +435,22 @@ def main():
 
 
 def next_step_lines(pulled):
-    """The two commands that take the pulled CSV further. Started by
-    jpc-pull: as jpc- commands (production is their default, as --env
-    production is here). Otherwise, or when the path cannot go to the
-    launcher as it is (a value starting with "-"), the direct commands."""
+    """The two commands that take the pulled CSV further. A pull has no
+    ArchivesSpace target, so both say --env ENV and the last line says to
+    replace it - never a guessed environment. Started by jpc-pull: as jpc-
+    commands. Otherwise, or when the path cannot go to the launcher as it
+    is (a value starting with "-"), the direct commands."""
     if started_by("jpc-pull") and not pulled.startswith("-"):
-        create = ["jpc-fill", "--file", pulled]
-        update = ["jpc-update", "--file", pulled, "--dry-run"]
+        create = ["jpc-fill", "--file", pulled, "--env", "ENV"]
+        update = ["jpc-update", "--file", pulled, "--env", "ENV", "--dry-run"]
     else:
         create = ["python3", _script("aspace_csv_export.py"), "--fill-parents", pulled,
-                  "--env", "production"]
+                  "--env", "ENV"]
         update = ["python3", _script("aspace_csv_import.py"), "--update-only", "-n", "-f",
-                  pulled, "--env", "production"]
+                  pulled, "--env", "ENV"]
     return ["Creating records:  " + shlex.join(create),
-            "Updating records:  " + shlex.join(update)]
+            "Updating records:  " + shlex.join(update),
+            "Replace ENV with production or sandbox - the ArchivesSpace to use."]
 
 
 if __name__ == "__main__":

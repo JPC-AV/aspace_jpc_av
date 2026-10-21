@@ -12,6 +12,9 @@ The jpc- commands: one short command per workflow step.
     jpc-mads --directory BATCH    which items are live in MADS (or --file FILE)
     jpc / jpc --help              this list
 
+The ArchivesSpace commands (check/lookup, fill, import, update, rename) also
+need --env production or --env sandbox on every run - there is no default.
+
 Each command runs exactly one existing tool with that step's fixed flags
 filled in, and nothing else: the tools keep all their own checks, opening
 lines, PLANs and yes prompts. The launcher only builds the command line -
@@ -170,8 +173,8 @@ def refusal_note(flag):
 
 # Each command: the tool it runs, its one named input, the flags the tool
 # always gets, the extra flags a person may add (flag -> metavar, or None
-# for a switch), and whether it talks to ArchivesSpace (and so takes
-# --env). "base" builds the fixed part of the tool's arguments from the
+# for a switch), and whether it talks to ArchivesSpace (and so requires
+# --env production or --env sandbox). "base" builds the fixed part of the tool's arguments from the
 # input; extras follow in the order given. Optional: "extra_help" (this
 # command's own OPTIONS wording for an extra) and "elsewhere" (this
 # command's own refusal hints - see ELSEWHERE).
@@ -229,12 +232,11 @@ COMMANDS = {
     jpc-fill creates no ArchivesSpace records and writes nothing to Airtable.
 
     {bold}Run jpc-fill{reset}
-      {command}jpc-fill --file PULL{reset}
+      {command}jpc-fill --file PULL --env ENV{reset}
 
       Replace {bold}PULL{reset} with the CSV's full path from the "Saved pulled CSV:"
-      line printed near the end of a successful jpc-pull run.
-
-      For a sandbox batch, add --env sandbox; jpc-fill defaults to production.
+      line printed near the end of a successful jpc-pull run, and {bold}ENV{reset}
+      with production or sandbox - jpc-fill has no default.
 
 {fill_how_parents}
 
@@ -274,7 +276,7 @@ COMMANDS = {
         "base": lambda value: ["--check", value],
         "extras": {"--output": "PATH", "--no-color": None},
         "aspace": True,
-        "example": "jpc-check --file one-inch_check_20260930_0545.csv",
+        "example": "jpc-check --file one-inch_check_20260930_0545.csv --env production",
         "help": {
             "paths": help_blocks(
                 """    {bold}Full path{reset}
@@ -406,16 +408,17 @@ COMMANDS = {
       as an empty cell.
 
       jpc-check leaves the input file, Airtable and ArchivesSpace unchanged.""",
-            "next_steps": """    What comes next depends on the result. If you used --env sandbox for
-    jpc-check, the answers are about the sandbox; add --env sandbox to any
-    command below that should use it too.
+            "next_steps": """    What comes next depends on the result. The answers are about the
+    ArchivesSpace this check's --env named; give the commands below that
+    same --env.
 
     {bold}JPC_AV_xxxxx not found - a create batch{reset}
       Continue with {bold}jpc-fill{reset}:
-      {command}jpc-fill --file PULL{reset}
+      {command}jpc-fill --file PULL --env ENV{reset}
 
       Replace {bold}PULL{reset} with the CSV's full path from the "Saved pulled CSV:"
-      line printed near the end of a successful jpc-pull run.
+      line printed near the end of a successful jpc-pull run, and {bold}ENV{reset}
+      with the environment this check used (production or sandbox).
 
     {bold}JPC_AV_xxxxx already in ArchivesSpace - when preparing records to create{reset}
       A create batch is for items not yet in ArchivesSpace. An item already
@@ -489,7 +492,7 @@ COMMANDS = {
         "base": lambda value: ["--fill-parents", value],
         "extras": {"--no-color": None},
         "aspace": True,
-        "example": "jpc-fill --file one-inch_check_20260930_0545.csv",
+        "example": "jpc-fill --file one-inch_check_20260930_0545.csv --env production",
         "help": {
             "paths": help_blocks(
                 full_path_of_pull("one-inch_check_20260930_0545.csv"),
@@ -530,11 +533,11 @@ COMMANDS = {
             "next_steps": """    In the normal JPCA ArchivesSpace <-> Airtable workflow, the next step
     when preparing new records is {bold}jpc-import{reset}, run on the ready file.
 
-    If you used --env sandbox for jpc-fill, add it to both import commands
-    below. Each command defaults to production independently.
+    Give both import commands below the same --env as jpc-fill: replace
+    {bold}ENV{reset} with production or sandbox. There is no default.
 
     {bold}If the ready file contains rows, dry-run it first{reset}
-      {command}jpc-import --file READY --dry-run{reset}
+      {command}jpc-import --file READY --env ENV --dry-run{reset}
 
       Replace {bold}READY{reset} with the ready CSV's full path from the
       "Saved ready CSV:" line printed near the end of a successful
@@ -546,7 +549,7 @@ COMMANDS = {
       It writes nothing.
 
     {bold}Then the real import{reset}
-      {command}jpc-import --file READY{reset}
+      {command}jpc-import --file READY --env ENV{reset}
 
       The plan is shown again; records are created only after you type yes.
 
@@ -596,7 +599,7 @@ COMMANDS = {
         "base": lambda value: ["--create-records", "--file", value],
         "extras": {"--dry-run": None, "--keep-going": None, "--no-color": None},
         "aspace": True,
-        "example": "jpc-import --file jpc-fill_DVD-batch_20260930_0900_parent_ref-id_ready_for_ASpace_import.csv --dry-run",
+        "example": "jpc-import --file jpc-fill_DVD-batch_20260930_0900_parent_ref-id_ready_for_ASpace_import.csv --env production --dry-run",
         "help": {
             "paths": help_blocks(
                 """    {bold}Full path{reset}
@@ -786,7 +789,7 @@ COMMANDS = {
         "base": lambda value: ["--update-only", "--file", value],
         "extras": {"--dry-run": None, "--no-color": None},
         "aspace": True,
-        "example": "jpc-update --file titles_20260930_0900.csv --dry-run",
+        "example": "jpc-update --file titles_20260930_0900.csv --env production --dry-run",
         "help": {
             "paths": help_blocks(
                 full_path_of_pull("titles_20260930_0900.csv"),
@@ -908,19 +911,19 @@ COMMANDS = {
     Airtable, so Airtable already has them.
 
     If you used --env sandbox, the run targeted the sandbox, not
-    production. Every command that continues in the sandbox needs
-    --env sandbox too. To update production, start there with a dry run
-    without --env sandbox and review that PLAN before the real run - a
+    production. To update production, start there with a dry run with
+    --env production and review that PLAN before the real run - a
     sandbox PLAN is not a production PLAN.
 
     {bold}After a dry run{reset}
       If the PLAN shows what you expect, run the real update on the same
-      file, in the same environment as the dry run:
+      file, with the same --env as the dry run:
 
-      {command}jpc-update --file PULL{reset}
+      {command}jpc-update --file PULL --env ENV{reset}
 
-      Add --env sandbox if the dry run used it. If Airtable changed after
-      the pull, pull again and dry-run the new file first.
+      Replace {bold}ENV{reset} with the dry run's environment (production or
+      sandbox). If Airtable changed after the pull, pull again and dry-run
+      the new file first.
 
     {bold}A problem row stopped the run{reset}
       Nothing was written. Fix each listed row, pull again and rerun:
@@ -1178,7 +1181,7 @@ COMMANDS = {
       and ((( ASpace Item Record Created ))) for these items, then compare
       it with ArchivesSpace:
 
-      {command}jpc-check --file PULL{reset}
+      {command}jpc-check --file PULL --env production{reset}
 
       Replace PULL with the new CSV's full path from the "Saved pulled
       CSV:" line printed near the end of the pull.
@@ -1239,7 +1242,7 @@ COMMANDS = {
                                    "--single is on the direct command only"),
                       "-d": "use --directory"},
         "aspace": True,
-        "example": "jpc-rename --directory /Volumes/AV_DRIVE/batch --dry-run",
+        "example": "jpc-rename --directory /Volumes/AV_DRIVE/batch --env production --dry-run",
         "help": {
             "paths": help_blocks(
                 """    {bold}Full path{reset}
@@ -1380,13 +1383,13 @@ COMMANDS = {
     jpc-rename never changes Airtable.""",
             "next_steps": """    {bold}After a dry run{reset}
       If every folder shows what you expect, run the real rename on the same
-      folder, in the same environment as the dry run:
+      folder, with the same --env as the dry run:
 
-      {command}jpc-rename --directory PATH{reset}
+      {command}jpc-rename --directory PATH --env ENV{reset}
 
-      Add --env sandbox if the dry run used it - on copies of the folders
-      only (see ENVIRONMENT). The real run shows the PLAN before asking
-      for yes.
+      Replace {bold}ENV{reset} with the dry run's environment (production or
+      sandbox) - sandbox only on copies of the folders (see ENVIRONMENT).
+      The real run shows the PLAN before asking for yes.
 
     {bold}Refused folders{reset}
       A refused folder is left as it is. Fix what the reason names, then
@@ -1626,6 +1629,14 @@ class Refused(Exception):
     """A command line the launcher will not run; the message says why."""
 
 
+# The ArchivesSpace commands' only targets. There is no default: each run
+# names one with --env, and a command without it is refused before
+# creds.py is read or a tool runs.
+ENVIRONMENTS = ("production", "sandbox")
+MISSING_ENV = ("choose the ArchivesSpace environment: add --env production or "
+               "--env sandbox (there is no default)")
+
+
 def input_flags(verb):
     """The command's inputs as (flag, metavar, help, base): its one input,
     or - for a command with an "or_input" - both, of which exactly one is
@@ -1672,10 +1683,10 @@ def parse(verb, args):
         elif arg == "--env" and spec["aspace"]:
             if env is not None:
                 raise Refused("--env was given twice")
-            env = take(arg, i, "sandbox")
-            if env != "sandbox":
+            env = take(arg, i, "production or --env sandbox")
+            if env not in ENVIRONMENTS:
                 # the refused value is not repeated: errors never echo input
-                raise Refused("--env takes only 'sandbox' (production is the default)")
+                raise Refused("--env takes production or sandbox")
             i += 2
         elif arg in extras_allowed:
             if arg in seen and arg not in repeatable:
@@ -1692,6 +1703,8 @@ def parse(verb, args):
     if value is None:
         raise Refused(f"jpc-{verb} needs "
                       + " or ".join(f"{flag} {metavar}" for flag, metavar in inputs.items()))
+    if spec["aspace"] and env is None:
+        raise Refused(MISSING_ENV)      # no default target, even with one configured
     return value, env, extras, chosen
 
 
@@ -1750,26 +1763,29 @@ def build(verb, value, env, extras, flag=None):
     """The exact argument list the tool gets: the running Python, the
     script (found beside this file), its fixed flags for the input given
     (flag; the command's one input when None), --env once for the
-    ArchivesSpace tools, then the extras in the order given."""
+    ArchivesSpace tools - the env given, never a default - then the
+    extras in the order given."""
     spec = COMMANDS[verb]
     base = {f: b for f, _, _, b in input_flags(verb)}.get(flag, spec["base"])
     argv = [sys.executable, str(ROOT / spec["script"])] + base(value)
     if spec["aspace"]:
-        argv += ["--env", env or "production"]
+        if env not in ENVIRONMENTS:
+            raise Refused(MISSING_ENV)
+        argv += ["--env", env]
     return argv + extras
 
 
 def usage_parts(verb):
-    """The usage line's pieces: the command with its input, then one
-    [option] each."""
+    """The usage line's pieces: the command with its input, the required
+    --env ENV of an ArchivesSpace command, then one [option] each."""
     spec = COMMANDS[verb]
     inputs = [f"{flag} {metavar}" for flag, metavar, _, _ in input_flags(verb)]
     parts = [f"jpc-{verb} " + (inputs[0] if len(inputs) == 1 else f"({' | '.join(inputs)})")]
+    if spec["aspace"]:
+        parts.append("--env ENV")
     for extra, meta in spec["extras"].items():
         parts.append(f"[{extra}{' ' + meta if meta else ''}]"
                      + ("..." if extra in spec.get("repeatable", ()) else ""))
-    if spec["aspace"]:
-        parts.append("[--env sandbox]")
     return parts
 
 
@@ -1838,11 +1854,13 @@ def command_help(verb):
     else:
         options = [(f"{f} {m}", f"(required: this or {other})", text)
                    for (f, m, text, _), other in zip(inputs, [inputs[1][0], inputs[0][0]])]
+    if spec["aspace"]:
+        flag += " or --env"
+        options.append(("--env ENV", "(required)",
+                        "production or sandbox: which ArchivesSpace to use - no default"))
     extra_help = {**EXTRA_HELP, **spec.get("extra_help", {})}
     options += [(f"{extra}{' ' + meta if meta else ''}", "(optional)", extra_help[extra])
                 for extra, meta in spec["extras"].items()]
-    if spec["aspace"]:
-        options.append(("--env sandbox", "(optional)", "Uses the sandbox env instead of the default production env"))
     sections = [
         ("DESCRIPTION", textwrap.fill(f"{spec['summary']}.", width=78,
                                      initial_indent="    ", subsequent_indent="    ",
@@ -1850,7 +1868,7 @@ def command_help(verb):
                         + "".join(f"\n\n    jpc-{alias} is another name for this command: the same "
                                   f"options and answers." for alias, target in ALIASES.items()
                                   if target == verb)),
-        # wrapped between pieces only: a no-break space keeps "[--env sandbox]"
+        # wrapped between pieces only: a no-break space keeps "--env ENV"
         # on one line
         ("USAGE", C.BOLD + C.GREEN
                   + textwrap.fill(" ".join(p.replace(" ", NBSP) for p in usage_parts(verb)),
@@ -1871,8 +1889,9 @@ def command_help(verb):
         # the standard text, with this command's own note (if any) before
         # the closing paragraph
         note = custom.get("environment_note")
-        sections.append(("ENVIRONMENT", f"    {C.RED}{C.BOLD}Production by default{C.RESET}. "
-                                        f"Add --env sandbox for the sandbox.\n"
+        sections.append(("ENVIRONMENT", f"    {C.RED}{C.BOLD}Required{C.RESET}: --env production or --env sandbox. "
+                                        f"There is no\n"
+                                        f"    default: a command without it stops before anything runs (exit 2).\n"
                                         f"    The tool run directly selects its only configured environment\n"
                                         f"    itself; with several configured, it requires --env NAME.\n\n"
                                         + (note.format(**style) + "\n\n" if note else "")
@@ -1908,26 +1927,26 @@ def overview_help():
              for v in ORDER]
 
     create = [("jpc-pull --view NAME", "save the batch's Airtable view"),
-              ("jpc-check --file PULL", "optional: which already exist"),
-              ("jpc-fill --file PULL", "parents; ready and review CSVs"),
-              ("jpc-import --file READY --dry-run", "check every row, show the PLAN"),
-              ("jpc-import --file READY", "PLAN again, type yes to write"),
+              ("jpc-check --file PULL --env ENV", "optional: which already exist"),
+              ("jpc-fill --file PULL --env ENV", "parents; ready and review CSVs"),
+              ("jpc-import --file READY --env ENV --dry-run", "check every row, show the PLAN"),
+              ("jpc-import --file READY --env ENV", "PLAN again, type yes to write"),
               ("jpc-writeback --report REPORT --run", "record the results in Airtable")]
     update = [("jpc-pull --view NAME", "view with the fields to change"),
-              ("jpc-update --file PULL --dry-run", "show each change in the PLAN"),
-              ("jpc-update --file PULL", "PLAN again, type yes to write")]
-    digitized = [("jpc-rename --directory BATCH --dry-run", "check every folder"),
-                 ("jpc-rename --directory BATCH", "PLAN, type yes to write"),
+              ("jpc-update --file PULL --env ENV --dry-run", "show each change in the PLAN"),
+              ("jpc-update --file PULL --env ENV", "PLAN again, type yes to write")]
+    digitized = [("jpc-rename --directory BATCH --env ENV --dry-run", "check every folder"),
+                 ("jpc-rename --directory BATCH --env ENV", "PLAN, type yes to write"),
                  ("DAMS ingest", "outside these tools"),
                  ("jpc-mads --directory BATCH", "which items are live in MADS")]
-    step_width = max(len(cmd) for cmd, _ in create + update + digitized)
 
     def steps(rows):
-        # a jpc- command is green (type it); a step outside them is not
+        # a jpc- command is green (type it); a step outside them is not.
+        # Each note goes under its command: beside the longer commands
+        # with --env ENV, a note would not fit in 79 columns.
         return "\n".join(f"      {n}. "
-                         + (f"{C.GREEN}{cmd:<{step_width}}{C.RESET}" if cmd.startswith("jpc-")
-                            else f"{cmd:<{step_width}}")
-                         + f"  {note}"
+                         + (f"{C.GREEN}{cmd}{C.RESET}" if cmd.startswith("jpc-") else cmd)
+                         + f"\n         {note}"
                          for n, (cmd, note) in enumerate(rows, 1))
     return launcher_help_screen("jpc - one short command per workflow step", [
         ("DESCRIPTION", f"""    The jpc- commands carry the JPCA ArchivesSpace <-> Airtable workflow,
@@ -1937,6 +1956,7 @@ def overview_help():
 
     Every command has its own detailed help: {C.GREEN}jpc-STEP --help{C.RESET}"""),
         ("USAGE", f"    {C.GREEN}jpc-STEP --INPUT VALUE [options]{C.RESET}\n"
+                  f"    {C.GREEN}jpc-STEP --INPUT VALUE --env ENV [options]{C.RESET}   (ArchivesSpace steps)\n"
                   f"    {C.GREEN}jpc-STEP --help{C.RESET}\n\n"
                   f"    Note the hyphen: {C.GREEN}jpc-import{C.RESET}, not jpc import."),
         ("COMMANDS", "in workflow order", "\n".join(lines)
@@ -1947,17 +1967,18 @@ def overview_help():
     each shows its changes and asks for yes before writing. jpc-rename
     also renames folders on disk."""),
         ("ENVIRONMENT", f"""    jpc-check (or jpc-lookup), jpc-fill, jpc-import, jpc-update and
-    jpc-rename talk to ArchivesSpace. They use {C.RED}{C.BOLD}PRODUCTION{C.RESET} unless you add
-    --env sandbox - on EACH command: every one defaults to production on
-    its own. jpc-pull and jpc-writeback work on Airtable only, and
-    jpc-mads reads only the public MADS site; none of these takes --env.
+    jpc-rename talk to ArchivesSpace. EACH run needs {C.RED}{C.BOLD}--env production{C.RESET} or
+    --env sandbox - there is no default, so a command without it stops
+    before anything runs (exit 2). jpc-pull and jpc-writeback work on
+    Airtable only, and jpc-mads reads only the public MADS site; none of
+    these takes --env.
 
     If the requested environment is not configured, the command stops
     (exit 1); it never switches to another environment."""),
-        ("WORKFLOWS", f"""    These workflows use production. For sandbox work, add --env sandbox
-    to every ArchivesSpace command and stop before jpc-writeback or DAMS
-    ingest. For sandbox rename runs, use disposable copies: the folders are
-    renamed in either environment.
+        ("WORKFLOWS", f"""    Replace ENV with production or sandbox - the same on every step; there
+    is no default. Sandbox work stops before jpc-writeback or DAMS ingest,
+    and sandbox rename runs use disposable copies: the folders are renamed
+    in either environment.
 
     {C.BOLD}Create new item records{C.RESET}
 {steps(create)}
@@ -1974,6 +1995,7 @@ def overview_help():
     READY   the path from "Saved ready CSV:"
     REPORT  the JSON path from "Saved import report:"
     BATCH   the folder holding the digitized JPC_AV_xxxxx folders
+    ENV     production or sandbox - the same on every ArchivesSpace step
 
     Each command's --help explains its step in detail."""),
         ("SETUP", f"""    Install once into each Python environment you use - any name works;
@@ -2026,11 +2048,14 @@ def configured_environments():
 
 def environment_stop(verb, env, extras):
     """The message that stops an ArchivesSpace command whose environment is
-    not configured on this computer, or None to go ahead. The target is
-    production unless --env sandbox was given, and it is never switched.
-    A suggested command keeps the flags given (--dry-run stays) but shows
-    each value by its placeholder - errors never echo what was typed."""
-    target = env or "production"
+    not configured on this computer, or None to go ahead. The target is the
+    --env given - parse refuses a command without one - and it is never
+    switched. A suggested command keeps the flags given (--dry-run stays)
+    but shows each value by its placeholder - errors never echo what was
+    typed."""
+    if env not in ENVIRONMENTS:
+        raise ValueError(MISSING_ENV)       # never reached through parse
+    target = env
     names = configured_environments()
     if names is None or target in names:
         return None
@@ -2050,7 +2075,7 @@ def environment_stop(verb, env, extras):
                     shown.append(spec["extras"][extras[i]])
                     i += 1
                 i += 1
-            lines += ["  For the sandbox, run the same command with --env sandbox added:",
+            lines += ["  For the sandbox instead, run the same command with --env sandbox:",
                       f"    {C.GREEN}{' '.join(shown + ['--env', 'sandbox'])}{C.RESET}"]
         lines += ['  For production access, add a "production" entry to creds.py',
                   "  (see creds_template.py)."]
@@ -2099,8 +2124,8 @@ def run(verb, args, execute=os.execve):
     argv = build(verb, value, env, extras, input_flag)
     C = Colors
     if COMMANDS[verb]["aspace"]:
-        label = (f"{C.RED}{C.BOLD}PRODUCTION{C.RESET} (jpc default - add --env sandbox for the sandbox)"
-                 if env is None else f"{C.GREEN}{C.BOLD}SANDBOX{C.RESET} (--env sandbox)")
+        label = (f"{C.RED}{C.BOLD}PRODUCTION{C.RESET} (--env production)" if env == "production"
+                 else f"{C.GREEN}{C.BOLD}SANDBOX{C.RESET} (--env sandbox)")
         print(f"Environment: {label}")
     print(f"{C.DIM}Running: {shlex.join(argv)}{C.RESET}", flush=True)
     sys.stderr.flush()

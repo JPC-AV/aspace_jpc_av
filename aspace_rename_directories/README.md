@@ -13,9 +13,9 @@ This script automates two tasks for digitized AV assets from the JPC Archive:
 |---|---|---|
 | Setup | The root README's [Setup](../README.md#setup), which installs the command | The same `creds.py`, plus `requests` (`pip install -r requirements.txt` in the repo root) |
 | Where | Any folder | `python3 aspace-rename-directories.py ...` from this folder (`aspace_rename_directories/`) |
-| Environment | Production unless you add `--env sandbox` | `--env NAME` is required when `creds.py` has several environments (no default); with one, it is used automatically |
+| Environment | `--env production` or `--env sandbox` on every run - no default | `--env NAME` is required when `creds.py` has several environments (no default); with one, it is used automatically |
 | Input | `--directory PATH` | `-d PATH`, or `--single PATH [PATH ...]` |
-| Options | `--dry-run`, `--mp4`, `--no-color`, `--env sandbox` | Every option below |
+| Options | `--env production` or `--env sandbox` (required), `--dry-run`, `--mp4`, `--no-color` | Every option below |
 
 Either way, `mediainfo` must be installed (see Prerequisites), and
 **`--env sandbox` changes only which ArchivesSpace is used**: a real sandbox
@@ -78,17 +78,18 @@ environment as described in [Two Ways to Run It](#two-ways-to-run-it).
 
 ## Usage
 
-Everyday runs, from any folder (production unless you add `--env sandbox`):
+Everyday runs, from any folder, naming the environment every time
+(`--env production` or `--env sandbox` - there is no default):
 
 ```bash
 # Dry run - each folder's outcome; ArchivesSpace and folder names unchanged
-jpc-rename --directory /path/to/videos --dry-run
+jpc-rename --directory /path/to/videos --env production --dry-run
 
 # Real run - the PLAN, then type yes
-jpc-rename --directory /path/to/videos
+jpc-rename --directory /path/to/videos --env production
 
 # Optical-disc .mp4 transfers instead of .mkv
-jpc-rename --directory /path/to/discs --mp4
+jpc-rename --directory /path/to/discs --env production --mp4
 ```
 
 The tool run directly, from this folder, naming the environment
@@ -121,8 +122,8 @@ python3 aspace-rename-directories.py -d /path/to/videos --env production --verbo
 
 ## Command-Line Options
 
-`jpc-rename` takes only `--directory`, `--dry-run`, `--mp4`, `--no-color` and
-`--env sandbox`; the rest are for direct runs.
+`jpc-rename` takes only `--directory`, `--env production` or `--env sandbox`
+(required), `--dry-run`, `--mp4` and `--no-color`; the rest are for direct runs.
 
 | Option | Description |
 |--------|-------------|

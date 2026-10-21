@@ -828,6 +828,26 @@ aborts with no writes.
 
 ## Version History
 
+- **v4.0.0** (2026): **BREAKING** - the `jpc-` ArchivesSpace commands need
+  an explicit environment
+  - **Breaking:** `jpc-check` (and `jpc-lookup`), `jpc-fill`, `jpc-import`,
+    `jpc-update` and `jpc-rename` need `--env production` or
+    `--env sandbox` on every run. There is no default: a command without
+    it stops before anything runs (exit 2) and says to choose one, even
+    when `creds.py` has only one environment. `--env production` is now
+    accepted. Add `--env` to saved commands and notes
+  - Help, examples and the `jpc` overview show the flag. `jpc-pull`'s next
+    steps show `--env ENV` with a line saying to replace it with
+    production or sandbox, since a pull has no ArchivesSpace target
+  - Unchanged: `jpc-pull`, `jpc-writeback` and `jpc-mads` take no `--env`;
+    the write-back still accepts production reports only; the direct
+    Python tools still use their only configured environment and require
+    `--env` when several are configured
+  - After pulling, with the documented editable install
+    (`python -m pip install -e .`): nothing to reinstall - the commands
+    are the same; reinstalling only refreshes the version
+    `python -m pip show jpc-av-tools` reports
+
 - **v3.8.0** (2026): `jpc-lookup`, another name for `jpc-check`
   - `jpc-lookup` runs `jpc-check` itself: the same options, environment
     rules (production unless `--env sandbox`), output and exit codes; its

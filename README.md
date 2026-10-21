@@ -188,7 +188,8 @@ New setups use this `environments` block. A legacy flat `creds.py`
 `production` environment, but the block makes each target explicit.
 
 How the scripts pick the target **when run directly** (the `jpc-` commands
-default to production instead - see [Commands](#commands)):
+instead need `--env production` or `--env sandbox` on every run - see
+[Commands](#commands)):
 
 - **One entry configured** — used automatically, nothing to type. If you only
   have sandbox access, production is unreachable from your machine.
@@ -248,9 +249,11 @@ jpc-check --help
   message says which, and gives the command to run.
 - **`the required package 'requests' is not installed`** - repeat step 3
   with the environment these commands belong to active.
-- **`production is not set up on this computer`** - for sandbox work, add
-  `--env sandbox`; for production work, configure production access: a
-  `production` entry in `creds.py` (step 4).
+- **`choose the ArchivesSpace environment`** - add `--env production` or
+  `--env sandbox` to the command; there is no default.
+- **`production is not set up on this computer`** - for sandbox work, use
+  `--env sandbox` instead; for production work, configure production access:
+  a `production` entry in `creds.py` (step 4).
 - **`the sandbox is not set up on this computer`** - add a `sandbox` entry
   to `creds.py` (step 4).
 
@@ -264,19 +267,21 @@ their own checks, PLANs and `yes` prompts. `jpc` lists them;
 | Command | Runs |
 |---------|------|
 | `jpc-pull --view NAME` | `airtable_pull.py NAME` |
-| `jpc-check --file FILE [--output PATH]` | `aspace_csv_export.py --check FILE --env production` |
-| `jpc-lookup --file FILE [--output PATH]` | the same as `jpc-check` (another name for it) |
-| `jpc-fill --file FILE` | `aspace_csv_export.py --fill-parents FILE --env production` |
-| `jpc-import --file FILE [--dry-run] [--keep-going]` | `aspace_csv_import.py --create-records --file FILE --env production` |
-| `jpc-update --file FILE [--dry-run]` | `aspace_csv_import.py --update-only --file FILE --env production` |
+| `jpc-check --file FILE --env ENV [--output PATH]` | `aspace_csv_export.py --check FILE --env ENV` |
+| `jpc-lookup --file FILE --env ENV [--output PATH]` | the same as `jpc-check` (another name for it) |
+| `jpc-fill --file FILE --env ENV` | `aspace_csv_export.py --fill-parents FILE --env ENV` |
+| `jpc-import --file FILE --env ENV [--dry-run] [--keep-going]` | `aspace_csv_import.py --create-records --file FILE --env ENV` |
+| `jpc-update --file FILE --env ENV [--dry-run]` | `aspace_csv_import.py --update-only --file FILE --env ENV` |
 | `jpc-writeback --report REPORT.json [--run] [--exclude-catalog JPC_AV_xxxxx]...` | `airtable_writeback.py REPORT.json` |
-| `jpc-rename --directory PATH [--dry-run] [--mp4]` | `aspace-rename-directories.py -d PATH --env production` |
+| `jpc-rename --directory PATH --env ENV [--dry-run] [--mp4]` | `aspace-rename-directories.py -d PATH --env ENV` |
 | `jpc-mads (--file FILE \| --directory BATCH) [--output PATH]` | `check_mads.py FILE` or `check_mads.py --directory BATCH` |
 
-- **Production by default** for the commands that talk to ArchivesSpace,
-  shown before anything runs; add `--env sandbox` for the sandbox. (Direct
-  tools require `--env` when several environments are configured.) Each
-  command decides on its own, so a sandbox trial needs `--env sandbox` on
+- **`--env production` or `--env sandbox` on every command** that talks to
+  ArchivesSpace (ENV in the table above). There is no default: a command
+  without it stops before anything runs (exit 2), even when `creds.py` has
+  only one environment, and the target is shown before anything runs.
+  (Direct tools pick their only configured environment, and require `--env`
+  when several are configured.) A sandbox trial uses `--env sandbox` on
   **every** step - and a sandbox import never goes on to `jpc-writeback`
   (the write-back accepts production reports only). The Airtable commands
   and `jpc-mads` (public MADS only) take no `--env`.
@@ -285,9 +290,9 @@ their own checks, PLANs and `yes` prompts. `jpc` lists them;
   folders on disk are renamed all the same, with the sandbox records' ref
   IDs. Try the sandbox only on disposable copies of the folders.
 - **A target missing from `creds.py` stops the command.** On a computer set
-  up for the sandbox only, a command without `--env sandbox` stops before
+  up for the sandbox only, a command with `--env production` stops before
   anything runs (exit 1), names what `creds.py` has and shows the command
-  with `--env sandbox`; it never switches environments by itself.
+  with `--env sandbox` instead; it never switches environments by itself.
 - **Paths are read from the folder you are in.** Pasting the full path a
   tool printed ("Saved pulled CSV: ...") works from anywhere.
 - **Only the flags listed**, in their long form: anything else - a short
@@ -349,7 +354,7 @@ All of these are documented in [aspace_csv_import/README.md](aspace_csv_import/R
 Processes digitized video folders: reads each media file's runtime with `mediainfo` (`.mkv`, or optical-disc `.mp4` with `--mp4`), writes it to the record's Duration (a Defined List subnote of the Physical Characteristics and Technical Requirements note), fills a blank physical details on a single-extent record, and renames each folder with the record's ref ID. A real run first shows a PLAN of every change and writes only after you type `yes`; each folder is checked again just before it is written. A dry run shows each folder's outcome, leaves ArchivesSpace and folder names unchanged, and saves a log.
 
 ```bash
-jpc-rename --directory /path/to/videos --dry-run
+jpc-rename --directory /path/to/videos --env production --dry-run
 ```
 
 `jpc-rename` (see [Commands](#commands)) is the everyday run. The tool run directly also offers `--single`, `--rename-media`, `--no-update` and `--no-rename`. See [aspace_rename_directories/README.md](aspace_rename_directories/README.md) for full documentation.
@@ -366,4 +371,4 @@ Typical usage order:
 
 ## Environments
 
-Every ArchivesSpace tool supports sandbox and production (`check_mads.py` and `jpc-mads` talk only to the public MADS site and take no environment). `creds.py` holds an `environments` dict with one entry per instance. When running the tools directly: with one configured it is selected automatically, with several every run must pass `--env NAME` (there is no default). The `jpc-` commands differ: they use production unless `--env sandbox` is given, and show the environment before anything runs (see [Commands](#commands)). The environment is chosen once per run, before anything connects.
+Every ArchivesSpace tool supports sandbox and production (`check_mads.py` and `jpc-mads` talk only to the public MADS site and take no environment). `creds.py` holds an `environments` dict with one entry per instance. When running the tools directly: with one configured it is selected automatically, with several every run must pass `--env NAME` (there is no default). The `jpc-` commands differ: every run needs `--env production` or `--env sandbox`, even with one configured, and shows the environment before anything runs (see [Commands](#commands)). The environment is chosen once per run, before anything connects.
