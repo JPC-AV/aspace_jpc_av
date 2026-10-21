@@ -101,7 +101,9 @@ SHARED_HELP = {
     "receipt_csv_bullet": """      • {cyan}import_report_YYYYMMDD_HHMMSS_PID.csv{reset}
         The same receipt, as a spreadsheet.""",
     "log_bullet": """      • {cyan}csv_import_YYYYMMDD_HHMMSS_PID.log{reset}
-        The run's log.""",
+        The run's log. If it cannot be written (a full or disconnected
+        disk), the run sends no further catalog writes and says "NOT saved
+        log" (exit 1); rows already written keep their outcomes.""",
     "cancel_and_ctrl_c": """      A run cancelled at the yes prompt wrote nothing, so it saves only the
       log. After a Ctrl-C, any receipt saved covers only the rows reached;
       a Ctrl-C before processing began saves none.""",
@@ -761,6 +763,8 @@ COMMANDS = {
                     cancelled at the prompt - nothing was written to
                     ArchivesSpace. A fatal error after writing began saves a
                     partial report: check it in ArchivesSpace before rerunning.
+                    Also: the log could not be written - the run stopped
+                    before its next write (rows written keep their outcomes).
     {warn}{bold}2{reset}    Review     Some rows failed, were refused or held, or a problem
                     row stopped the whole run before writing (the run lists
                     the rows and why). Also: an argument was rejected.
@@ -950,6 +954,8 @@ COMMANDS = {
                     cancelled at the prompt - nothing was written to
                     ArchivesSpace. A fatal error after writing began saves a
                     partial report: check it in ArchivesSpace before rerunning.
+                    Also: the log could not be written - the run stopped
+                    before its next write (rows written keep their outcomes).
     {warn}{bold}2{reset}    Review     Some rows failed or were refused, or a problem row
                     (a hold included) stopped the whole run before writing
                     (the run lists the rows and why). Also: an argument was

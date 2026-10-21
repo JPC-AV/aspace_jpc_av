@@ -118,7 +118,8 @@ def get_colored_help():
         ("EXIT", f"""    {C.GREEN}0{C.RESET}    every row done
     {C.RED}1{C.RESET}    stopped. Before the yes (a bad CSV, a login problem, cancelled at the
          prompt) nothing was written to ArchivesSpace. A fatal error after writing
-         began saves a partial report - check it in ArchivesSpace before rerunning
+         began saves a partial report - check it in ArchivesSpace before rerunning.
+         Or the log could not be written: the run stopped before its next write
     {C.YELLOW}2{C.RESET}    some rows failed, were refused or held, or a problem row stopped the
          batch (see the report); also a bad argument
     {C.RED}3{C.RESET}    records may have been written but the reports could not be saved
@@ -211,22 +212,138 @@ BATCH_SIZE = 10  # Process in batches to avoid overwhelming the API
 # SETUP LOGGING AND DIRECTORIES
 # ==============================
 
-def setup_environment(dry_run: bool = False, csv_file: str = None):
-    """Create output directories and configure logging."""
+class RunLog(logging.FileHandler):
+    """A real run's log file - the one logging handler the importer owns.
+    The first write, flush or close that fails (a full or disconnected
+    disk) is kept in `problem`, by kind only - never the message or the
+    error's own text - instead of logging's traceback on stderr. The run
+    checks it before the yes prompt and before every catalog write (see
+    intent), and once more when the log is finished, before any "Saved log"."""
+    problem = None
+    saved_level = None   # the root level to put back, when this run changed it
+
+    def _record(self, error):
+        if self.problem is None:
+            self.problem = (getattr(error, "strerror", None) or type(error).__name__
+                            if error is not None else "write failed")
+
+    def handleError(self, record):
+        self._record(sys.exc_info()[1])
+
+    def flush(self):
+        try:
+            super().flush()
+        except (OSError, ValueError) as e:
+            self._record(e)
+
+    def intent(self, text: str) -> Optional[str]:
+        """Write `text` to the file now - through this handler alone, so no
+        logger level can skip it - and flush it. -> the problem, or None
+        while every line has reached the file."""
+        if self.problem is None:
+            self.handle(logging.LogRecord(__name__, logging.INFO, __file__, 0, text, None, None))
+            self.flush()
+        return self.problem
+
+
+RUN_LOG = None            # this real run's RunLog, from setup_environment to finish_log
+_LOG_FINISHED = None      # (problem,) once finish_log has run
+_LOG_REPORTED = False     # the run has already said whether the log was saved
+_STOPPED_BEFORE_YES = False
+
+
+class LogStopped(Exception):
+    """A catalog write NOT sent because this run's log could not be written:
+    definitely not applied, never an uncertain write. `container` is a top
+    container this row had already created (it stays). Re-raised past every
+    row's broad error handler - the run stops before its next write."""
+
+    def __init__(self, problem: str):
+        super().__init__(f"the log could not be written ({problem})")
+        self.problem = problem
+        self.container = None
+
+
+def log_problem() -> Optional[str]:
+    """Why this run's log could not be written, or None."""
+    if RUN_LOG is not None:
+        return RUN_LOG.problem
+    return _LOG_FINISHED[0] if _LOG_FINISHED else None
+
+
+def finish_log() -> Optional[str]:
+    """Flush, close and detach this run's log and put back the root level it
+    changed: -> the problem, or None when every line reached the file. Safe
+    to call again - the first result stands. Nothing is logged after it. A
+    Ctrl-C during the close still detaches the log, puts the level back and
+    keeps a result - the log is then not saved - and the Ctrl-C goes on."""
+    global RUN_LOG, _LOG_FINISHED
+    log = RUN_LOG
+    if log is None:
+        return _LOG_FINISHED[0] if _LOG_FINISHED else None
+    RUN_LOG = None
+    root = logging.getLogger()
+    closed = False
+    try:
+        root.removeHandler(log)
+        try:
+            log.close()
+        except (OSError, ValueError) as e:
+            log._record(e)
+        closed = True
+    finally:
+        if not closed:
+            # stopped part-way: whether every line reached the file is
+            # unknown, so the log is never claimed as saved
+            root.removeHandler(log)
+            if log.problem is None:
+                log.problem = LOG_CLOSE_INTERRUPTED
+        if log.saved_level is not None:
+            root.setLevel(log.saved_level)
+        _LOG_FINISHED = (log.problem,)
+    return log.problem
+
+
+LOG_INCOMPLETE = ("The log is incomplete - keep this screen output with any receipt "
+                  "saved above; together they are this run's record")
+LOG_CLOSE_INTERRUPTED = "interrupted while closing"
+
+
+def log_failure_line(problem: str) -> str:
+    """The line saying why the log is NOT saved. A close cut short - a Ctrl-C
+    can land in the close's own flush - leaves the log's completeness
+    unconfirmed: it may still hold useful detail, so it MAY be incomplete.
+    After a failed write, flush or close it is incomplete."""
+    if problem == LOG_CLOSE_INTERRUPTED:
+        return ("Closing the log was interrupted - it may be incomplete; keep this screen "
+                "output with any receipt saved above; together they are this run's record")
+    return f"Writing the log failed ({problem}). {LOG_INCOMPLETE}"
+
+
+def setup_environment(dry_run: bool = False, csv_file: str = None) -> Optional[str]:
+    """Create output directories and configure logging. -> None, or (a real
+    run only) why its log could not be started - the run must stop then."""
+    global RUN_LOG, _LOG_FINISHED, _LOG_REPORTED, _STOPPED_BEFORE_YES
     # A dry run writes no files at all - not even a log; the terminal is
     # its whole output. Real runs log to a file (the console uses print).
     if dry_run:
         logging.basicConfig(level=logging.INFO, handlers=[logging.NullHandler()])
     else:
-        os.makedirs(OUTPUT_DIR, exist_ok=True)
-        logging.basicConfig(
-            level=logging.INFO,
-            format='%(asctime)s - %(levelname)s - %(message)s',
-            handlers=[
-                logging.FileHandler(LOG_FILE),
-            ]
-        )
-    
+        try:
+            os.makedirs(OUTPUT_DIR, exist_ok=True)
+            log = RunLog(LOG_FILE)
+        except OSError as e:
+            return e.strerror or type(e).__name__
+        log.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+        # Only this handler is the importer's: any other root handler stays as
+        # it is, and the root level is put back when the log is finished.
+        root = logging.getLogger()
+        if root.level > logging.INFO:
+            log.saved_level = root.level
+            root.setLevel(logging.INFO)
+        root.addHandler(log)
+        RUN_LOG, _LOG_FINISHED, _LOG_REPORTED, _STOPPED_BEFORE_YES = log, None, False, False
+
     logging.info("=" * 60)
     logging.info("ArchivesSpace CSV Import Script Started")
     logging.info(f"Timestamp: {datetime.now()}")
@@ -234,6 +351,7 @@ def setup_environment(dry_run: bool = False, csv_file: str = None):
         logging.info(f"CSV File: {csv_file}")
     logging.info(f"Dry Run: {dry_run}")
     logging.info("=" * 60)
+    return None
 
 # ==============================
 # CSV VALIDATION (UPFRONT)
@@ -402,6 +520,21 @@ class ArchivesSpaceClient(ASpaceClient):
     surface (legacy tuple returns) and (b) carries the extent-vocabulary
     domain logic, which is importer policy, not API-boundary behavior.
     """
+    send_blocked = False   # a catalog write was held back: the log could not be written
+
+    def _do_request(self, method: str, endpoint: str, data: Dict = None,
+                    retry_count: int = 0) -> Optional[Dict]:
+        """Every catalog write attempt - the resend after a 412 re-login
+        included - first puts its intent in this run's log; once the log
+        cannot be written, the write is not sent (a definite local stop,
+        raised as LogStopped). Reads, login and logout go straight through."""
+        if method != "GET" and RUN_LOG is not None:
+            problem = RUN_LOG.intent(f"Sending a catalog write ({method}) to ArchivesSpace")
+            if problem:
+                self.send_blocked = True
+                self.last_failure_definitive = True   # nothing was sent
+                raise LogStopped(problem)
+        return super()._do_request(method, endpoint, data, retry_count)
 
     def check_component_unique_id(self, component_id: str) -> Tuple[Optional[int], Optional[str]]:
         """Legacy tuple adapter over find_archival_object.
@@ -1108,7 +1241,11 @@ def create_archival_object(row: Dict, client: ArchivesSpaceClient,
         return {"uri": f"/dry_run/{catalog_number}", "dry_run": True}, []
     else:
         endpoint = f"/repositories/{aspace_client.REPO_ID}/archival_objects"
-        result = client.create_record(endpoint, ao_data)
+        try:
+            result = client.create_record(endpoint, ao_data)
+        except LogStopped as stop:
+            stop.container = created_container_uri   # created by this row: it stays
+            raise
 
         if result:
             logging.info(f"Successfully created archival object: {catalog_number}")
@@ -1146,9 +1283,18 @@ def create_archival_object(row: Dict, client: ArchivesSpaceClient,
                 # actually exist and this container may be attached to it;
                 # deleting it then would corrupt a successful import.
                 if client.last_failure_definitive:
-                    if client.delete_record(created_container_uri):
+                    try:
+                        deleted = client.delete_record(created_container_uri)
+                    except LogStopped:
+                        # not sent: the refusal stands, the container stays,
+                        # and the run stops before its next write
+                        deleted = None
+                        errors.append(f"Top container {created_container_uri} created by this "
+                                      f"row was kept - its cleanup was not sent because the "
+                                      f"log could not be written")
+                    if deleted:
                         logging.info(f"Cleaned up unused top container: {created_container_uri}")
-                    else:
+                    elif deleted is not None:
                         logging.warning(f"Orphaned top container left behind: {created_container_uri}")
                         errors.append(f"Orphaned top container left behind: {created_container_uri}")
                 else:
@@ -1611,7 +1757,7 @@ def process_csv_row(row: Dict, row_num: int, client: ArchivesSpaceClient,
             result["message"] = "Failed to create"
             logging.error(f"Failed to create archival object: {catalog_number}")
             
-    except DuplicateStop:
+    except (DuplicateStop, LogStopped):
         # Must propagate to process_csv_file to halt the run; never swallow it here.
         raise
     except Exception as e:
@@ -1882,6 +2028,16 @@ def process_csv_file_update_only(filename: str, client: ArchivesSpaceClient,
             if ao_result and ao_result.get('record'):
                 result["record"] = ao_result['record']
                 result["top_container"] = ao_result.get('top_container')
+        except LogStopped as stop:
+            # The update was never sent (definite): not updated, and the run
+            # stops before its next write.
+            result = make_row_result(row_num, row, "aborted",
+                                     _log_stop_message(stop, "Not updated"))
+            results.append(result)
+            record_row_outcome(result, summary, echo=False)
+            print_status("warning", f"{result[col.CATALOG]} - {result['message']}")
+            _stop_for_log(rows, row_num, results, summary)
+            break
         except KeyboardInterrupt:
             # Ctrl-C DURING the row's write: the outcome is UNKNOWN - the
             # server may have committed it. Flag first, then record, so even
@@ -1967,6 +2123,56 @@ def _cancel_all(rows: List[Dict], results: List[Dict], summary: Dict):
     summary["aborted"] = len(rows)
     summary["cancelled"] = True
     summary["end_time"] = datetime.now().isoformat()
+
+
+def ask_to_write_logged(lines: List[str]) -> bool:
+    """ask_to_write, once the run's log has taken that intent: a log that can
+    no longer be written stops the run here - no prompt, nothing written."""
+    global _STOPPED_BEFORE_YES
+    if RUN_LOG is not None and RUN_LOG.intent("Asking for confirmation before any write"):
+        _STOPPED_BEFORE_YES = True
+        return False
+    return ask_to_write(lines)
+
+
+def _planned_result(row_num: int, row: Dict, entry: Dict) -> Dict:
+    """The outcome the create PLAN already decided for a skipped or refused
+    row - nothing is ever written for it."""
+    if entry["action"] == "skip":
+        return make_row_result(
+            row_num, row, "skipped",
+            entry["reason"] if entry["reason"] == "Missing catalog number"
+            else "Duplicate - skipped (use --update-only to change existing records)")
+    return make_row_result(row_num, row, "error", entry["reason"])
+
+
+def _log_stop_message(stop: "LogStopped", what: str) -> str:
+    """The stopped row's own outcome, in fixed words: what was not written,
+    and any container this row created, which stays."""
+    message = f"{what} - the run stopped because its log could not be written"
+    if stop.container:
+        message += (f"; top container {stop.container} created by this row was kept "
+                    f"(a rerun reuses it)")
+    return message
+
+
+def _stop_for_log(rows: List[Dict], row_num: int, results: List[Dict], summary: Dict,
+                  plan: Dict = None):
+    """The run stops after row `row_num` because its log could not be
+    written. Rows already recorded keep their outcomes; each later row is
+    recorded once - a row the create PLAN skips or refuses keeps that
+    outcome, every other one is not written."""
+    summary["_log_stopped"] = True        # screen state only: kept out of the receipts
+    for later_num, later_row in enumerate(rows[row_num:], row_num + 1):
+        entry = (plan or {}).get(later_num, {})
+        if entry.get("action") in ("skip", "refuse"):
+            result = _planned_result(later_num, later_row, entry)
+        else:
+            result = make_row_result(later_num, later_row, "aborted",
+                                     f"Not written - the run stopped at row {row_num} "
+                                     f"because its log could not be written")
+        results.append(result)
+        record_row_outcome(result, summary, echo=False)
 
 
 def _plan_line(label: str, color: str, text: str) -> None:
@@ -2235,13 +2441,7 @@ def process_csv_file(filename: str, client: ArchivesSpaceClient,
     for row_num, row in enumerate(rows, 1):
         entry = plan.get(row_num, {})
         if entry.get("action") in ("skip", "refuse"):
-            if entry["action"] == "skip":
-                result = make_row_result(
-                    row_num, row, "skipped",
-                    entry["reason"] if entry["reason"] == "Missing catalog number"
-                    else "Duplicate - skipped (use --update-only to change existing records)")
-            else:
-                result = make_row_result(row_num, row, "error", entry["reason"])
+            result = _planned_result(row_num, row, entry)
             results.append(result)
             # already shown row by row in the PLAN - counted, not repeated
             record_row_outcome(result, summary, echo=False)
@@ -2263,6 +2463,17 @@ def process_csv_file(filename: str, client: ArchivesSpaceClient,
                                                f"Not written - the run halted at row {row_num} "
                                                f"(a record appeared after preflight)"))
                 summary["aborted"] += 1
+            break
+        except LogStopped as stop:
+            # This row's next write was never sent (definite): it is not
+            # created, naming any container it created; the run stops here,
+            # --keep-going included.
+            result = make_row_result(row_num, row, "aborted",
+                                     _log_stop_message(stop, "Archival object not created"))
+            results.append(result)
+            record_row_outcome(result, summary, echo=False)
+            print_status("warning", f"{result[col.CATALOG]} - {result['message']}")
+            _stop_for_log(rows, row_num, results, summary, plan)
             break
         except KeyboardInterrupt:
             # Ctrl-C DURING row processing: the interrupt may have
@@ -2288,6 +2499,11 @@ def process_csv_file(filename: str, client: ArchivesSpaceClient,
         # and main() recovers the partials via `state`.
         results.append(result)
         record_row_outcome(result, summary)
+        if getattr(client, "send_blocked", False):
+            # a cleanup was held back for the log: this row keeps its own
+            # outcome, and nothing more is written
+            _stop_for_log(rows, row_num, results, summary, plan)
+            break
 
         # Batch pause: same reasoning - the row is done, just stop.
         if row_num % BATCH_SIZE == 0 and not dry_run:
@@ -2464,12 +2680,16 @@ def reconcile_summary(results: List[Dict], summary: Dict):
             summary[key] += 1
 
 def print_summary(summary: Dict, elapsed_time: str = None,
-                  results: List[Dict] = None):
+                  results: List[Dict] = None, log_finished: bool = False,
+                  log_failure: Optional[str] = None):
     """The RESULT block, then the files saved. Every category that happened
     is shown; held rows, writes of unknown outcome and rows never written
     are counted apart from definite failures. `results` is the run's row
     list - an empty list is a run stopped before its first row, None means
-    no row list was given (nothing to count unreached rows against)."""
+    no row list was given (nothing to count unreached rows against). The log
+    is named only once it is finished (`log_finished`): Saved when every
+    line reached the file, NOT saved with `log_failure` otherwise."""
+    global _LOG_REPORTED
     dry = summary.get('dry_run', False)
     rows_known = results is not None
     results = results or []
@@ -2493,7 +2713,10 @@ def print_summary(summary: Dict, elapsed_time: str = None,
         ("Not written (the run stopped)", aborted, "attention"),
         ("Not reached (interrupted)", not_reached, "attention"),
     ], title="RESULT - dry run" if dry else "RESULT")
-    if aborted:
+    if aborted and summary.get("_log_stopped"):
+        print(f"\n  {Colors.DIM}Not written: the run stopped before these rows because "
+              f"its log could not be written{Colors.RESET}")
+    elif aborted:
         print(f"\n  {Colors.DIM}Not written: these rows may be fine - the failed rows "
               f"stopped the run{Colors.RESET}")
         print(f"  {Colors.DIM}before they were written{Colors.RESET}")
@@ -2506,11 +2729,19 @@ def print_summary(summary: Dict, elapsed_time: str = None,
     if not dry:
         files = summary.get('_files', {})
         order = ("import report", "receipt CSV", "records file")
+        # the log by how it ended, never by whether its file exists
+        log = [("log", LOG_FILE)] if log_finished else []
         print_saved([(role, files[role][1]) for role in order
                      if files.get(role, ("",))[0] == "saved"]
-                    + [("log", LOG_FILE if os.path.exists(LOG_FILE) else None)],
+                    + ([] if log_failure else log),
                     failed=[(role, files[role][1]) for role in order
-                            if files.get(role, ("",))[0] == "failed"])
+                            if files.get(role, ("",))[0] == "failed"]
+                    + (log if log_failure else []))
+        if log_finished and log_failure:
+            print()
+            print_status("error", log_failure_line(log_failure))
+        if log_finished:
+            _LOG_REPORTED = True     # said now - not before: the exit fallback covers until here
     records_failed = summary.get('_files', {}).get('records file', ("",))[0] == "failed"
     if (summary.get('snapshots_missing') or summary.get('containers_missing')) and not records_failed:
         gaps = []
@@ -2568,12 +2799,14 @@ def report_file_lines(summary: Dict) -> List[Tuple[str, str]]:
     return lines
 
 
-def report_failure_messages(summary: Dict, partial: bool = False) -> List[str]:
+def report_failure_messages(summary: Dict, partial: bool = False,
+                            log_ok: bool = True) -> List[str]:
     """What the failed report saves mean, file by file. The import report
     (JSON) and the receipt CSV each list every row's outcome, so one alone
     is a full record; the write-back reads the JSON and the records file.
     `partial`: the run stopped early (a fatal error or Ctrl-C), so any
-    saved receipt covers only the rows reached."""
+    saved receipt covers only the rows reached. `log_ok` False: the log
+    could not be written either, so nothing points to it."""
     files = summary.get("_files", {})
     failed = {role for role, (state, _) in files.items() if state == "failed"}
     messages = []
@@ -2602,6 +2835,10 @@ def report_failure_messages(summary: Dict, partial: bool = False) -> List[str]:
     if partial and not {"import report", "receipt CSV"} <= failed:
         messages.append("The saved receipts cover only the rows reached before the run "
                         "stopped - check those records in ArchivesSpace before rerunning")
+    if not log_ok and messages:
+        messages = [m.replace(" (see log)", "") for m in messages]
+        messages.append("The log could not be written either - this screen output is the "
+                        "only detail; keep it")
     return messages
 
 
@@ -2794,7 +3031,46 @@ def recorded_command(args: argparse.Namespace) -> str:
     return command
 
 
+def _end_session(client: ArchivesSpaceClient) -> Tuple[Optional[str], bool]:
+    """Log out - its lines still go into the log - then finish the log:
+    -> (the log's problem or None, whether the logout was interrupted). A
+    Ctrl-C during the logout never skips finishing the log."""
+    interrupted = False
+    try:
+        client.logout()
+    except KeyboardInterrupt:
+        interrupted = True
+    return finish_log(), interrupted
+
+
+def _close_log_at_exit() -> None:
+    """On every way out of a real run: the log is finished, and if it could
+    not be written - and the run has not said so yet - that is said now,
+    even when a Ctrl-C stops the close itself (the Ctrl-C then goes on)."""
+    global _LOG_REPORTED
+    if RUN_LOG is None and _LOG_FINISHED is None:
+        return                      # a dry run, or the run stopped before its log
+    try:
+        finish_log()
+    finally:
+        problem = log_problem()     # kept by finish_log, an interrupted close included
+        if problem and not _LOG_REPORTED:
+            _LOG_REPORTED = True
+            _safe_console("error", f"NOT saved log: {os.path.abspath(LOG_FILE)}")
+            _safe_console("error", log_failure_line(problem))
+
+
 def main():
+    """The run, with its log finished on every way out (see _main)."""
+    global _LOG_FINISHED, _LOG_REPORTED, _STOPPED_BEFORE_YES
+    _LOG_FINISHED, _LOG_REPORTED, _STOPPED_BEFORE_YES = None, False, False
+    try:
+        _main()
+    finally:
+        _close_log_at_exit()
+
+
+def _main():
     """Main execution function."""
     global RUN_COMMAND
     parser = build_parser()
@@ -2868,8 +3144,15 @@ def main():
         duplicate_mode = 'create'
     
     # Setup
-    setup_environment(args.dry_run, csv_file)
-    
+    log_open_problem = setup_environment(args.dry_run, csv_file)
+    if log_open_problem:
+        # Before any ArchivesSpace request: the reports folder, or an empty
+        # log file, may already exist, but nothing was sent.
+        print_status("error", f"Could not start this run's log in {os.path.abspath(OUTPUT_DIR)} "
+                              f"({log_open_problem}) - stopped before contacting ArchivesSpace; "
+                              f"nothing was written there")
+        sys.exit(1)
+
     # Print header - the TARGET line is the audit trail of which catalog
     # this run touched; production gets the loud color.
     target = (f"{aspace_client.ACTIVE_ENV.upper()} ({aspace_client.ASPACE_URL}, "
@@ -2998,12 +3281,13 @@ def main():
     try:
         if args.update_only:
             results, summary = process_csv_file_update_only(csv_source, client, args.dry_run,
-                                                            state=state, confirm=ask_to_write,
+                                                            state=state,
+                                                            confirm=ask_to_write_logged,
                                                             target=target)
         else:
             results, summary = process_csv_file(csv_source, client, args.dry_run,
                                                 duplicate_mode, state=state,
-                                                confirm=ask_to_write, target=target)
+                                                confirm=ask_to_write_logged, target=target)
     except KeyboardInterrupt:
         results = state.get("results")
         summary = state.get("summary")
@@ -3028,7 +3312,11 @@ def main():
 
     if summary.get("cancelled"):
         # Nothing was written anywhere, so there is nothing to report.
-        print_status("warning", "Cancelled - nothing written to ArchivesSpace")
+        if _STOPPED_BEFORE_YES:
+            print_status("error", f"Stopped before writing: the log could not be written "
+                                  f"({log_problem()}) - nothing was written to ArchivesSpace")
+        else:
+            print_status("warning", "Cancelled - nothing written to ArchivesSpace")
         client.logout()
         sys.exit(1)
 
@@ -3044,6 +3332,13 @@ def main():
             client.logout()
             sys.exit(1)
         reports_ok = generate_reports(results, summary)
+        # the session, then the log - before anything is said about either.
+        # A Ctrl-C there (a slow logout, or the log's close: finish_log has
+        # kept its result) still lets the fatal error be reported below.
+        try:
+            log_failure, end_interrupted = _end_session(client)
+        except KeyboardInterrupt:
+            log_failure, end_interrupted = log_problem(), True
         _safe_console("error", f"Fatal error during processing: {summary['fatal_error']} "
                                f"({len(results)} row(s) recorded)")
         for status, message in report_file_lines(summary):
@@ -3052,11 +3347,15 @@ def main():
             _safe_console("warning", "Partial report saved - check the records it lists in "
                                      "ArchivesSpace before rerunning")
         else:
-            for message in report_failure_messages(summary, partial=True):
+            # an interrupted close leaves the log unconfirmed, not known to be
+            # unwritten: it may still hold useful detail, so keep pointing to it
+            for message in report_failure_messages(
+                    summary, partial=True,
+                    log_ok=log_failure in (None, LOG_CLOSE_INTERRUPTED)):
                 _safe_console("error", message)
-        client.logout()
-        sys.exit(3 if not reports_ok else 1)
+        sys.exit(3 if not reports_ok else 130 if end_interrupted else 1)
 
+    session_ended = False
     try:
         if summary.get("interrupted"):
             # A Ctrl-C can land between a row's append and its tally - the
@@ -3073,7 +3372,13 @@ def main():
         minutes, seconds = divmod(remainder, 60)
         elapsed_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
-        print_summary(summary, elapsed_str, results)
+        # The receipts are already attempted; now the session (its lines go
+        # into the log), then the log itself - before anything says "Saved".
+        log_failure, logout_interrupted = _end_session(client)
+        session_ended = True
+        log_finished = not summary.get("dry_run")      # a dry run has no log
+        print_summary(summary, elapsed_str, results, log_finished=log_finished,
+                      log_failure=log_failure)
 
         if reports_ok:
             print_next_step(summary, results)
@@ -3082,23 +3387,29 @@ def main():
             # ArchivesSpace may have been modified but the audit trail wasn't
             # saved - that is a failed run, not a successful one.
             for message in report_failure_messages(summary,
-                                                   partial=bool(summary.get('interrupted'))):
+                                                   partial=bool(summary.get('interrupted')),
+                                                   log_ok=log_failure in (None,
+                                                                          LOG_CLOSE_INTERRUPTED)):
                 print_status("error", message)
-            client.logout()
             sys.exit(3)
 
         if summary.get('interrupted'):
             print_status("error", "Run was interrupted (Ctrl-C) - the report above "
                                   "covers only the rows reached before the stop")
-            client.logout()
             sys.exit(130)
+        if logout_interrupted:
+            print_status("error", "Interrupted (Ctrl-C) while logging out - the rows above "
+                                  "were carried out as shown")
+            sys.exit(130)
+
+        if log_failure:
+            sys.exit(1)     # the run's outcomes stand; its log is incomplete
 
         if summary['failed'] > 0:
             if summary.get('created', 0) > 0 and not summary.get('dry_run'):
                 print_status("warning", "Records were created this run - wait ~1 minute "
                                         "for the search index before rerunning failed rows, "
                                         "or the duplicate check may not see them yet")
-            client.logout()
             sys.exit(2)
 
     except KeyboardInterrupt:
@@ -3107,17 +3418,18 @@ def main():
         # or nothing (a .tmp is never mistakable for the audit trail).
         print_status("error", "Interrupted during report writing - any report file "
                               "present is complete; a leftover .tmp file is not a report")
-        logging.error("Interrupted by operator during report writing")
-        client.logout()
+        if RUN_LOG is not None:
+            logging.error("Interrupted by operator during report writing")
+        if not session_ended:
+            client.logout()
         sys.exit(130)
     except Exception as e:
         print_status("error", f"Fatal error: {str(e)}")
-        logging.error(f"Fatal error during import: {str(e)}")
-        client.logout()
+        if RUN_LOG is not None:
+            logging.error(f"Fatal error during import: {str(e)}")
+        if not session_ended:
+            client.logout()
         sys.exit(1)
-    
-    # Logout
-    client.logout()
 
 if __name__ == "__main__":
     main()
