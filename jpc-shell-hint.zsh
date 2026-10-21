@@ -29,10 +29,10 @@
 typeset -g _JPC_HINT_REPO=${${(%):-%x}:A:h}
 
 # Every jpc command, bare jpc first - the same commands as COMMANDS in
-# jpc.py (a test compares them). One list, for both recognizing a name and
-# finding an install.
+# jpc.py, then its ALIASES (a test compares them). One list, for both
+# recognizing a name and finding an install.
 typeset -ga _JPC_HINT_COMMANDS=(jpc jpc-pull jpc-check jpc-fill jpc-import jpc-update
-                                jpc-writeback jpc-rename jpc-mads)
+                                jpc-writeback jpc-rename jpc-mads jpc-lookup)
 
 command_not_found_handler() {
   emulate -L zsh

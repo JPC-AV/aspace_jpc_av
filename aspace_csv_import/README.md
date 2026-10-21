@@ -828,6 +828,17 @@ aborts with no writes.
 
 ## Version History
 
+- **v3.8.0** (2026): `jpc-lookup`, another name for `jpc-check`
+  - `jpc-lookup` runs `jpc-check` itself: the same options, environment
+    rules (production unless `--env sandbox`), output and exit codes; its
+    help and messages name `jpc-check`
+  - After pulling: run `python -m pip install -e .` once in each
+    environment that has the commands - the reinstall refreshes the
+    installed commands and adds `jpc-lookup`. `jpc-lookup --help` then
+    shows `jpc-check`'s help. Ordinary pulls that add no command still
+    need no reinstall. With the optional zsh hint, a Terminal opened
+    before the pull keeps the hint it loaded; a new Terminal reloads it
+
 - **v3.7.0** (2026): the write-back records each item's own ref ID and
   shows its progress
   - The write-back also fills `ASpace Item RefID` in

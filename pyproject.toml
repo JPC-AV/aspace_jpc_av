@@ -16,7 +16,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jpc-av-tools"
-version = "3.7.0"
+version = "3.8.0"
 description = "jpc- commands for the JPC AV ArchivesSpace workflow"
 authors = [{ name = "Bleakley McDowell" }, { email = "bleakleym@gmail.com" }]
 requires-python = ">=3.9"
@@ -31,6 +31,7 @@ Homepage = "https://github.com/JPC-AV/aspace_jpc_av"
 jpc = "jpc:main"
 jpc-pull = "jpc:pull"
 jpc-check = "jpc:check"
+jpc-lookup = "jpc:check"   # another name for jpc-check (ALIASES in jpc.py)
 jpc-fill = "jpc:fill"
 jpc-import = "jpc:import_"
 jpc-update = "jpc:update"

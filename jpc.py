@@ -3,6 +3,7 @@ The jpc- commands: one short command per workflow step.
 
     jpc-pull --view NAME          save an Airtable view as a CSV
     jpc-check --file FILE         which numbers ArchivesSpace has; does Airtable agree
+    jpc-lookup --file FILE        another name for jpc-check
     jpc-fill --file FILE          fill blank parents; save ready and human-review CSVs
     jpc-import --file FILE        create records (PLAN, then type yes)
     jpc-update --file FILE        update records (PLAN, then type yes)
@@ -1599,6 +1600,12 @@ COMMANDS = {
 }
 ORDER = ["pull", "check", "fill", "import", "update", "writeback", "rename", "mads"]
 
+# Other names for a command. An alias's entry point in pyproject.toml is the
+# command's own function, so it IS that command - options, environment,
+# output and exit codes - and every message names the command. ALIASES only
+# lets the overview, the command's help and the tests name it.
+ALIASES = {"lookup": "check"}
+
 # Where a refused flag belongs instead - said in the refusal.
 ELSEWHERE = {
     "--update-only": "to update records: jpc-update",
@@ -1839,7 +1846,10 @@ def command_help(verb):
     sections = [
         ("DESCRIPTION", textwrap.fill(f"{spec['summary']}.", width=78,
                                      initial_indent="    ", subsequent_indent="    ",
-                                     break_long_words=False, break_on_hyphens=False)),
+                                     break_long_words=False, break_on_hyphens=False)
+                        + "".join(f"\n\n    jpc-{alias} is another name for this command: the same "
+                                  f"options and answers." for alias, target in ALIASES.items()
+                                  if target == verb)),
         # wrapped between pieces only: a no-break space keeps "[--env sandbox]"
         # on one line
         ("USAGE", C.BOLD + C.GREEN
@@ -1929,16 +1939,18 @@ def overview_help():
         ("USAGE", f"    {C.GREEN}jpc-STEP --INPUT VALUE [options]{C.RESET}\n"
                   f"    {C.GREEN}jpc-STEP --help{C.RESET}\n\n"
                   f"    Note the hyphen: {C.GREEN}jpc-import{C.RESET}, not jpc import."),
-        ("COMMANDS", "in workflow order", "\n".join(lines) + f"""
+        ("COMMANDS", "in workflow order", "\n".join(lines)
+         + "".join(f"\n\n    jpc-{alias} is another name for jpc-{target}: the same command, not a step."
+                   for alias, target in ALIASES.items()) + f"""
 
     Only the steps that write change anything outside this computer, and
     each shows its changes and asks for yes before writing. jpc-rename
     also renames folders on disk."""),
-        ("ENVIRONMENT", f"""    jpc-check, jpc-fill, jpc-import, jpc-update and jpc-rename talk to
-    ArchivesSpace. They use {C.RED}{C.BOLD}PRODUCTION{C.RESET} unless you add --env sandbox - on
-    EACH command: every one defaults to production on its own. jpc-pull
-    and jpc-writeback work on Airtable only, and jpc-mads reads only the
-    public MADS site; none of these takes --env.
+        ("ENVIRONMENT", f"""    jpc-check (or jpc-lookup), jpc-fill, jpc-import, jpc-update and
+    jpc-rename talk to ArchivesSpace. They use {C.RED}{C.BOLD}PRODUCTION{C.RESET} unless you add
+    --env sandbox - on EACH command: every one defaults to production on
+    its own. jpc-pull and jpc-writeback work on Airtable only, and
+    jpc-mads reads only the public MADS site; none of these takes --env.
 
     If the requested environment is not configured, the command stops
     (exit 1); it never switches to another environment."""),
@@ -2108,7 +2120,7 @@ def overview(args=None):
         print(overview_help())
         return 0
     word = rest[0]
-    if word in COMMANDS:
+    if word in COMMANDS or word in ALIASES:
         return refuse(None, f"the command is jpc-{word} (with a hyphen): jpc-{word} --help")
     return refuse(None, "unknown word (not shown, in case it is a password) - the commands are "
                         f"{', '.join('jpc-' + v for v in ORDER)} (jpc --help lists them)")
@@ -2127,7 +2139,7 @@ def _entry(verb):
 
 
 pull = _entry("pull")
-check = _entry("check")
+check = _entry("check")     # also jpc-lookup's entry point (ALIASES)
 fill = _entry("fill")
 import_ = _entry("import")
 update = _entry("update")

@@ -139,7 +139,7 @@ cd ~/github/jpc/aspace_jpc_av
 python -m pip install -e .
 ```
 
-This installs `jpc`, `jpc-pull`, `jpc-check`, `jpc-fill`, `jpc-import`,
+This installs `jpc`, `jpc-pull`, `jpc-check` (also as `jpc-lookup`), `jpc-fill`, `jpc-import`,
 `jpc-update`, `jpc-writeback`, `jpc-rename` and `jpc-mads`, and the one package the tools need
 (`requests`), into the **active environment only**, whatever its name. The
 commands exist whenever that environment is active; another environment
@@ -148,7 +148,7 @@ folder, so `git pull` keeps them current - reinstall only when a command is
 added or renamed. (`pip install -r requirements.txt` installs just
 `requests`, for running the tools directly without the commands.)
 
-**After a pull that adds a command** - `jpc-rename` and `jpc-mads` are the
+**After a pull that adds a command** - `jpc-lookup` (3.8.0) is the
 newest - run the install again, once in each environment that has the
 commands. The
 reinstall is what creates the new command: until then the shell answers
@@ -265,6 +265,7 @@ their own checks, PLANs and `yes` prompts. `jpc` lists them;
 |---------|------|
 | `jpc-pull --view NAME` | `airtable_pull.py NAME` |
 | `jpc-check --file FILE [--output PATH]` | `aspace_csv_export.py --check FILE --env production` |
+| `jpc-lookup --file FILE [--output PATH]` | the same as `jpc-check` (another name for it) |
 | `jpc-fill --file FILE` | `aspace_csv_export.py --fill-parents FILE --env production` |
 | `jpc-import --file FILE [--dry-run] [--keep-going]` | `aspace_csv_import.py --create-records --file FILE --env production` |
 | `jpc-update --file FILE [--dry-run]` | `aspace_csv_import.py --update-only --file FILE --env production` |
