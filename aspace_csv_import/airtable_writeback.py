@@ -432,11 +432,14 @@ def check_schema(token):
 
 
 def read_table(token, table_id, field_ids, label, as_text=False):
-    """Every record of a table, only the given fields, keyed by field ID."""
+    """Every record of a table, only the given fields, keyed by field ID.
+    Its finished count is flushed as soon as the table is read, so a pipe
+    or file shows it before the next table's request (T-116)."""
     try:
         return _read_pages(token, table_id, field_ids, label, as_text)
     finally:
         close_progress()
+        sys.stdout.flush()      # through the run's Screen: a failure is only recorded
 
 
 def _read_pages(token, table_id, field_ids, label, as_text):
@@ -478,8 +481,12 @@ def build_plan(token, candidates):
     Each plan entry: catalog, parent, item_ref, import_rec, tracking_rec,
     set_parent, set_item, set_created, note (non-empty = review, nothing
     written)."""
+    # announced, and flushed with the run header before it, before the first
+    # request: a pipe or file would otherwise hold it back until the PLAN (T-116)
+    print_status("info", "Reading Airtable - its field list, then three tables, "
+                         "about a minute each...")
+    sys.stdout.flush()
     ids = check_schema(token)
-    print_status("info", "Reading Airtable - three tables, about a minute each...")
     sources = read_table(token, ids["source_table"], [ids["source_primary"]],
                          ids["source_name"], as_text=True)
     imports = read_table(token, IMPORT_TABLE_ID,

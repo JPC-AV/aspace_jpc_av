@@ -828,6 +828,21 @@ aborts with no writes.
 
 ## Version History
 
+- **v4.0.1** (2026): the write-back's reading phase shows promptly, and
+  progress counters fit the terminal while they update
+  - The write-back announces its reading - the field list, then three
+    tables - before the first request, and shows each table's count as it
+    finishes, also when its output goes to a pipe or a file
+  - In a terminal, the shared progress counters (the write-back's reading,
+    jpc-check (and jpc-lookup), jpc-fill and jpc-mads among them) shorten
+    their label while updating in place, keeping their numbers whole;
+    where even the numbers cannot fit, each update is printed as an
+    ordinary line. Finished counts and the write-back's write progress
+    are unchanged
+  - After pulling: existing editable installs (`python -m pip install -e .`)
+    need nothing reinstalled; reinstalling only refreshes the version
+    `python -m pip show jpc-av-tools` reports
+
 - **v4.0.0** (2026): **BREAKING** - the `jpc-` ArchivesSpace commands need
   an explicit environment
   - **Breaking:** `jpc-check` (and `jpc-lookup`), `jpc-fill`, `jpc-import`,

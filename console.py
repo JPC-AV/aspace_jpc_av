@@ -11,6 +11,7 @@ another tool.
 """
 
 import logging
+import shutil
 import sys
 
 
@@ -131,15 +132,9 @@ def progress(label, done, total):
     single finished line; anywhere else (a log, a pipe) only the finished
     count is printed. Keeps the screen for the results that matter. Callers
     run the counted loop inside try/finally: close_progress()."""
-    global _PROGRESS_OPEN
     finished = done >= total
     if sys.stdout.isatty():
-        for handler in logging.getLogger().handlers:
-            if not any(isinstance(f, _CloseProgressFirst) for f in handler.filters):
-                handler.addFilter(_CloseProgressFirst())
-        print(f"\r{Colors.CYAN}[>]{Colors.RESET} {label} {done}/{total}"
-              f"{'' if finished else '...'}\033[K", end="\n" if finished else "", flush=True)
-        _PROGRESS_OPEN = not finished
+        _terminal_progress(label, f"{done}/{total}", finished)
     elif finished:
         print_status("info", f"{label} {done}/{total}")
 
@@ -147,16 +142,47 @@ def progress(label, done, total):
 def progress_count(label, count, finished):
     """Like progress(), for a count with no known total (rows read so far):
     one line updated in place in a terminal, only the final count elsewhere."""
-    global _PROGRESS_OPEN
     if sys.stdout.isatty():
-        for handler in logging.getLogger().handlers:
-            if not any(isinstance(f, _CloseProgressFirst) for f in handler.filters):
-                handler.addFilter(_CloseProgressFirst())
-        print(f"\r{Colors.CYAN}[>]{Colors.RESET} {label} {count}"
-              f"{'' if finished else '...'}\033[K", end="\n" if finished else "", flush=True)
-        _PROGRESS_OPEN = not finished
+        _terminal_progress(label, str(count), finished)
     elif finished:
         print_status("info", f"{label} {count}")
+
+
+def _terminal_progress(label, numbers, finished):
+    """One terminal update for progress() and progress_count(). A finished
+    count ends as an ordinary line, in full. An unfinished one replaces
+    itself in place, so it must not wrap - the next update could clear only
+    its last row (T-117): its label is shortened to fit the terminal with
+    one column spare, the numbers never cut. If even "[>] " and the numbers
+    cannot fit, the update is an ordinary line instead of an overlong
+    replacement."""
+    global _PROGRESS_OPEN
+    for handler in logging.getLogger().handlers:
+        if not any(isinstance(f, _CloseProgressFirst) for f in handler.filters):
+            handler.addFilter(_CloseProgressFirst())
+    start = f"\r{Colors.CYAN}[>]{Colors.RESET} "
+    if finished:
+        print(f"{start}{label} {numbers}\033[K", flush=True)
+        _PROGRESS_OPEN = False
+        return
+    tail = f"{numbers}..."
+    # columns left for the label and its space: the width, less one spare,
+    # "[>] " and the numbers (colour codes take none). A terminal reporting
+    # no width counts as 80, as Python 3.11+ does itself (3.9/3.10 give 0).
+    width = shutil.get_terminal_size((80, 24)).columns or 80
+    room = width - 1 - len("[>] ") - len(tail)
+    if room < 0:
+        print(f"{start}{label} {tail}\033[K", flush=True)    # too narrow to replace safely
+        _PROGRESS_OPEN = False
+        return
+    if len(label) + 1 <= room:
+        shown = f"{label} {tail}"
+    elif room >= len("x... "):
+        shown = f"{label[:room - len('... ')].rstrip()}... {tail}"
+    else:
+        shown = tail
+    print(f"{start}{shown}\033[K", end="", flush=True)
+    _PROGRESS_OPEN = True
 
 
 # ------------------------------------------------------------------
