@@ -19,6 +19,23 @@ show when it reached `main` or GitHub.
 
 ## Releases
 
+- **v5.0.1** (2026-10-23): `jpc-rename` stops before resending an update
+  once its log has failed, and the rate-limit warning shows before the wait
+  - `jpc-rename` checks its log before every attempt to update a record,
+    including the resend after an expired session is renewed; once the log
+    cannot be written it makes no further catalog updates - "Stopped before
+    updating the record ... - nothing changed" - and renames nothing further
+  - The "Airtable rate limit" warning now shows before the 30-second wait,
+    also when output goes to a pipe or a file. When a write-back write is
+    refused and the output has failed, the write-back stops before that
+    wait, with no further writes. When a read is refused, the warning is
+    flushed as far as the output allows and the read may still be retried;
+    the write-back's check before its next write then stops any further
+    writes
+  - After pulling: existing editable installs (`python -m pip install -e .`)
+    need nothing reinstalled; reinstalling only refreshes the version
+    `python -m pip show jpc-av-tools` reports
+
 - **v5.0.0** (2026-10-22): **BREAKING for direct script use** - the tool
   folders are renamed and the documentation is reorganized
   - **Breaking (direct use only):** `aspace_csv_import/` is now

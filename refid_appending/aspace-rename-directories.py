@@ -151,6 +151,34 @@ def finish_log():
     return problem
 
 
+class LogStopped(Exception):
+    """A record update NOT sent because this run's log could not be
+    written: definitely not applied, never an uncertain write."""
+
+    def __init__(self, problem):
+        super().__init__(f"the log could not be written ({problem})")
+        self.problem = problem
+
+
+class RenameClient(ASpaceClient):
+    """The shared client with this run's log guard on every catalog write
+    attempt - the resend after a 412 re-login included, which happens
+    inside the shared client. Each attempt first puts its intent in the
+    log; once the log cannot be written, the write is not sent (a definite
+    local stop, raised as LogStopped). Reads, login and logout go straight
+    through."""
+
+    def _do_request(self, method, endpoint, data=None, retry_count=0):
+        if method != "GET" and LOG_HANDLER is not None:
+            FILE_LOG.info(f"Sending a catalog write ({method}) to ArchivesSpace"
+                          f"{' again after re-login' if retry_count else ''}")
+            problem = log_problem()
+            if problem:
+                self.last_failure_definitive = True   # nothing was sent
+                raise LogStopped(problem)
+        return super()._do_request(method, endpoint, data, retry_count)
+
+
 def setup_logging(verbose=False):
     """Create the reports folder and this run's log file, and send every
     message to both: the screen (marks, no timestamps) and the file (every
@@ -821,7 +849,15 @@ def apply_folder(client, prep, outcome, fail, dry_run=False, no_update=False, no
                 # None is the failure signal; a 200 with an empty body is
                 # still a success (the shared client already treats it so).
                 writing = "update"
-                result = update_archival_object(client, archival_object_id, prep["updated"])
+                try:
+                    result = update_archival_object(client, archival_object_id, prep["updated"])
+                except LogStopped:
+                    # not sent: the log failed before this attempt (the
+                    # resend after a 412 re-login included) - a definite stop
+                    writing = None
+                    fail(outcome, f"Stopped before updating the record for {directory}: "
+                                  f"the log file could not be written - nothing changed")
+                    return
                 if result is None:
                     if client.last_failure_definitive:
                         fail(outcome, f"ArchivesSpace rejected the update for "
@@ -1836,7 +1872,7 @@ def main():
 
     # Step 1: Authenticate with ArchivesSpace
     # (Always needed - even --no-update requires ASpace lookup for ref_id)
-    client = ASpaceClient()
+    client = RenameClient()
     if not client.login():
         logging.error(f"Could not log in: {client.login_problem}. Exiting the script.")
         finish_log()

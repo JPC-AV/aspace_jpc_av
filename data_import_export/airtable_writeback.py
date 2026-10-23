@@ -835,7 +835,7 @@ def execute(plan, ids, token, inflight=None, *, recheck):
     never replaced by another row or a new plan; a satisfied write is
     skipped. It runs while no batch is in flight, so its failure or a Ctrl-C
     during it makes no row unknown. So does a failure of the screen output,
-    checked before each send.
+    checked before each send and before each write-retry wait.
 
     Progress: each step is announced with its rows and batches; a line is
     flushed before each batch is re-checked (the first, and again after a
@@ -894,6 +894,7 @@ def execute(plan, ids, token, inflight=None, *, recheck):
                     raise
                 print_status("warning", f"Airtable rate limit - waiting "
                                         f"{pull.RATE_LIMIT_WAIT}s, then re-checking these rows")
+                stop_if_output_lost()         # the warning shows before the wait, not after it
                 time.sleep(pull.RATE_LIMIT_WAIT)
                 continue
             return rows, back

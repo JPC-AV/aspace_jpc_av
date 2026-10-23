@@ -152,6 +152,10 @@ def airtable_request(url, token):
                             f"or VPN")
         if resp.status_code == 429 and attempt < RATE_LIMIT_RETRIES:
             print_status("warning", f"Airtable rate limit - waiting {RATE_LIMIT_WAIT}s")
+            try:
+                sys.stdout.flush()    # the warning shows before the wait, not after it
+            except (OSError, ValueError):
+                pass                  # a failed output is left to the caller, as before
             time.sleep(RATE_LIMIT_WAIT)
             continue
         if resp.status_code == 401:
