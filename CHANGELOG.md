@@ -9,6 +9,14 @@ current instructions. For current use, start with the
 the old folders: `aspace_csv_import/` is now `data_import_export/`, and
 `aspace_rename_directories/` is now `refid_appending/`.
 
+Dates are in America/New_York time. From v3.5 on, each date is the release day
+noted at the time; a release is a push to `main` on GitHub. Older entries
+distinguish commit dates, documentation dates and development spans rather than
+asserting an original release date: "commit dated" is the day the change and
+its entry were committed, "entry written" the day only the entry was, and v3.4
+shows its development span. A commit's place in today's `main` history does not
+show when it reached `main` or GitHub.
+
 ## Releases
 
 - **v5.0.0** (2026-10-22): **BREAKING for direct script use** - the tool
@@ -39,7 +47,7 @@ the old folders: `aspace_csv_import/` is now `data_import_export/`, and
     reinstalling only refreshes the version `python -m pip show
     jpc-av-tools` reports
 
-- **v4.0.1** (2026): the write-back's reading phase shows promptly, and
+- **v4.0.1** (2026-10-21): the write-back's reading phase shows promptly, and
   progress counters fit the terminal while they update
   - The write-back announces its reading - the field list, then three
     tables - before the first request, and shows each table's count as it
@@ -54,8 +62,8 @@ the old folders: `aspace_csv_import/` is now `data_import_export/`, and
     need nothing reinstalled; reinstalling only refreshes the version
     `python -m pip show jpc-av-tools` reports
 
-- **v4.0.0** (2026): **BREAKING** - the `jpc-` ArchivesSpace commands need
-  an explicit environment
+- **v4.0.0** (2026-10-21): **BREAKING** - the `jpc-` ArchivesSpace commands
+  need an explicit environment
   - **Breaking:** `jpc-check` (and `jpc-lookup`), `jpc-fill`, `jpc-import`,
     `jpc-update` and `jpc-rename` need `--env production` or
     `--env sandbox` on every run. There is no default: a command without
@@ -74,7 +82,7 @@ the old folders: `aspace_csv_import/` is now `data_import_export/`, and
     are the same; reinstalling only refreshes the version
     `python -m pip show jpc-av-tools` reports
 
-- **v3.8.0** (2026): `jpc-lookup`, another name for `jpc-check`
+- **v3.8.0** (2026-10-21): `jpc-lookup`, another name for `jpc-check`
   - `jpc-lookup` runs `jpc-check` itself: the same options, environment
     rules (production unless `--env sandbox`), output and exit codes; its
     help and messages name `jpc-check`
@@ -85,7 +93,7 @@ the old folders: `aspace_csv_import/` is now `data_import_export/`, and
     need no reinstall. With the optional zsh hint, a Terminal opened
     before the pull keeps the hint it loaded; a new Terminal reloads it
 
-- **v3.7.0** (2026): the write-back records each item's own ref ID and
+- **v3.7.0** (2026-10-21): the write-back records each item's own ref ID and
   shows its progress
   - The write-back also fills `ASpace Item RefID` in
     `<<< ASpace_import >>>` with the item's own ref ID, taken from the
@@ -100,7 +108,7 @@ the old folders: `aspace_csv_import/` is now `data_import_export/`, and
   - After pulling: nothing to reinstall; reinstalling only refreshes the
     version `python -m pip show jpc-av-tools` reports
 
-- **v3.6.10** (2026): write-back rechecks, truthful importer logs, values
+- **v3.6.10** (2026-10-20): write-back rechecks, truthful importer logs, values
   not repeated
   - The write-back reads each batch's rows again just before writing it
     (and after any rate-limit wait) and leaves changed rows alone; a failed
@@ -120,7 +128,7 @@ the old folders: `aspace_csv_import/` is now `data_import_export/`, and
   - After pulling: nothing to reinstall; reinstalling only refreshes the
     version `python -m pip show jpc-av-tools` reports
 
-- **v3.6.9** (2026): honest rename logs, safer report saving
+- **v3.6.9** (2026-10-20): honest rename logs, safer report saving
   - The rename tool notices when writing its log fails after the log
     opened: it starts no further change, says the log was NOT saved and
     exits 1 (Ctrl-C keeps 130); changes already made are kept and reported
@@ -136,7 +144,7 @@ the old folders: `aspace_csv_import/` is now `data_import_export/`, and
   - After pulling: nothing to reinstall; reinstalling only refreshes the
     version `python -m pip show jpc-av-tools` reports
 
-- **v3.6.8** (2026): direct tools' argument errors no longer repeat what
+- **v3.6.8** (2026-10-19): direct tools' argument errors no longer repeat what
   was typed
   - Every direct tool now refuses a mistyped or stray argument without
     repeating it, as the importer and extent checker already did; a wrong
@@ -151,7 +159,7 @@ the old folders: `aspace_csv_import/` is now `data_import_export/`, and
   - After pulling: nothing to reinstall; reinstalling only refreshes the
     version `python -m pip show jpc-av-tools` reports
 
-- **v3.6.7** (2026): two clearer messages
+- **v3.6.7** (2026-10-19): two clearer messages
   - The rename tool, run directly with one environment configured, now
     says why that environment cannot be used - the same explanation the
     other tools give, never the value - instead of "no environments
@@ -162,14 +170,15 @@ the old folders: `aspace_csv_import/` is now `data_import_export/`, and
   - After pulling: nothing to reinstall; reinstalling only refreshes the
     version `python -m pip show jpc-av-tools` reports
 
-- **v3.6.6** (2026): `--check` reads its input once
+- **v3.6.6** (2026-10-19): `--check` reads its input once
   - The list or pulled sheet is read from disk once, and its numbers, rows
     and pull details all come from that one read - a file saved again
     during the check can no longer mix two versions
   - After pulling: nothing to reinstall; reinstalling only refreshes the
     version `python -m pip show jpc-av-tools` reports
 
-- **v3.6.5** (2026): the write-back tries to keep its receipt after a Ctrl-C
+- **v3.6.5** (2026-10-19): the write-back tries to keep its receipt after a
+  Ctrl-C
   - Once writing has begun, an interrupted run still tries to save this
     run's outcomes file (an interrupted save is tried once more) and to
     say whether it was saved; nothing more is sent to Airtable. Pressing
@@ -182,7 +191,7 @@ the old folders: `aspace_csv_import/` is now `data_import_export/`, and
   - After pulling: nothing to reinstall; reinstalling only refreshes the
     version `python -m pip show jpc-av-tools` reports
 
-- **v3.6.4** (2026): links in ArchivesSpace replies are checked first
+- **v3.6.4** (2026-10-19): links in ArchivesSpace replies are checked first
   - A record's parent and container links are followed only when they
     are plain record paths in the configured repository; anything else
     shows "(path unavailable)" or leaves that container out of the
@@ -194,7 +203,7 @@ the old folders: `aspace_csv_import/` is now `data_import_export/`, and
   - After pulling: nothing to reinstall; reinstalling only refreshes the
     version `python -m pip show jpc-av-tools` reports
 
-- **v3.6.3** (2026): two more refusals no longer quote server values
+- **v3.6.3** (2026-10-19): two more refusals no longer quote server values
   - An update refused because the record no longer matches or is not an
     item, and an export stopped by a mismatched batch, name the check and
     the record expected - not the values the server returned. Titles,
@@ -204,7 +213,8 @@ the old folders: `aspace_csv_import/` is now `data_import_export/`, and
   - After pulling: nothing to reinstall; reinstalling only refreshes the
     version `python -m pip show jpc-av-tools` reports
 
-- **v3.6.2** (2026): server error replies are no longer copied into messages
+- **v3.6.2** (2026-10-18): server error replies are no longer copied into
+  messages
   - ArchivesSpace and Airtable errors give the HTTP status and a fixed
     explanation (for ArchivesSpace, the names of flagged fields such as
     title or dates), never the server's own text, which can echo back
@@ -217,7 +227,7 @@ the old folders: `aspace_csv_import/` is now `data_import_export/`, and
   - After pulling: nothing to reinstall; reinstalling only refreshes the
     version `python -m pip show jpc-av-tools` reports
 
-- **v3.6.1** (2026): authentication tokens are checked before use
+- **v3.6.1** (2026-10-18): authentication tokens are checked before use
   - The Airtable read and write tokens, and the session token
     ArchivesSpace returns at login, must be text of visible characters
     only - no spaces, line breaks or other control characters. A token
@@ -229,7 +239,7 @@ the old folders: `aspace_csv_import/` is now `data_import_export/`, and
   - After pulling: nothing to reinstall; reinstalling only refreshes the
     version `python -m pip show jpc-av-tools` reports
 
-- **v3.6** (2026): import reports record their ArchivesSpace target
+- **v3.6** (2026-10-18): import reports record their ArchivesSpace target
   - Import reports and records files record the run's ArchivesSpace target
     (server URL, repository, resource), captured once before anything is
     written, with the run's start time
@@ -254,7 +264,7 @@ the old folders: `aspace_csv_import/` is now `data_import_export/`, and
     (`python -m pip install -e .`) runs the updated code. Reinstalling only
     refreshes the version `python -m pip show jpc-av-tools` reports
 
-- **v3.5** (2026): `jpc-mads`, and next steps as `jpc-` commands
+- **v3.5** (2026-10-18): `jpc-mads`, and next steps as `jpc-` commands
   - New `jpc-mads` command: which items are live in MADS, from a list
     (`--file`) or a batch folder's item folders (`--directory`);
     `check_mads.py` gains `--directory`, and `jpc-rename`'s help points to
@@ -276,7 +286,8 @@ the old folders: `aspace_csv_import/` is now `data_import_export/`, and
     that has the commands (this adds `jpc-mads`), then open a new Terminal;
     `python -m pip show jpc-av-tools` then reports Version 3.5
 
-- **v3.4** (2026): the `jpc-` commands and `jpc-rename`
+- **v3.4** (development span 2026-09-30 to 2026-10-17): the `jpc-` commands and
+  `jpc-rename`
   - The first packaged version: a `jpc-` command for each workflow step
     (pull, check, fill, import, update, write-back) and `jpc`, which lists
     them; production by default, with detailed help screens;
@@ -292,7 +303,7 @@ the old folders: `aspace_csv_import/` is now `data_import_export/`, and
     folder rename no longer rolls media back; a failed MADS save keeps
     RESULT and exits 1; Ctrl-C at logout keeps the rename RESULT
 
-- **v3.3** (2026): `ASpace Issue`
+- **v3.3** (commit dated 2026-09-30): `ASpace Issue`
   - The hold's reason field is renamed `ASpace Issue` and now records any
     open item, held or not; `ASpace Hold` alone still decides processing
   - The pull counts open issues on rows that are not held; the fill lists
@@ -307,7 +318,7 @@ the old folders: `aspace_csv_import/` is now `data_import_export/`, and
     ref IDs, and a parent already filled in is checked at import, not by
     the fill
 
-- **v3.2** (2026): One display across the tools
+- **v3.2** (commit dated 2026-09-30): One display across the tools
   - Every tool's `-h` screen uses the same banner, a title saying what it
     does, and the same section order (DESCRIPTION, USAGE, ARGUMENTS, OPTIONS,
     EXAMPLES, OUTPUT, EXIT, NEXT STEP); a wrong argument shows the same
@@ -321,7 +332,7 @@ the old folders: `aspace_csv_import/` is now `data_import_export/`, and
     before and rows never reached apart from failures
   - `--no-color` on every tool, including `aspace_csv_export.py`
 
-- **v3.1** (2026): Plan, confirm, and hand off
+- **v3.1** (commit dated 2026-09-29): Plan, confirm, and hand off
   - Every run checks all rows and prints a PLAN (create / skip / refused /
     update, with parent paths, normalized dates and full notes); real runs
     write only after a typed `yes`, containers included
@@ -338,7 +349,8 @@ the old folders: `aspace_csv_import/` is now `data_import_export/`, and
     update-only before any write, are refused by `--skip-duplicates`, are left
     alone by the write-back, and are marked by `--check`
 
-- **v3.0** (2026): Safety hardening + update-only mode
+- **v3.0** (release date unverified; entry written 2026-07-28 in `a98e917`):
+  Safety hardening + update-only mode
   - New `--update-only` mode: narrow CSVs (CATALOG_NUMBER + columns to
     change), never creates records, resolves and preflights every row
     before anything is written — any predictable problem aborts the run
@@ -360,7 +372,8 @@ the old folders: `aspace_csv_import/` is now `data_import_export/`, and
   - `csv_utils.py --validate --update-only` for narrow CSVs; docs corrected
     and expanded (ToC, workflows, real status symbols)
 
-- **v2.0** (2024): Major update
+- **v2.0** (release date unverified; earlier listed as 2024; v2.0 commit
+  `1be5308` dated 2025-12-02): Major update
   - Colorized terminal output
   - Smart change detection in update mode
   - "Unchanged" status for records with no differences
@@ -369,7 +382,13 @@ the old folders: `aspace_csv_import/` is now `data_import_export/`, and
   - Removed noisy logging from console
   - Added `--no-color` flag
 
-- **v1.0** (2024): Initial release
+- **First commit** (2023-11-27): `b76bcf0` starts this repository's recorded
+  history; it is not a release. The importer's first recorded copy is
+  `428a545` (2025-12-01); v1.0's original release date is unknown
+
+- **v1.0** (release date unverified; earlier listed as 2024): Initial release
+  - Earliest verified copy of the importer: commit `428a545`, dated
+    2025-12-01, under `record_data_pushing/`
   - Basic CSV import functionality
   - Parent hierarchy support
   - Three duplicate modes
