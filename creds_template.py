@@ -3,9 +3,10 @@
 # Make sure creds.py is in your .gitignore!
 #
 # Declare one entry per ArchivesSpace instance you have access to. Selection:
-#   - exactly ONE entry: the scripts use it automatically, nothing to type.
-#     (Team members with sandbox-only access: keep just the sandbox entry -
-#     production is then unreachable from your machine.)
+#   - exactly ONE entry: the Python tools run directly use it automatically.
+#     The jpc- commands still need --env production or --env sandbox on
+#     every run. (Team members with sandbox-only access: keep just the
+#     sandbox entry - production is then unreachable from your machine.)
 #   - SEVERAL entries: every run must say which target with --env NAME.
 #     There is no default, so a forgotten flag is an error, never a silent
 #     write to the wrong instance.
@@ -52,6 +53,8 @@ environments = {
 #   mads_reports/     check_mads.py          (default ~/aspace_mads_reports)
 #   rename_reports/   aspace-rename-directories.py (default ~/aspace_rename_reports)
 # All four subfolders are gitignored when logs_dir is the repo root.
+# Use an absolute path (starting with /): ~ is not expanded, and a relative
+# path depends on the folder each command is run from.
 logs_dir = ""
 
 # Optional: a READ-ONLY Airtable personal access token, used for every

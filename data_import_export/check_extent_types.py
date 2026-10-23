@@ -56,12 +56,12 @@ def get_colored_help():
     formats (create runs); advisory for update sheets, where a stored value
     that has since been retired shows INVALID here but round-trips unchanged
     under --update-only."""),
-        ("USAGE", f"""    {C.GREEN}${C.RESET} python3 aspace_csv_import/check_extent_types.py [--env NAME]
-    {C.GREEN}${C.RESET} python3 aspace_csv_import/check_extent_types.py FILE [--env NAME]"""),
+        ("USAGE", f"""    {C.GREEN}${C.RESET} python3 data_import_export/check_extent_types.py [--env NAME]
+    {C.GREEN}${C.RESET} python3 data_import_export/check_extent_types.py FILE [--env NAME]"""),
         ("ARGUMENTS", render_options(ARGUMENTS)),
         ("OPTIONS", render_options(OPTIONS)),
-        ("EXAMPLES", f"""    {C.GREEN}${C.RESET} python3 aspace_csv_import/check_extent_types.py --env production
-    {C.GREEN}${C.RESET} python3 aspace_csv_import/check_extent_types.py data.csv --env production"""),
+        ("EXAMPLES", f"""    {C.GREEN}${C.RESET} python3 data_import_export/check_extent_types.py --env production
+    {C.GREEN}${C.RESET} python3 data_import_export/check_extent_types.py data.csv --env production"""),
         ("OUTPUT", "    On screen only - no files are saved."),
         ("EXIT", f"""    {C.GREEN}0{C.RESET}  listed (and every format in the CSV is valid)
     {C.YELLOW}2{C.RESET}  a bad argument

@@ -236,8 +236,8 @@ def get_colored_help():
     delivery) and saves the answer as a CSV. The JPC_AV_xxxxx come from a
     list FILE, or from a batch folder's item folders (--directory). Public
     URLs only - ArchivesSpace is never contacted, so no --env is needed."""),
-        ("USAGE", f"""    {C.GREEN}${C.RESET} python3 aspace_csv_import/check_mads.py FILE [-o PATH]
-    {C.GREEN}${C.RESET} python3 aspace_csv_import/check_mads.py --directory BATCH [-o PATH]"""),
+        ("USAGE", f"""    {C.GREEN}${C.RESET} python3 data_import_export/check_mads.py FILE [-o PATH]
+    {C.GREEN}${C.RESET} python3 data_import_export/check_mads.py --directory BATCH [-o PATH]"""),
         ("ARGUMENTS", render_options(ARGUMENTS)),
         ("OPTIONS", render_options(OPTIONS)),
         ("DIRECTORY MODE", f"""    Only the folders directly inside BATCH count, named JPC_AV_<digits> or
@@ -248,9 +248,9 @@ def get_colored_help():
     read before anything is checked.
     It checks the items these folders stand for - a folder being there does
     not prove the item was delivered to or ingested by DAMS."""),
-        ("EXAMPLES", f"""    {C.GREEN}${C.RESET} python3 aspace_csv_import/check_mads.py delivered.txt
-    {C.GREEN}${C.RESET} python3 aspace_csv_import/check_mads.py batch.csv -o batch_mads.csv
-    {C.GREEN}${C.RESET} python3 aspace_csv_import/check_mads.py --directory /Volumes/AV_DRIVE/batch"""),
+        ("EXAMPLES", f"""    {C.GREEN}${C.RESET} python3 data_import_export/check_mads.py delivered.txt
+    {C.GREEN}${C.RESET} python3 data_import_export/check_mads.py batch.csv -o batch_mads.csv
+    {C.GREEN}${C.RESET} python3 data_import_export/check_mads.py --directory /Volumes/AV_DRIVE/batch"""),
         ("OUTPUT", f"""    {C.CYAN}{OUTPUT_DIR}/{C.RESET}
     mads_check_<stamp>.csv: CATALOG_NUMBER, MADS URL, MADS live, Checked
     MADS live is Yes, No, check failed, or invalid catalog number - the last

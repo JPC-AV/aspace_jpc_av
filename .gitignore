@@ -6,7 +6,11 @@ credentials.json
 *.key
 *.token
 
-# Local-only test suites (not pushed to GitHub)
+# Local-only test suites (not pushed to GitHub). The legacy folders stay
+# ignored: checkouts updated from before the directory rename keep their
+# old local tests and exports there.
+data_import_export/tests/
+refid_appending/tests/
 aspace_csv_import/tests/
 aspace_rename_directories/tests/
 __tests__/

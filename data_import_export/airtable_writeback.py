@@ -137,14 +137,14 @@ def get_colored_help():
     run - otherwise nothing is read or written. ArchivesSpace is not
     contacted: this shows that recorded settings agree, not that the records
     still exist or that the production entry really is production."""),
-        ("USAGE", f"""    {C.GREEN}${C.RESET} python3 aspace_csv_import/airtable_writeback.py REPORT.json          {C.DIM}# preview{C.RESET}
-    {C.GREEN}${C.RESET} python3 aspace_csv_import/airtable_writeback.py REPORT.json --run    {C.DIM}# shows the plan, asks, writes{C.RESET}"""),
+        ("USAGE", f"""    {C.GREEN}${C.RESET} python3 data_import_export/airtable_writeback.py REPORT.json          {C.DIM}# preview{C.RESET}
+    {C.GREEN}${C.RESET} python3 data_import_export/airtable_writeback.py REPORT.json --run    {C.DIM}# shows the plan, asks, writes{C.RESET}"""),
         ("ARGUMENTS", render_options(ARGUMENTS)),
         ("OPTIONS", render_options(OPTIONS)),
         ("TOKENS", """    airtable_pat_read_only   read-only - schema and table reads (creds.py)
     airtable_pat_write       data.records:write on this base - the writes only"""),
-        ("EXAMPLES", f"""    {C.GREEN}${C.RESET} python3 aspace_csv_import/airtable_writeback.py import_reports/import_report_<stamp>.json --run
-    {C.GREEN}${C.RESET} python3 aspace_csv_import/airtable_writeback.py REPORT.json --exclude-catalog JPC_AV_13500 --run"""),
+        ("EXAMPLES", f"""    {C.GREEN}${C.RESET} python3 data_import_export/airtable_writeback.py import_reports/import_report_<stamp>.json --run
+    {C.GREEN}${C.RESET} python3 data_import_export/airtable_writeback.py REPORT.json --exclude-catalog JPC_AV_13500 --run"""),
         ("OUTPUT", """    With --run: airtable_writeback_<stamp>.csv next to the report - each row's
     outcome (done / already done / partial / not confirmed / unknown / not
     started / changed / review). "unknown" means a write may or may not have landed (lost

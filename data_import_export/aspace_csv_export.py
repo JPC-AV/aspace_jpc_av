@@ -1582,18 +1582,18 @@ def get_colored_help():
     {C.GREEN}2.{C.RESET} Checks which catalog numbers are already in ArchivesSpace (--check)
     {C.GREEN}3.{C.RESET} Fills a sheet's blank ASpace Parent RefID column (--fill-parents)
     {C.GREEN}4.{C.RESET} Checks whether exported records are live in MADS (--mads-live)"""),
-        ("USAGE", f"""    {C.GREEN}${C.RESET} python3 aspace_csv_import/aspace_csv_export.py [--level LEVEL] [--parent REFID] [options]
-    {C.GREEN}${C.RESET} python3 aspace_csv_import/aspace_csv_export.py --list FILE [options]
-    {C.GREEN}${C.RESET} python3 aspace_csv_import/aspace_csv_export.py --check FILE [-o PATH] [--env NAME]
-    {C.GREEN}${C.RESET} python3 aspace_csv_import/aspace_csv_export.py --fill-parents FILE [--env NAME]"""),
+        ("USAGE", f"""    {C.GREEN}${C.RESET} python3 data_import_export/aspace_csv_export.py [--level LEVEL] [--parent REFID] [options]
+    {C.GREEN}${C.RESET} python3 data_import_export/aspace_csv_export.py --list FILE [options]
+    {C.GREEN}${C.RESET} python3 data_import_export/aspace_csv_export.py --check FILE [-o PATH] [--env NAME]
+    {C.GREEN}${C.RESET} python3 data_import_export/aspace_csv_export.py --fill-parents FILE [--env NAME]"""),
         ("OPTIONS", render_options(EXPORT_CLI_OPTIONS)),
         ("CHECK", "instead of an export", render_options(CHECK_OPTIONS)),
         ("SELECT", "what to export; default: every item-level record", render_options(SELECT_OPTIONS)),
         ("FILL PARENTS", "instead of an export", render_options(FILL_OPTIONS)),
-        ("EXAMPLES", f"""    {C.GREEN}${C.RESET} python3 aspace_csv_import/aspace_csv_export.py --level all --env production
-    {C.GREEN}${C.RESET} python3 aspace_csv_import/aspace_csv_export.py --list batch.csv --env production
-    {C.GREEN}${C.RESET} python3 aspace_csv_import/aspace_csv_export.py --check batch.csv --env production
-    {C.GREEN}${C.RESET} python3 aspace_csv_import/aspace_csv_export.py --fill-parents batch.csv --env production"""),
+        ("EXAMPLES", f"""    {C.GREEN}${C.RESET} python3 data_import_export/aspace_csv_export.py --level all --env production
+    {C.GREEN}${C.RESET} python3 data_import_export/aspace_csv_export.py --list batch.csv --env production
+    {C.GREEN}${C.RESET} python3 data_import_export/aspace_csv_export.py --check batch.csv --env production
+    {C.GREEN}${C.RESET} python3 data_import_export/aspace_csv_export.py --fill-parents batch.csv --env production"""),
         ("OUTPUT", f"""    Exports: {C.CYAN}{OUTPUT_DIR}/{C.RESET} (or -o)
     --fill-parents: two CSVs beside FILE, using its name without .csv:
       jpc-fill_FILE_parent_ref-id_ready_for_ASpace_import.csv

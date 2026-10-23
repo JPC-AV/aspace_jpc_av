@@ -89,21 +89,21 @@ def get_colored_help():
 
     The view must be a grid view, and the name must match exactly
     (capitals and spaces count). A wrong name lists the table's views."""),
-        ("USAGE", f"    {C.GREEN}${C.RESET} python3 aspace_csv_import/airtable_pull.py VIEW"),
+        ("USAGE", f"    {C.GREEN}${C.RESET} python3 data_import_export/airtable_pull.py VIEW"),
         ("ARGUMENTS", render_options(ARGUMENTS)),
         ("OPTIONS", render_options(OPTIONS)),
         ("TOKEN", """    airtable_pat_read_only in creds.py (or AIRTABLE_PAT_READ_ONLY in the shell).
     Read-only: scopes data.records:read and schema.bases:read, this base only."""),
-        ("EXAMPLES", f"""    {C.GREEN}${C.RESET} python3 aspace_csv_import/airtable_pull.py OpticalDisc-ASpace
-    {C.GREEN}${C.RESET} python3 aspace_csv_import/airtable_pull.py 'DVD batch 2'"""),
+        ("EXAMPLES", f"""    {C.GREEN}${C.RESET} python3 data_import_export/airtable_pull.py OpticalDisc-ASpace
+    {C.GREEN}${C.RESET} python3 data_import_export/airtable_pull.py 'DVD batch 2'"""),
         ("OUTPUT", f"""    {C.CYAN}{EXPORT_DIR}/{C.RESET}
     <view>_<YYYYMMDD_HHMM>.csv - never overwrites an earlier pull"""),
         ("EXIT", f"""    {C.GREEN}0{C.RESET}  saved
     {C.YELLOW}2{C.RESET}  a bad argument
     {C.RED}1{C.RESET}  nothing saved: no token, a view or token problem, an empty view, or a
        pull of this view already saved this minute"""),
-        ("NEXT STEP", f"""    Creating records:  {C.GREEN}${C.RESET} python3 aspace_csv_import/aspace_csv_export.py --fill-parents FILE --env ENV
-    Updating records:  {C.GREEN}${C.RESET} python3 aspace_csv_import/aspace_csv_import.py --update-only -n -f FILE --env ENV
+        ("NEXT STEP", f"""    Creating records:  {C.GREEN}${C.RESET} python3 data_import_export/aspace_csv_export.py --fill-parents FILE --env ENV
+    Updating records:  {C.GREEN}${C.RESET} python3 data_import_export/aspace_csv_import.py --update-only -n -f FILE --env ENV
     Replace ENV with production or sandbox - the ArchivesSpace to use."""),
     ])
 

@@ -78,7 +78,11 @@ SHARED_HELP = {
         The added "Fix in" column tells you where to investigate. Check
         Airtable first; "Airtable, then ArchivesSpace" means inspect the
         ArchivesSpace hierarchy if the episode and file type in Airtable
-        are correct.
+        are correct. If an Edited, Raw or Promo grouping is missing there,
+        do not create it: hold the item (tick ASpace Hold, with the reason
+        in ASpace Issue), pull again, and contact the Media Archivist - see
+        manual 3.B. A multi-tape unit's own file record beneath Raw is the
+        one record processing staff may create.
 
         Held items always go here. Without a supplied parent, TBD or several
         episodes, Raw footage, and missing or ambiguous matches need review.
@@ -135,6 +139,24 @@ def full_path_of_pull(example):
       {cyan}{exports}/""" + example + "{reset}")
 
 
+# FURTHER READING on every screen: the Markdown guide with the whole
+# procedure, as a file in this checkout (works offline) and on GitHub. The
+# help itself stays complete for running each command.
+GITHUB = "https://github.com/JPC-AV/aspace_jpc_av/blob/main/"
+GUIDES = {"setup": ("JPC AV Tools Quick Start", "QUICK_START.md"),
+          "data": ("Importing and Updating Data", "data_import_export/IMPORTING_AND_UPDATING_DATA.md"),
+          "folders": ("Appending RefIDs to Folders", "refid_appending/APPENDING_REFIDS_TO_FOLDERS.md")}
+
+
+def further_reading(*keys):
+    """The FURTHER READING section: each guide's title, its file in this
+    checkout and its GitHub address."""
+    C = Colors
+    return "\n\n".join(f"    {C.BOLD}{GUIDES[k][0]}{C.RESET}\n"
+                        f"      {C.CYAN}{ROOT / GUIDES[k][1]}{C.RESET}\n"
+                        f"      {GITHUB}{GUIDES[k][1]}" for k in keys)
+
+
 def short_path(example, folder):
     """FILE PATHS "Short path": example is a bare file name, folder the
     folder it sits in."""
@@ -182,7 +204,7 @@ COMMANDS = {
     "pull": {
         "title": "save an Airtable view as a CSV",
         "summary": "Save an Airtable view of <<< ASpace_import >>> as a CSV (read-only)",
-        "script": "aspace_csv_import/airtable_pull.py",
+        "script": "data_import_export/airtable_pull.py",
         "input": ("--view", "NAME", "The Airtable view, exactly as spelled in Airtable"),
         "base": lambda value: [value],
         "extras": {"--no-color": None},
@@ -194,7 +216,7 @@ COMMANDS = {
             "paths": help_blocks(
                 """    {bold}Save folder{reset}
       Inside your copy of the tools repository:
-      {cyan}aspace_jpc_av/aspace_csv_import/__airtable_exports__/{reset}
+      {cyan}aspace_jpc_av/data_import_export/__airtable_exports__/{reset}
 
       This location stays the same regardless of the directory from which
       you run jpc-pull. Its full path depends on where you installed the tools.
@@ -251,11 +273,11 @@ COMMANDS = {
     You do not need to run it separately.
 
     {bold}Equivalent direct command{reset}
-      {command}python3 aspace_csv_import/airtable_pull.py NAME{reset}
+      {command}python3 data_import_export/airtable_pull.py NAME{reset}
       Replace NAME with the Airtable view's name; quote names with spaces.
 
     {bold}Underlying tool's help{reset}
-      {command}python3 aspace_csv_import/airtable_pull.py --help{reset}
+      {command}python3 data_import_export/airtable_pull.py --help{reset}
       This describes the Python tool's direct-use options. jpc-pull accepts
       only the flags listed in OPTIONS above.""",
             "exit": """    {ok}{bold}0{reset}    Saved      The CSV was saved.
@@ -271,7 +293,7 @@ COMMANDS = {
     "check": {
         "title": "check JPC_AV_xxxxx in ArchivesSpace",
         "summary": "Which JPC_AV_xxxxx ArchivesSpace has - and, for a pull, does Airtable agree (read-only)",
-        "script": "aspace_csv_import/aspace_csv_export.py",
+        "script": "data_import_export/aspace_csv_export.py",
         "input": ("--file", "FILE", "A pulled CSV, or a plain list of JPC_AV_xxxxx (one per line)"),
         "base": lambda value: ["--check", value],
         "extras": {"--output": "PATH", "--no-color": None},
@@ -426,22 +448,27 @@ COMMANDS = {
       writing anything if any row already exists (with --keep-going, it
       skips those rows instead).
 
-      Normally jpc-writeback sets the parent and Yes after an import creates
-      a record. This create run will not create an already-existing item, so
-      its write-back will not update that item's Airtable fields. If an
-      earlier production import created the item and its write-back was
-      never run, run jpc-writeback with that import's report instead. For
-      items without a usable production create report, update Airtable by
-      hand:
+      Normally jpc-writeback sets the parent, the item's own ref ID (ASpace
+      Item RefID) and Yes after an import creates a record. This create run
+      will not create an already-existing item, so its write-back will not
+      update that item's Airtable fields. If an earlier production import
+      created the item and its write-back was never run, run jpc-writeback
+      with that import's report instead. For items without a usable
+      production create report, update Airtable by hand:
 
-        1. Confirm the production record is the intended item - compare the
-           title and path the check shows.
+        1. Confirm the production record is the intended item - its
+           JPC_AV_xxxxx, and the title and path the check shows.
         2. Enter its parent in ASpace Parent RefID. Run jpc-check with
            --output PATH: the CSV's "ArchivesSpace parent" column has it.
-        3. Set ASpace Item Record Created to Yes in the ((( ASpace_tracking )))
+        3. Enter the item's own ref ID in ASpace Item RefID - never the
+           parent's ref ID or the record URI. The check does not show it:
+           from the aspace_jpc_av folder, export the item and copy its
+           "ASpace Ref ID" column:
+             {command}python3 data_import_export/aspace_csv_export.py --list FILE --env production{reset}
+        4. Set ASpace Item Record Created to Yes in the ((( ASpace_tracking )))
            table (it shows in <<< ASpace_import >>> as
            ((( ASpace Item Record Created )))).
-        4. Pull again.
+        5. Pull again.
 
       Do not mark Yes based on a sandbox result. If you cannot confirm the
       record yet, leave the item out of the create view until you can.
@@ -462,11 +489,11 @@ COMMANDS = {
     --check mode. You do not need to run it separately.
 
     {bold}Equivalent direct command{reset}
-      {command}python3 aspace_csv_import/aspace_csv_export.py --check FILE --env production{reset}
+      {command}python3 data_import_export/aspace_csv_export.py --check FILE --env production{reset}
       Replace FILE with the CSV's path; quote paths with spaces.
 
     {bold}Underlying tool's help{reset}
-      {command}python3 aspace_csv_import/aspace_csv_export.py --help{reset}
+      {command}python3 data_import_export/aspace_csv_export.py --help{reset}
       This describes all of the Python tool's direct-use options (export,
       --check and --fill-parents). jpc-check accepts only the flags listed
       in OPTIONS above.""",
@@ -487,7 +514,7 @@ COMMANDS = {
     "fill": {
         "title": "fill parent RefIDs in a CSV",
         "summary": "Fill blank parent RefIDs; save ready and human-review CSVs (read-only)",
-        "script": "aspace_csv_import/aspace_csv_export.py",
+        "script": "data_import_export/aspace_csv_export.py",
         "input": ("--file", "FILE", "The CSV saved by jpc-pull"),
         "base": lambda value: ["--fill-parents", value],
         "extras": {"--no-color": None},
@@ -557,6 +584,8 @@ COMMANDS = {
       For each row, read "Parent Note" and "Fix in", correct the source -
       Airtable, or the ArchivesSpace hierarchy - then pull and fill again
       for those rows. They are not imported until they come back ready.
+      A missing Edited, Raw or Promo grouping is held and escalated, not
+      created (manual 3.B).
 
     {bold}Further instructions: {command}jpc-import --help{reset}
 """,
@@ -564,11 +593,11 @@ COMMANDS = {
     --fill-parents mode. You do not need to run it separately.
 
     {bold}Equivalent direct command{reset}
-      {command}python3 aspace_csv_import/aspace_csv_export.py --fill-parents FILE --env production{reset}
+      {command}python3 data_import_export/aspace_csv_export.py --fill-parents FILE --env production{reset}
       Replace FILE with the pulled CSV's path; quote paths with spaces.
 
     {bold}Underlying tool's help{reset}
-      {command}python3 aspace_csv_import/aspace_csv_export.py --help{reset}
+      {command}python3 data_import_export/aspace_csv_export.py --help{reset}
       This describes all of the Python tool's direct-use options (export,
       --check and --fill-parents). jpc-fill accepts only the flags listed in
       OPTIONS above.""",
@@ -594,7 +623,7 @@ COMMANDS = {
     "import": {
         "title": "create ArchivesSpace records",
         "summary": "Create records: checks every row, shows the PLAN, writes after you type yes",
-        "script": "aspace_csv_import/aspace_csv_import.py",
+        "script": "data_import_export/aspace_csv_import.py",
         "input": ("--file", "FILE", "The ready CSV saved by jpc-fill"),
         "base": lambda value: ["--create-records", "--file", value],
         "extras": {"--dry-run": None, "--keep-going": None, "--no-color": None},
@@ -710,8 +739,8 @@ COMMANDS = {
     jpc-import never changes Airtable or the input CSV.""",
             "next_steps": """    After a real create run in production, the next step is
     {bold}jpc-writeback{reset}, which records the results in Airtable: each created
-    item's parent in ASpace Parent RefID, and Yes in ASpace Item Record
-    Created.
+    item's parent in ASpace Parent RefID, its own ref ID in ASpace Item
+    RefID, and Yes in ASpace Item Record Created.
 
     If you used --env sandbox, stop here: the write-back accepts production
     imports only. After a dry run, run the real import first.
@@ -748,7 +777,9 @@ COMMANDS = {
 
     {bold}Rows refused{reset}
       Correct each problem at its source (Airtable, or the ArchivesSpace
-      hierarchy), then pull, fill and import those rows again.
+      hierarchy), then pull, fill and import those rows again. A missing
+      Edited, Raw or Promo grouping is held and escalated, not created
+      (manual 3.B).
 
     {bold}Further instructions: {command}jpc-writeback --help{reset}
 """,
@@ -756,11 +787,11 @@ COMMANDS = {
     --create-records mode. You do not need to run it separately.
 
     {bold}Equivalent direct command{reset}
-      {command}python3 aspace_csv_import/aspace_csv_import.py --create-records --file FILE --env production{reset}
+      {command}python3 data_import_export/aspace_csv_import.py --create-records --file FILE --env production{reset}
       Replace FILE with the ready CSV's path; quote paths with spaces.
 
     {bold}Underlying tool's help{reset}
-      {command}python3 aspace_csv_import/aspace_csv_import.py --help{reset}
+      {command}python3 data_import_export/aspace_csv_import.py --help{reset}
       This describes all of the Python tool's direct-use options (creating
       and updating). jpc-import accepts only the flags listed in OPTIONS
       above.""",
@@ -784,7 +815,7 @@ COMMANDS = {
     "update": {
         "title": "update ArchivesSpace records",
         "summary": "Update existing records: checks every row, shows each change in the PLAN, writes after you type yes",
-        "script": "aspace_csv_import/aspace_csv_import.py",
+        "script": "data_import_export/aspace_csv_import.py",
         "input": ("--file", "FILE", "The CSV saved by jpc-pull; its columns decide which fields change"),
         "base": lambda value: ["--update-only", "--file", value],
         "extras": {"--dry-run": None, "--no-color": None},
@@ -947,11 +978,11 @@ COMMANDS = {
     --update-only mode. You do not need to run it separately.
 
     {bold}Equivalent direct command{reset}
-      {command}python3 aspace_csv_import/aspace_csv_import.py --update-only --file FILE --env production{reset}
+      {command}python3 data_import_export/aspace_csv_import.py --update-only --file FILE --env production{reset}
       Replace FILE with the pulled CSV's path; quote paths with spaces.
 
     {bold}Underlying tool's help{reset}
-      {command}python3 aspace_csv_import/aspace_csv_import.py --help{reset}
+      {command}python3 data_import_export/aspace_csv_import.py --help{reset}
       This describes all of the Python tool's direct-use options (creating
       and updating). jpc-update accepts only the flags listed in OPTIONS
       above.""",
@@ -976,7 +1007,7 @@ COMMANDS = {
     "writeback": {
         "title": "record import results in Airtable",
         "summary": "Record a production create run's results in Airtable: preview by default; --run shows every change and writes after you type yes",
-        "script": "aspace_csv_import/airtable_writeback.py",
+        "script": "data_import_export/airtable_writeback.py",
         "input": ("--report", "REPORT.json", "The import_report_<stamp>.json saved by a real production create run"),
         "base": lambda value: [value],
         "extras": {"--run": None, "--exclude-catalog": "JPC_AV_xxxxx", "--no-color": None},
@@ -1192,12 +1223,12 @@ COMMANDS = {
     You do not need to run it separately.
 
     {bold}Equivalent direct command{reset}
-      {command}python3 aspace_csv_import/airtable_writeback.py REPORT.json --run{reset}
+      {command}python3 data_import_export/airtable_writeback.py REPORT.json --run{reset}
       Replace REPORT.json with the import report's path; quote paths with
       spaces. Leave out --run for a preview.
 
     {bold}Underlying tool's help{reset}
-      {command}python3 aspace_csv_import/airtable_writeback.py --help{reset}
+      {command}python3 data_import_export/airtable_writeback.py --help{reset}
       This describes the Python tool's direct-use options. jpc-writeback
       accepts only the flags listed in OPTIONS above.""",
             "exit": """    {ok}{bold}0{reset}    Done       All eligible, non-excluded rows were written or
@@ -1226,7 +1257,7 @@ COMMANDS = {
         "summary": ("Record the runtime of each digitized JPC_AV_xxxxx in ArchivesSpace and add "
                     "its RefID to the folder name: shows every change in the PLAN, writes after "
                     "you type yes"),
-        "script": "aspace_rename_directories/aspace-rename-directories.py",
+        "script": "refid_appending/aspace-rename-directories.py",
         "input": ("--directory", "PATH", "The folder holding the digitized JPC_AV_xxxxx folders; "
                   "folders already renamed are skipped"),
         "base": lambda value: ["-d", value],
@@ -1408,12 +1439,13 @@ COMMANDS = {
     {bold}Multi-title discs{reset}
       A manual exception: jpc-rename refuses a multi-title disc every time,
       so running it again never finishes one. Enter its Duration by hand
-      (manual 4.D.iv). Then rename just that folder with the direct tool,
-      which with --no-update reads no media file and changes no record.
+      (manual 4.D.iv), and its Physical Details if blank. Then rename just
+      that folder with the direct tool, which with --no-update reads no
+      media file and changes no record.
       From the tools repository folder:
 
         {command}cd {repo}{reset}
-        {command}python3 aspace_rename_directories/aspace-rename-directories.py --single PATH --no-update --mp4 --env production{reset}
+        {command}python3 refid_appending/aspace-rename-directories.py --single PATH --no-update --mp4 --env production{reset}
 
       PATH is that JPC_AV_xxxxx folder itself. The tool checks the record,
       shows a PLAN with the new folder name and asks for yes.
@@ -1445,11 +1477,11 @@ COMMANDS = {
     You do not need to run it separately.
 
     {bold}Equivalent direct command{reset}
-      {command}python3 aspace_rename_directories/aspace-rename-directories.py -d PATH --env production{reset}
+      {command}python3 refid_appending/aspace-rename-directories.py -d PATH --env production{reset}
       Replace PATH with the folder's path; quote paths with spaces.
 
     {bold}Underlying tool's help{reset}
-      {command}python3 aspace_rename_directories/aspace-rename-directories.py --help{reset}
+      {command}python3 refid_appending/aspace-rename-directories.py --help{reset}
       This describes all of the Python tool's direct-use options, including
       --single, --rename-media, --no-update and --no-rename. jpc-rename
       accepts only the flags listed in OPTIONS above.""",
@@ -1473,7 +1505,7 @@ COMMANDS = {
         "summary": ("Check which JPC_AV_xxxxx are live in MADS, the public DAMS delivery - "
                     "from a list or from a batch folder's item folders - and save a report "
                     "(read-only)"),
-        "script": "aspace_csv_import/check_mads.py",
+        "script": "data_import_export/check_mads.py",
         "input": ("--file", "FILE", "A list of JPC_AV_xxxxx: a plain text file, one per line, "
                   "or any CSV with a CATALOG_NUMBER column, such as a jpc-pull CSV"),
         "base": lambda value: [value],
@@ -1577,12 +1609,12 @@ COMMANDS = {
     to run it separately.
 
     {bold}Equivalent direct commands{reset}
-      {command}python3 aspace_csv_import/check_mads.py FILE{reset}
-      {command}python3 aspace_csv_import/check_mads.py --directory BATCH{reset}
+      {command}python3 data_import_export/check_mads.py FILE{reset}
+      {command}python3 data_import_export/check_mads.py --directory BATCH{reset}
       Replace FILE or BATCH with the path; quote paths with spaces.
 
     {bold}Underlying tool's help{reset}
-      {command}python3 aspace_csv_import/check_mads.py --help{reset}
+      {command}python3 data_import_export/check_mads.py --help{reset}
       This describes the Python tool's direct-use options. jpc-mads accepts
       only the flags listed in OPTIONS above.""",
             "exit": """    {ok}{bold}0{reset}    Done       Every JPC_AV_xxxxx got a definite Yes or No, and no
@@ -1878,7 +1910,7 @@ def command_help(verb):
                   + C.RESET),
         ("OPTIONS", launcher_options(options)),
     ]
-    exports = str(ROOT / "aspace_csv_import" / "__airtable_exports__")  # as the pull prints it
+    exports = str(ROOT / "data_import_export" / "__airtable_exports__")  # as the pull prints it
     style = dict(exports=exports, repo=shlex.quote(str(ROOT)), bold=C.BOLD, cyan=C.CYAN,
                  command=C.GREEN, ready=C.GREEN, review=C.YELLOW, dim=C.DIM, reset=C.RESET,
                  ok=C.GREEN, bad=C.RED, warn=C.YELLOW)
@@ -1907,6 +1939,7 @@ def command_help(verb):
         sections.append(("NEXT STEPS", custom["next_steps"].format(**style)))
     sections.append(("RUNS", custom["runs"].format(**style) + runs_footer(verb)))
     sections.append(("EXIT", custom["exit"].format(**style) + refusal_note(flag)))
+    sections.append(("FURTHER READING", further_reading("folders" if verb == "rename" else "data", "setup")))
     return launcher_help_screen(f"jpc-{verb}: {spec['title']}", sections)
 
 
@@ -2009,6 +2042,7 @@ def overview_help():
         {C.GREEN}[ -f {hint} ] && source {hint}{C.RESET}"""),
         ("EXIT", f"""    Each command exits with its tool's own code - see its --help.
     {C.YELLOW}2{C.RESET} when a jpc- command refuses the command line, before the tool runs."""),
+        ("FURTHER READING", further_reading("setup", "data", "folders")),
     ])
 
 

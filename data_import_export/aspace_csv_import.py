@@ -97,19 +97,19 @@ def get_colored_help():
     skipped, refused or changed - titles, dates, parents, notes in full). A real
     run then asks you to type {C.BOLD}yes{C.RESET}; anything else writes nothing. After a real
     create run it prints the exact command that records the results in Airtable."""),
-        ("USAGE", f"    {C.GREEN}${C.RESET} python3 aspace_csv_import.py (--create-records | --update-only) -f FILE [options]"),
+        ("USAGE", f"    {C.GREEN}${C.RESET} python3 data_import_export/aspace_csv_import.py (--create-records | --update-only) -f FILE [options]"),
         ("OPTIONS", render_options(CLI_OPTIONS)),
         ("MODE", "required - every run states its intent", render_options(MODE_OPTIONS)),
         ("CSV COLUMNS", "all required for --create-records; --update-only accepts a subset",
          f"""    {", ".join(col.REQUIRED_COLUMNS[:5])},
     {", ".join(col.REQUIRED_COLUMNS[5:])}
     {C.DIM}Other columns are ignored. A blank ASpace Parent RefID column can be filled first:{C.RESET}
-    {C.GREEN}${C.RESET} python3 aspace_csv_export.py --fill-parents FILE --env production
+    {C.GREEN}${C.RESET} python3 data_import_export/aspace_csv_export.py --fill-parents FILE --env production
     Writes jpc-fill_FILE_parent_ref-id_ready_for_ASpace_import.csv
     and jpc-fill_FILE_needs_human_review.csv beside FILE."""),
-        ("EXAMPLES", f"""    {C.GREEN}${C.RESET} python3 aspace_csv_import.py --create-records -f data.csv --dry-run
-    {C.GREEN}${C.RESET} python3 aspace_csv_import.py --create-records -f data.csv
-    {C.GREEN}${C.RESET} python3 aspace_csv_import.py --update-only -f data.csv"""),
+        ("EXAMPLES", f"""    {C.GREEN}${C.RESET} python3 data_import_export/aspace_csv_import.py --create-records -f data.csv --dry-run --env production
+    {C.GREEN}${C.RESET} python3 data_import_export/aspace_csv_import.py --create-records -f data.csv --env production
+    {C.GREEN}${C.RESET} python3 data_import_export/aspace_csv_import.py --update-only -f data.csv --env production"""),
         ("OUTPUT", f"""    {C.CYAN}{OUTPUT_DIR}/{C.RESET}
     import_report_<time>.json + .csv   what happened to each row (the receipt)
     import_records_<time>.json         the records as ArchivesSpace stored them
@@ -125,7 +125,7 @@ def get_colored_help():
     {C.RED}3{C.RESET}    records may have been written but the reports could not be saved
     {C.YELLOW}130{C.RESET}  interrupted (Ctrl-C) - the report covers the rows reached"""),
         ("NEXT STEP", f"""    After a real create run: the write-back command it prints
-    {C.GREEN}${C.RESET} python3 airtable_writeback.py REPORT.json --run"""),
+    {C.GREEN}${C.RESET} python3 data_import_export/airtable_writeback.py REPORT.json --run"""),
     ])
 
 # ==============================

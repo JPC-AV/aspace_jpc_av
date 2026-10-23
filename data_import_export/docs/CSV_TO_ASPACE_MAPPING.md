@@ -4,7 +4,8 @@ The field contract for the JPC AV tools: what each sheet column becomes in
 ArchivesSpace, how `--create-records` and `--update-only` treat it, and what
 `aspace-rename-directories.py` adds after digitization. The column names and
 validation rules themselves live in `sheet_rules.py`; this document describes
-the behavior. For the step-by-step process see the [README](../README.md);
+the behavior. For the step-by-step process see
+[Importing and Updating Data](../IMPORTING_AND_UPDATING_DATA.md);
 for one row followed end to end see [EXAMPLE_MAPPING.md](EXAMPLE_MAPPING.md);
 for the 80-odd sheet columns that are *not* imported see
 [POTENTIAL_MAPPINGS.md](POTENTIAL_MAPPINGS.md).
@@ -12,7 +13,7 @@ for the 80-odd sheet columns that are *not* imported see
 `aspace_csv_export.py` writes the inverse of this mapping (the same columns,
 read back from ArchivesSpace) so an export can be edited and re-imported with
 `--update-only`. `check_mads.py` writes nothing to ArchivesSpace and is
-covered in the README only.
+covered in Importing and Updating Data only.
 
 ## Quick Reference
 
@@ -106,8 +107,8 @@ replace values; they never clear them. Deletions are done in ArchivesSpace.
 
 The rename tool runs on the digitized folders, not the sheet. For each
 `JPC_AV_<number>` folder it looks the record up by component_id and writes
-two things. Options, formats and safety rules are in the
-[rename tool README](../../aspace_rename_directories/README.md).
+two things. Options, formats and safety rules are in
+[Appending RefIDs to Folders](../../refid_appending/APPENDING_REFIDS_TO_FOLDERS.md).
 
 ### Duration
 
