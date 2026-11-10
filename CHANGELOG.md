@@ -19,6 +19,25 @@ show when it reached `main` or GitHub.
 
 ## Releases
 
+- **v5.0.2** (2026-11-10): create runs and `check_extent_types.py` load
+  ArchivesSpace's extent types again
+  - Since v3.6.9, every `jpc-import` create run, dry runs included, stopped
+    before checking any row with "The 'extent_extent_type' enumeration has
+    an unusable id", and `check_extent_types.py` could not list the extent
+    types. v3.6.9 required each entry in ArchivesSpace's list of
+    vocabularies to carry a top-level `id`, which ArchivesSpace never sends
+    (an entry's number is only in its `uri`). Nothing was written: the run
+    stopped before its plan
+  - The importer and the extent checker now read the extent types directly
+    from the `extent_extent_type` entry in that list. They no longer need an
+    `id` and never build a request from a value in the reply. A list with
+    no entry of that name still uses the guarded fallback to list 14,
+    checked by name, and a malformed vocabulary still stops the run
+  - Update-only runs were affected only when a row changed a format
+  - After pulling: existing editable installs (`python -m pip install -e .`)
+    need nothing reinstalled; reinstalling only refreshes the version
+    `python -m pip show jpc-av-tools` reports
+
 - **v5.0.1** (2026-10-23): `jpc-rename` stops before resending an update
   once its log has failed, and the rate-limit warning shows before the wait
   - `jpc-rename` checks its log before every attempt to update a record,

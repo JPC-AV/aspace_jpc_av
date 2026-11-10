@@ -575,41 +575,29 @@ class ArchivesSpaceClient(ASpaceClient):
         no longer accepts slip into a record (fail closed, not open).
         """
         try:
-            # Resolve the extent_extent_type enumeration by name — enumeration IDs
-            # are not stable across ArchivesSpace instances.
+            # Find the extent_extent_type enumeration by name - enumeration IDs
+            # are not stable across ArchivesSpace instances. Each entry of the
+            # listing is the whole enumeration record, vocabulary included, so
+            # the named entry is used as listed (T-161). Its number is never
+            # read: ArchivesSpace sends no top-level `id` (the number is only
+            # inside `uri`), and no request is ever built from a reply value.
             enums = self.get("/config/enumerations")
-            enum_id = named = None
+            result = None
             if isinstance(enums, list):
                 for enum in enums:
                     if isinstance(enum, dict) and enum.get('name') == 'extent_extent_type':
-                        named, enum_id = enum, enum.get('id')
+                        result = enum
                         break
-            if named is not None and not positive_id(enum_id):
-                # A named entry whose id is not a positive integer is a
-                # malformed reply: refused before any endpoint is built from
-                # it (the id is not shown), never replaced by the fallback.
-                logging.error("The 'extent_extent_type' enumeration has an unusable id "
-                              "(not a positive whole number; not shown)")
-                return None
             # Guarded fallback to the conventional ID 14, but only when no entry
             # is named extent_extent_type, and only if ID 14 really is that
-            # enumeration on this instance. The record fetched to check that is
-            # the enumeration itself: kept, and checked below like any other,
-            # rather than fetched a second time.
-            result = None
-            if named is None:
+            # enumeration on this instance. A named entry with a malformed
+            # vocabulary is refused below, never replaced by the fallback.
+            if result is None:
                 candidate = self.get("/config/enumerations/14")
                 if isinstance(candidate, dict) and candidate.get('name') == 'extent_extent_type':
-                    enum_id, result = 14, candidate
-            if enum_id is None:
-                logging.error("Could not locate the 'extent_extent_type' enumeration in ArchivesSpace")
-                return None
+                    result = candidate
             if result is None:
-                result = self.get(f"/config/enumerations/{enum_id}")
-            if not isinstance(result, dict) or result.get('name') != 'extent_extent_type':
-                # The record fetched by id must identify as the enumeration
-                # we resolved - any other vocabulary is the wrong list.
-                logging.error("Fetched enumeration does not identify as 'extent_extent_type'")
+                logging.error("Could not locate the 'extent_extent_type' enumeration in ArchivesSpace")
                 return None
             # ArchivesSpace serves the vocabulary two ways: `values` is the
             # SELECTABLE list, `enumeration_values` the full records including
@@ -1119,12 +1107,6 @@ def record_identity_ok(record: Dict, uri: str, catalog_number: str) -> bool:
             and resource.get('ref') == aspace_client.RESOURCE_URI
             and record.get('component_id') == catalog_number
             and record.get('level') == 'item')
-
-
-def positive_id(value) -> bool:
-    """True for a positive JSON integer id - never a bool (True is an int to
-    Python), a float, text or a container."""
-    return type(value) is int and value > 0
 
 
 # A ref_id the compact outputs (the status line, the receipt CSV and JSON)
