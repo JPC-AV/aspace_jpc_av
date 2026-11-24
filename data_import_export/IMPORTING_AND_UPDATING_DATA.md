@@ -280,7 +280,7 @@ Exit 2 means something needs review or could not be checked. Correct Airtable wh
 
 ### Export records as stored
 
-To see records exactly as ArchivesSpace holds them - to confirm an import or review stored data - run the export tool directly ([Export records](#export-records)); given a pull, it exports exactly those items. An export is for review: corrections to Airtable-managed fields are still made in Airtable.
+To see records exactly as ArchivesSpace holds them - to confirm an import or review stored data - run the export tool directly ([Export records](#export-records)); given a pull, it exports exactly those items. To see one record in full - every note, every Defined List, every field ArchivesSpace returns - name it with `--record`, by its JPC_AV_xxxxx or its ref ID, at any level ([Records in full](#records-in-full)). An export is for review: corrections to Airtable-managed fields are still made in Airtable.
 
 ### Check which items are live in MADS
 
@@ -443,7 +443,11 @@ For an item in production ArchivesSpace without a usable production create repor
 
 1. Confirm the production record is the intended item - its JPC_AV_xxxxx, and the title and path `jpc-check` shows.
 2. Enter its parent in `ASpace Parent RefID`. Run `jpc-check --file PULL --env production --output PATH`: the CSV's "ArchivesSpace parent" column has it.
-3. Enter the item's own ref ID in `ASpace Item RefID` - never the parent's ref ID or the record URI. `jpc-check` does not show it: from the repository folder, export the item and copy its "ASpace Ref ID" column ([Export records](#export-records)):
+3. Enter the item's own ref ID in `ASpace Item RefID` - never the parent's ref ID or the record URI. `jpc-check` does not show it: from the repository folder, export the item - or every item in the pull - and copy its "ASpace Ref ID" column ([Export records](#export-records)):
+
+   ```bash
+   python3 data_import_export/aspace_csv_export.py --record JPC_AV_xxxxx --env production
+   ```
 
    ```bash
    python3 data_import_export/aspace_csv_export.py --list PULL --env production
@@ -479,7 +483,7 @@ Run directly, a tool that talks to ArchivesSpace uses the only environment in `c
 
 ### Export records
 
-`aspace_csv_export.py` exports AV records, read-only, to an import-shaped CSV with audit columns (ref ID, Warnings, Level, Depth, Path, URI, staff link, MADS URL, created/modified), in tree order; a `--list` export keeps list order. The Warnings column flags:
+`aspace_csv_export.py` exports AV records, read-only, to an import-shaped CSV with audit columns (ref ID, Warnings, Level, Depth, Path, URI, staff link, MADS URL, created/modified), in tree order; a `--list` or `--record` export keeps the order given. The Warnings column flags:
 
 - **Metadata gaps the policy cares about:** an item with no title or date, and a missing Component Unique Identifier, which also blocks re-import.
 - **Rows the importer will refuse on re-import:** a JPC_AV_xxxxx that is not `JPC_AV_` plus digits or is shared by two records, and a stored date that is not a valid ISO date.
@@ -496,13 +500,30 @@ python3 data_import_export/aspace_csv_export.py --list PULL --env production
 python3 data_import_export/aspace_csv_export.py --level item --mads-live --env production
 ```
 
-- `--list FILE` - exactly these JPC_AV_xxxxx (a list, or a CSV with `CATALOG_NUMBER` such as a pull); not with `--parent`.
+```bash
+python3 data_import_export/aspace_csv_export.py --record JPC_AV_xxxxx --record REFID --env production
+```
+
+- `--list FILE` - exactly these JPC_AV_xxxxx (a list, or a CSV with `CATALOG_NUMBER` such as a pull); not with `--parent` or `--record`.
+- `--record VALUE` - exactly this record, at any level: a full JPC_AV_xxxxx or its ref ID (case kept); repeat for more, in the order wanted; saves a record package ([Records in full](#records-in-full)); not with `--list`, `--parent` or `--level`.
 - `--level LEVEL` - `item` (default), `file`, `subseries`, `series` and others, or `all`.
 - `--parent REFID` - only this record's direct children; combines with `--level`.
 - `--mads-live` - adds a `MADS live` column.
-- `-o PATH` - save at `PATH`.
+- `-o PATH` - save at `PATH` (with `--record`: the package's JSON file, ending `.json`).
 
-Exit 2 means the file was written but is incomplete: listed items not found, or MADS checks failed.
+Exit 2 means the file was written but is incomplete: listed items not found, or MADS checks failed; with `--record`, also a value not exported, a record saved incomplete or a duplicate check incomplete.
+
+#### Records in full
+
+`--record` looks up exactly the records named - never the whole resource - and saves a **record package**: three files side by side in the reports folder (or beside `-o FILE.json`), never replacing an existing file:
+
+- `aspace_records_ENV_STAMP.json` - **the complete records** exactly as ArchivesSpace's API returned them: every note and subnote, every Defined List with its labels, values and order, every extent, date and instance, linked agent and subject references, and fields the tools don't otherwise use. What the tool adds - the command, target, requests and outcomes, each record's place in the tree, file statuses - sits beside each record, never inside it. Linked records stay references (nothing else is fetched). The JSON is not an import-ready update payload and not a backup.
+- `aspace_records_ENV_STAMP.csv` - the usual export columns, as above.
+- `aspace_records_ENV_STAMP_notes.csv` - one row per piece of note content, in the record's own order: each text subnote, each Defined List item (Label and Value in separate cells), each list item, chronology event and content string, plus a row for an empty note or list and an `unmapped` row for any structure ArchivesSpace's schemas don't define. Note #, Part #, Item # and Entry # number the rows; `JSON Pointer` gives each row's exact place in the JSON record; `Not Shown` names the fields the row leaves out (they are in the JSON). Text is kept exactly - markup such as `<emph>` stays literal and line breaks stay inside the cell. A spreadsheet may cut very long cells or read a cell starting with `=` as a formula; the JSON is the complete copy.
+
+A value is read by its shape alone: a full JPC_AV_xxxxx is looked up as a catalog number; bare digits and other JPC_AV-like text (`jpc_av_01561`, `JPC-AV-01561`, a `JPC_AV_xxxxx_refid_...` folder name) are refused; anything else made of letters, digits and `. _ : -` (up to 255 characters) is looked up as a ref ID, case kept. A catalog number that finds nothing is never retried as a ref ID. A refused value stops the run before login and is never shown; values that pass are shown and saved like any other input. A record named twice - by JPC_AV_xxxxx and by ref ID - is exported once. A record found by ref ID that carries a JPC_AV_xxxxx gets the same check for other records sharing it as a whole-resource export; when the search cannot settle it, the record is kept, flagged "duplicate check incomplete", and the run exits 2.
+
+The JSON is saved even when a CSV cannot be built or saved; its `files` entry says what happened to each CSV. A record whose place in the tree cannot be established stays in the JSON with the reason and gets no main CSV row (exit 2). Exit 1 means a package file was not saved - the screen names the files that were.
 
 ### List extent types
 

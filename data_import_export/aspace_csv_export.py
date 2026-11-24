@@ -36,9 +36,19 @@ cell; anything else stays blank with the reason. Raw rows are left for a person
 against ArchivesSpace like everything else here.
 
 Selection: everything at a level (--level, default item; 'all' for the
-whole hierarchy), one record's children (--parent), or an explicit list of
+whole hierarchy), one record's children (--parent), an explicit list of
 catalog numbers (--list FILE, plain text one-per-line or any CSV with a
-CATALOG_NUMBER column).
+CATALOG_NUMBER column), or records named one by one (--record, repeatable:
+a full JPC_AV_xxxxx or a ref ID, at any level).
+
+Records in full (--record, T-166): the named records are saved as a record
+package of three files side by side - the complete records exactly as the
+API returned them (JSON, run details kept outside each unchanged record),
+the usual export CSV, and a notes CSV with every note part and every
+Defined List item on its own row (label and value apart, original order,
+each row pointing into the JSON). Linked records stay references; nothing
+beyond the named records and their ancestors is read. The JSON is not an
+import payload and not a backup. No package file ever replaces another.
 
 Hierarchy: rows come out in depth-first tree order - the order the staff
 interface shows - and every row carries Level, Depth (0 for a top-level
@@ -50,12 +60,14 @@ list order but carries the same three columns. Delete them if unwanted;
 --update-only ignores them either way.
 
 Read-only: this script makes no ArchivesSpace writes (its only output is
-the CSV file).
+the CSV file, or with --record the record package).
 """
 
 import argparse
+import copy
 import csv
 import io
+import json
 import logging
 import re
 import os
@@ -77,7 +89,8 @@ from aspace_client import ASpaceClient
 from console import (Colors, print_status, print_header, print_section,  # shared display
                      render_options, progress, close_progress, print_run_header,
                      print_result, print_saved, help_screen, styled_parser)
-from aspace_csv_import import get_note_content, staff_link_for, RUN_COMMAND, parse_date
+from aspace_csv_import import (get_note_content, staff_link_for, RUN_COMMAND, parse_date,
+                               REF_ID_TEXT_RE)
 
 
 # Batch size for id_set fetches - one API call per BATCH records instead of
@@ -411,6 +424,24 @@ def _add_warning(row, text):
     row["Warnings"] = "; ".join(w for w in (row.get("Warnings", ""), text) if w)
 
 
+def _row_for(client, record, linked_cache):
+    """The export row for one looked-up record: (row, None), or (None,
+    reason) when the record's shape is unusable or its place in the tree
+    cannot be established. The reason reads after "<value>: ". Shared by
+    --list and --record."""
+    problem = record_shape_problem(record)
+    if problem:
+        return None, f"malformed record ({problem}) - retry later"
+    placed, reason = place_record(
+        record, lambda uri: fetch_linked(client, uri, linked_cache))
+    if placed is None:
+        return None, f"its {reason}"
+    # the order given is kept - no tree sort, so no approximate-order note
+    refid, depth, path, _, _ = placed
+    row, _ = build_row(record, refid, depth, path)
+    return row, None
+
+
 def export_by_list(client, catalog_numbers):
     """Export exactly the listed catalog numbers, in list order.
 
@@ -429,19 +460,10 @@ def export_by_list(client, catalog_numbers):
                 continue
             lookup = client.find_archival_object(number)
             if lookup.status == "found":
-                record = lookup.record
-                problem = record_shape_problem(record)
-                if problem:
-                    problems.append(f"{number}: malformed record ({problem}) - retry later")
+                row, reason = _row_for(client, lookup.record, linked_cache)
+                if row is None:
+                    problems.append(f"{number}: {reason}")
                     continue
-                placed, reason = place_record(
-                    record, lambda uri: fetch_linked(client, uri, linked_cache))
-                if placed is None:
-                    problems.append(f"{number}: its {reason}")
-                    continue
-                # list order is kept - no tree sort, so no approximate-order note
-                refid, depth, path, _, _ = placed
-                row, _ = build_row(record, refid, depth, path)
                 rows.append(row)
             elif lookup.status == "none":
                 problems.append(f"{number}: not found in the resource")
@@ -983,6 +1005,12 @@ def flag_duplicate_catalog_numbers(rows, counts):
             r["Warnings"] = "; ".join(w for w in (r.get("Warnings", ""), extra) if w)
 
 
+def export_fieldnames(extra_headers=()):
+    """The export CSV's columns: EXPORT_COLUMNS, with an optional column
+    only when asked for (MADS live)."""
+    return [c for c in EXPORT_COLUMNS if c not in OPTIONAL_EXPORT_COLUMNS or c in extra_headers]
+
+
 def write_export_csv(rows, path, extra_headers=(), provenance=None):
     """Write the export atomically - the final path only ever holds a
     complete file (a .tmp is never mistakable for a finished export).
@@ -990,8 +1018,7 @@ def write_export_csv(rows, path, extra_headers=(), provenance=None):
     `provenance` (the command that made the file, plus target/time) is
     written as a raw '# ...' first line so the sheet explains its own
     origin; every tool's CSV reader skips '#' lines (col.open_csv)."""
-    fieldnames = [c for c in EXPORT_COLUMNS
-                  if c not in OPTIONAL_EXPORT_COLUMNS or c in extra_headers]
+    fieldnames = export_fieldnames(extra_headers)
 
     def write(f):
         if provenance:
@@ -1544,6 +1571,684 @@ def run_check(list_path, csv_path=None, source=None):
     return code
 
 
+def mark_mads_live(rows):
+    """--mads-live: fill each row's MADS live cell and print the counts.
+    Returns how many checks failed or could not be made (a row with no
+    catalog number) - 'check failed' is not proof of absence."""
+    cats = [r.get(col.CATALOG, "") for r in rows]
+    print_status("info", f"Checking MADS liveness for "
+                         f"{len(set(c for c in cats if c))} catalog number(s)...")
+    mads = check_many(cats)
+    for r in rows:
+        # a row with no catalog number cannot be checked - say so in
+        # the cell, and count it as incomplete, rather than leaving a
+        # blank that reads like "not checked yet"
+        r["MADS live"] = mads.get(r.get(col.CATALOG, ""), "invalid catalog number")
+    mads = {**mads, **{f"(row {i})": "invalid catalog number"
+                       for i, r in enumerate(rows, 1) if not r.get(col.CATALOG)}}
+    live, not_live, check_failed = summarize(mads)
+    print_status("info", f"MADS: {live} live, {not_live} not in MADS")
+    if check_failed:
+        print_status("warning", f"{check_failed} MADS check(s) failed or had an invalid "
+                                f"catalog number - 'check failed' is not proof of absence; "
+                                f"re-run --mads-live for those")
+    return check_failed
+
+
+def _row_warnings(row):
+    return [w for w in row.get("Warnings", "").split("; ") if w]
+
+
+def print_row_warnings(rows):
+    """The rows that carry Warnings, each with its staff link."""
+    flagged = sum(1 for r in rows if _row_warnings(r))
+    if not flagged:
+        return
+    print()
+    print_status("warning", f"{flagged} record(s) have Warnings:")
+    for r in rows:
+        others = _row_warnings(r)
+        if others:
+            label = r.get(col.CATALOG) or f"(no catalog number) {r.get(col.TITLE) or '(no title)'}"
+            print_status("warning", f"{label}: {'; '.join(others)}", indent=1)
+            if r.get("ASpace Staff Link"):
+                print(f"       {Colors.DIM}{r['ASpace Staff Link']}{Colors.RESET}")
+
+
+# ------------------------------------------------------------------
+# --record: named records in full (T-166). Read-only, like everything here:
+# the named records are looked up one by one (never the whole resource) and
+# saved as a record package - the complete records as JSON, the usual
+# export CSV, and a notes CSV - none of which ever replaces an existing file.
+# ------------------------------------------------------------------
+
+# How one --record value is read, in this order. A full catalog number
+# first. Then the shapes refused rather than guessed at: bare digits
+# (catalog-number shorthand, accepted nowhere in the tools) and anything
+# that starts like a catalog number without being one (jpc_av_01561,
+# JPC-AV-01561, JPC_AV_ alone, a pasted JPC_AV_xxxxx_refid_... folder name).
+# Then a ref ID in the importer's usable shape (REF_ID_TEXT_RE), case kept.
+# The shape alone decides: a catalog lookup that finds nothing is never
+# retried as a ref ID, so what a value means never depends on what exists.
+BARE_DIGITS_RE = re.compile(r"[0-9]+")
+JPC_AV_LIKE_RE = re.compile(r"jpc[_-]?av", re.IGNORECASE)   # matched at the start
+
+REFID_NOT_FOUND = ("no record with this ref ID in the resource - it may belong to another "
+                   "resource or repository, or be too new for the search index")
+
+# The notes CSV: one row per piece of note content (see note_rows).
+NOTES_COLUMNS = ["ASpace Ref ID", "ASpace URI", col.CATALOG, "Note #", "Note Type",
+                 "Note Model", "Note Label", "Note Published", "Part #", "Part Model",
+                 "Part Title", "Item #", "Entry #", "Row Kind", "Label", "Value",
+                 "Not Shown", "JSON Pointer"]
+
+# The fields each note and subnote model from ArchivesSpace's published
+# schemas shows in its own columns; any other field present is named in Not
+# Shown (jsonmodel_type aside), and an unknown model gets an 'unmapped' row.
+_NOTE_SHOWN = {"note_multipart": {"type", "label", "publish", "subnotes"},
+               "note_singlepart": {"type", "label", "publish", "content"},
+               "note_bibliography": {"type", "label", "publish", "content", "items"},
+               "note_index": {"type", "label", "publish", "content", "items"}}
+_PART_SHOWN = {"note_text": {"content"},
+               "note_definedlist": {"title", "items"},
+               "note_orderedlist": {"title", "items"},
+               "note_chronology": {"title", "items"}}
+
+PACKAGE_ROLES = (("json", "record JSON"), ("main_csv", "main CSV"), ("notes_csv", "notes CSV"))
+
+
+def record_value_kind(value):
+    """'catalog', 'refid', or None (reserved or malformed) for one value."""
+    if col.valid_catalog_number(value):
+        return "catalog"
+    if BARE_DIGITS_RE.fullmatch(value) or JPC_AV_LIKE_RE.match(value):
+        return None
+    if REF_ID_TEXT_RE.fullmatch(value):
+        return "refid"
+    return None
+
+
+def classify_record_values(values):
+    """The --record values as ([(position, value, kind)], None), surrounding
+    spaces stripped and exact repeats dropped (the first kept) - or (None,
+    message) when any value is reserved or malformed. The message counts the
+    bad values and gives their --record positions, never a value: it is
+    raised after parsing, where the parser's own hiding no longer applies,
+    and what was typed could be anything, even a password."""
+    bad, named, seen = [], [], set()
+    for position, raw in enumerate(values, 1):
+        value = raw.strip()
+        kind = record_value_kind(value)
+        if kind is None:
+            bad.append(position)
+        elif value not in seen:
+            seen.add(value)
+            named.append((position, value, kind))
+    if not bad:
+        return named, None
+    positions = ", ".join(str(p) for p in bad[:10])
+    if len(bad) > 10:
+        positions += f" and {len(bad) - 10} more"
+    plural = len(bad) > 1
+    return None, (f"--record: {len(bad)} of the {len(values)} value{'s' if len(values) > 1 else ''} "
+                  f"given (position{'s' if plural else ''} {positions}) {'are' if plural else 'is'} "
+                  f"not a full JPC_AV_xxxxx or a usable ref ID - not shown; bare digits and other "
+                  f"JPC_AV-like forms are reserved; one value per --record; nothing was looked up")
+
+
+def usable_package_json_path(path):
+    """True when -o can name a record package's JSON file: it ends in .json
+    and has a name before it."""
+    return path.lower().endswith(".json") and len(os.path.basename(path)) > len(".json")
+
+
+def record_package_paths(json_path):
+    """The record package's three files, side by side: the JSON, then - its
+    name without .json - the main CSV and the notes CSV."""
+    stem = json_path[:-len(".json")]
+    return {"json": json_path, "main_csv": f"{stem}.csv", "notes_csv": f"{stem}_notes.csv"}
+
+
+def catalog_number_check(client, record, uri, cache):
+    """Whether a record found by ref ID shares its JPC_AV_xxxxx (component
+    ID) with any other record - the whole-resource export's duplicate check,
+    for one record. (A record found by its catalog number was checked by
+    that lookup.) `cache` maps component ID -> Lookup for the run, shared
+    with the catalog-number lookups, so the two routes never disagree.
+    Returns (check, warnings): the JSON entry and the texts for the row.
+    Whatever the search cannot vouch for is 'incomplete' - never 'not
+    shared' by a default count of zero. One check is a search walk (one or
+    more pages) plus a GET for every candidate."""
+    cid = record.get("component_id")
+    if not isinstance(cid, str) or not cid:
+        return {"status": "not applicable", "reason": "no component ID"}, []
+    if cid not in cache:
+        cache[cid] = client.find_archival_object(cid)
+    lookup = cache[cid]
+    holders = [u for u, _ in lookup.matches] if lookup.status in ("found", "multiple") else []
+    if lookup.status == "found" and holders == [uri]:
+        return {"status": "not shared"}, []
+    if lookup.status == "multiple" and uri in holders:
+        n = len(holders)
+        # the whole-resource export's exact text (flag_duplicate_catalog_numbers)
+        return ({"status": "shared", "holders": n},
+                [f"component ID shared by {n} records - the importer will refuse it"])
+    if lookup.status in ("found", "multiple"):
+        # other records hold it, but the index did not return this one
+        n = len(holders) + 1
+        reason = "the search found other records with this component ID but not this one"
+        return ({"status": "incomplete", "shared": True, "holders_at_least": n, "reason": reason},
+                [f"component ID shared by at least {n} records - the importer will refuse it",
+                 f"duplicate check incomplete - {reason}; retry later"])
+    reason = ("the search found no record with this component ID, not even this one "
+              "(the index may lag)" if lookup.status == "none" else "the search failed")
+    return ({"status": "incomplete", "reason": reason},
+            [f"duplicate check incomplete - {reason}; retry later"])
+
+
+def export_by_record(client, named):
+    """Look up each --record value with the verified helpers - a catalog
+    number with find_archival_object, a ref ID with find_parent (any level,
+    pinned to the configured resource) - and keep every record found.
+
+    Returns (requested, entries, notes). `requested`: one dict per value, in
+    the order given, with its outcome. `entries`: one per distinct record
+    (by its verified uri), in the order first found, each holding an
+    untouched deep copy of the record as returned, its placement, its
+    duplicate check and its export row (None when the row could not be
+    built - the record is still kept for the JSON). `notes`: info lines for
+    values that named a record already found."""
+    requested, entries, notes = [], [], []
+    by_uri, linked_cache, cid_cache = {}, {}, {}
+    try:
+        for i, (position, value, kind) in enumerate(named, 1):
+            ask = {"position": position, "value": value,
+                   "kind": "catalog number" if kind == "catalog" else "ref ID"}
+            requested.append(ask)
+            if kind == "catalog":
+                if value not in cid_cache:
+                    cid_cache[value] = client.find_archival_object(value)
+                lookup = cid_cache[value]
+            else:
+                lookup = client.find_parent(value)
+            progress("Looked up", i, len(named))
+            if lookup.status != "found":
+                what = "JPC_AV_xxxxx" if kind == "catalog" else "ref ID"
+                ask["result"] = "not exported"
+                ask["outcome"] = (
+                    ("not found in the resource" if kind == "catalog" else REFID_NOT_FOUND)
+                    if lookup.status == "none" else
+                    f"{lookup.count} records share this {what}" if lookup.status == "multiple"
+                    else "lookup failed - retry later")
+                continue
+            ask["uri"] = lookup.uri
+            first = by_uri.get(lookup.uri)
+            if first is not None:
+                # the same record, named again: one entry; the note says what
+                # happened to it - "exported once" only if it really was
+                first_value = first["requested_as"][0]
+                first["requested_as"].append(value)
+                first["requested_positions"].append(position)
+                ask["result"], ask["same_as"] = "same record", first_value
+                ask["outcome"] = (f"same record as {first_value} - exported once"
+                                  if first["row"] is not None else
+                                  f"same record as {first_value} - {first['outcome']} (see above)")
+                notes.append(f"{value}: {ask['outcome']}")
+                continue
+            entry = {"requested_as": [value], "requested_positions": [position],
+                     "uri": lookup.uri,
+                     "record": copy.deepcopy(lookup.record)}   # as returned; never modified
+            row, reason = _row_for(client, lookup.record, linked_cache)
+            if row is None:
+                entry["placement"] = {"status": "failed", "reason": reason}
+                entry["outcome"] = f"incomplete - no main CSV row: {reason}"
+            else:
+                entry["placement"] = {"status": "placed", "depth": row["Depth"],
+                                      "path": row["Path"], "parent_ref_id": row[col.PARENT_REFID]}
+                entry["outcome"] = "exported"
+            if kind == "catalog":
+                check, warnings = {"status": "not shared"}, []   # that lookup found exactly one
+            else:
+                check, warnings = catalog_number_check(client, lookup.record, lookup.uri, cid_cache)
+            entry["catalog_number_check"] = check
+            if check["status"] == "incomplete":
+                entry["outcome"] += " - duplicate check incomplete"
+            for text in (warnings if row is not None else ()):
+                _add_warning(row, text)
+            entry["row"] = row
+            ask["result"] = "exported" if row is not None else "incomplete"
+            ask["outcome"] = entry["outcome"]
+            by_uri[lookup.uri] = entry
+            entries.append(entry)
+    finally:
+        close_progress()
+    return requested, entries, notes
+
+
+def _cell(value):
+    """A stored value as CSV text, exactly: text as it is (markup and line
+    breaks kept, nothing trimmed), nothing for an absent value, true/false
+    for a flag, anything else as JSON - never dropped."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _unshown(level, obj, shown):
+    """'level: field, field' for the fields of `obj` its row does not show."""
+    if not isinstance(obj, dict):
+        return []
+    keys = [k for k in obj if k not in shown and k != "jsonmodel_type"]
+    return [f"{level}: {', '.join(keys)}"] if keys else []
+
+
+def _part_rows(add, part, p, pointer):
+    """The rows for one subnote of a multipart note (see note_rows)."""
+    if not isinstance(part, dict):
+        add("unmapped", pointer, **{"Part #": p + 1, "Value": _cell(part)})
+        return
+    model = part.get("jsonmodel_type")
+    cells = {"Part #": p + 1, "Part Model": _cell(model) if model is not None else "(none)",
+             "Part Title": _cell(part.get("title"))}
+    if model not in _PART_SHOWN:
+        add("unmapped", pointer, _unshown("part", part, set()), **cells)
+        return
+    extra = _unshown("part", part, _PART_SHOWN[model])
+    if model == "note_text":
+        add("text", pointer, extra, Value=_cell(part.get("content")), **cells)
+        return
+    items = part.get("items")
+    if items is not None and not isinstance(items, list):
+        add("unmapped", f"{pointer}/items", extra, **cells)
+        return
+    if not items:
+        add("empty list", pointer, extra, **cells)
+        return
+    for i, item in enumerate(items):
+        at, number = f"{pointer}/items/{i}", {"Item #": i + 1}
+        if model == "note_definedlist" and isinstance(item, dict):
+            # label and value kept apart; the item's own extra fields named
+            add("list item", at, extra + _unshown("item", item, {"label", "value"}), **cells,
+                **number, Label=_cell(item.get("label")), Value=_cell(item.get("value")))
+        elif model == "note_orderedlist" and isinstance(item, str):
+            add("list item", at, extra, **cells, **number, Value=item)
+        elif model == "note_chronology" and isinstance(item, dict):
+            item_extra = extra + _unshown("item", item, {"event_date", "events"})
+            label, events = _cell(item.get("event_date")), item.get("events")
+            if events is not None and not isinstance(events, list):
+                add("unmapped", f"{at}/events", item_extra, **cells, **number, Label=label)
+            elif not events:
+                add("empty item", at, item_extra, **cells, **number, Label=label)
+            else:
+                for e, event in enumerate(events):
+                    add("event" if isinstance(event, str) else "unmapped", f"{at}/events/{e}",
+                        item_extra, **cells, **number, **{"Entry #": e + 1},
+                        Label=label, Value=_cell(event))
+        else:
+            add("unmapped", at, extra, **cells, **number, Value=_cell(item))
+
+
+def note_rows(record):
+    """The notes CSV rows for one record (its identity columns aside): one
+    row per piece of note content, in the record's own order - each text
+    subnote, each Defined List item (Label and Value apart), each ordered
+    list item, each chronology event, each content string and index or
+    bibliography item - plus a row for an empty note, list or chronology
+    item, and an 'unmapped' row for any structure ArchivesSpace's published
+    schemas don't define, so nothing is skipped unseen. Every row's JSON
+    Pointer (RFC 6901, zero-based) locates its element in the record."""
+    rows = []
+    notes = record.get("notes")
+    if notes is None:
+        return rows
+    if not isinstance(notes, list):
+        return [{"Row Kind": "unmapped", "Value": _cell(notes), "JSON Pointer": "/notes"}]
+    for n, note in enumerate(notes):
+        pointer = f"/notes/{n}"
+        if not isinstance(note, dict):
+            rows.append({"Note #": n + 1, "Row Kind": "unmapped", "Value": _cell(note),
+                         "JSON Pointer": pointer})
+            continue
+        model = note.get("jsonmodel_type")
+        base = {"Note #": n + 1, "Note Type": _cell(note.get("type")), "Note Model": _cell(model),
+                "Note Label": _cell(note.get("label")), "Note Published": _cell(note.get("publish"))}
+        # an unknown model still shows its type, label and publish columns
+        note_extra = _unshown("note", note, _NOTE_SHOWN.get(model, {"type", "label", "publish"}))
+
+        def add(kind, at, extra=(), **cells):
+            rows.append({**base, **cells, "Row Kind": kind,
+                         "Not Shown": "; ".join(note_extra + list(extra)), "JSON Pointer": at})
+        before = len(rows)
+        if model not in _NOTE_SHOWN:
+            add("unmapped", pointer)
+        elif model == "note_multipart":
+            subnotes = note.get("subnotes")
+            if subnotes is not None and not isinstance(subnotes, list):
+                add("unmapped", f"{pointer}/subnotes")
+            for p, part in enumerate(subnotes if isinstance(subnotes, list) else []):
+                _part_rows(add, part, p, f"{pointer}/subnotes/{p}")
+        else:
+            for field in ("content", "items"):
+                values = note.get(field) if field in _NOTE_SHOWN[model] else None
+                if values is None:
+                    continue
+                if not isinstance(values, list):
+                    add("unmapped", f"{pointer}/{field}", **{"Part Model": field})
+                    continue
+                for i, value in enumerate(values):
+                    at, cells = f"{pointer}/{field}/{i}", {"Part Model": field, "Item #": i + 1}
+                    if field == "items" and model == "note_index" and isinstance(value, dict):
+                        add("list item", at, _unshown("item", value, {"type", "value"}), **cells,
+                            Label=_cell(value.get("type")), Value=_cell(value.get("value")))
+                    elif isinstance(value, str) and not (field == "items" and model == "note_index"):
+                        add("text" if field == "content" else "list item", at, **cells, Value=value)
+                    else:
+                        add("unmapped", at, **cells, Value=_cell(value))
+        if len(rows) == before:
+            add("empty note", pointer)
+    return rows
+
+
+def defined_list_counts(record):
+    """(Defined Lists, their items) in a record's multipart notes, or None
+    when its notes, subnotes or list items are not in the schemas' shape -
+    the record is still kept whole in the JSON; only the count is
+    unavailable."""
+    notes = record.get("notes")
+    if notes is None:
+        return 0, 0
+    if not isinstance(notes, list):
+        return None
+    lists = items = 0
+    for note in notes:
+        if not (isinstance(note, dict) and note.get("jsonmodel_type") == "note_multipart"):
+            continue
+        subnotes = note.get("subnotes")
+        if subnotes is None:
+            continue
+        if not isinstance(subnotes, list):
+            return None
+        for part in subnotes:
+            if isinstance(part, dict) and part.get("jsonmodel_type") == "note_definedlist":
+                lists += 1
+                entries = part.get("items")
+                if entries is None:
+                    continue
+                if not isinstance(entries, list):
+                    return None
+                items += len(entries)
+    return lists, items
+
+
+def notes_csv_rows(entries):
+    """Every entry's note rows, each with its record's identity columns;
+    records each entry's row count for the JSON."""
+    rows = []
+    for entry in entries:
+        record = entry["record"]
+        ident = {"ASpace Ref ID": _cell(record.get("ref_id")), "ASpace URI": _cell(record.get("uri")),
+                 col.CATALOG: _cell(record.get("component_id"))}
+        own = [{**ident, **r} for r in note_rows(record)]
+        entry["notes_csv_rows"] = len(own)
+        rows.extend(own)
+    return rows
+
+
+def csv_text(fieldnames, rows, provenance):
+    """A CSV as text, laid out exactly as write_export_csv writes one: the
+    '# provenance' first line, the header, the rows."""
+    buf = io.StringIO(newline="")
+    buf.write(f"# {provenance}\n")
+    writer = csv.DictWriter(buf, fieldnames=fieldnames, extrasaction="ignore")
+    writer.writeheader()
+    writer.writerows(rows)
+    return buf.getvalue()
+
+
+def publish_new(path, text):
+    """Save one package file without ever replacing anything there:
+    (status, reason, leftover) - ('saved', None, leftover) or ('not saved',
+    reason, leftover). `leftover` is a temporary file that could not be
+    removed (None when cleanup worked); it never changes the status."""
+    try:
+        leftover = col.save_new_via_temp(path, lambda f: f.write(text), newline="")
+    except FileExistsError as e:
+        return ("not saved", "the name already exists - nothing there was changed",
+                getattr(e, "leftover", None))
+    except OSError as e:
+        return "not saved", str(e), getattr(e, "leftover", None)
+    return "saved", None, leftover
+
+
+def settle_outcomes(requested, entries, files):
+    """Word every record's outcome by what was really saved, once both CSVs
+    have been published (the JSON, written after, carries these words). A
+    record is 'exported' only when its row is in a main CSV that was saved,
+    and a repeat is 'exported once' only then; otherwise the words say what
+    is missing, never that something was saved. Returns the repeat notes."""
+    main_saved = files["main_csv"][0] == "saved"
+    notes_saved = files["notes_csv"][0] == "saved"
+    entry_of = {}
+    for e in entries:
+        dup = (" - duplicate check incomplete"
+               if e["catalog_number_check"]["status"] == "incomplete" else "")
+        if e["row"] is None:
+            e["outcome"] = f"incomplete - no main CSV row: {e['placement']['reason']}{dup}"
+            e["main_csv_row"] = f"none - {e['placement']['reason']}"
+        elif main_saved:
+            e["outcome"] = f"exported{dup}"
+            e["main_csv_row"] = "included"
+        else:
+            e["outcome"] = ("incomplete - its main CSV row was built, but the main CSV "
+                            f"was not saved{dup}")
+            e["main_csv_row"] = "built, but the main CSV was not saved"
+        e["notes_csv"] = e.get("notes_csv_rows", 0) if notes_saved else files["notes_csv"][0]
+        for value in e["requested_as"]:
+            entry_of[value] = e
+    notes = []
+    for ask in requested:
+        e = entry_of.get(ask["value"])
+        if e is None:
+            continue                       # not found or failed: its outcome stands
+        if ask["result"] == "same record":
+            ask["outcome"] = (f"same record as {ask['same_as']} - exported once"
+                              if e["outcome"].startswith("exported") else
+                              f"same record as {ask['same_as']} - {e['outcome']} (see above)")
+            notes.append(f"{ask['value']}: {ask['outcome']}")
+        else:
+            ask["result"] = "exported" if e["outcome"].startswith("exported") else "incomplete"
+            ask["outcome"] = e["outcome"]
+    return notes
+
+
+def record_package_document(requested, entries, files, paths, provenance_command):
+    """The JSON: run details, requests and outcomes, file statuses - and each
+    record exactly as returned, under its own 'record' key, kept apart from
+    everything this tool adds."""
+    def public_entry(e):
+        out = {"requested_as": e["requested_as"], "requested_positions": e["requested_positions"],
+               "uri": e["uri"], "outcome": e["outcome"], "placement": e["placement"],
+               "catalog_number_check": e["catalog_number_check"],
+               "outputs": {"main_csv_row": e["main_csv_row"], "notes_csv_rows": e["notes_csv"]}}
+        if "mads_live" in e:
+            out["mads_live"] = e["mads_live"]
+        out["record"] = e["record"]
+        return out
+    summary = {"requested": len(requested),
+               "records": len(entries),
+               "exported": sum(1 for e in entries if e["outcome"].startswith("exported")),
+               "saved_incomplete": sum(1 for e in entries if not e["outcome"].startswith("exported")),
+               "not_exported": sum(1 for a in requested if a["result"] == "not exported"),
+               "duplicate_check_incomplete": sum(1 for e in entries
+                                                 if e["catalog_number_check"]["status"] == "incomplete")}
+    return {
+        "export_format": "jpc-aspace-records",
+        "export_format_version": 1,
+        "provenance": {"command": provenance_command, "target": aspace_client.ACTIVE_ENV,
+                       "repository": f"/repositories/{aspace_client.REPO_ID}",
+                       "resource": aspace_client.RESOURCE_URI,
+                       "exported_at": datetime.now().astimezone().isoformat(timespec="seconds")},
+        "requested": requested,
+        "summary": summary,
+        "files": {role: {"name": os.path.basename(paths[role]), "status": files[role][0],
+                         **({"reason": files[role][1]} if files[role][1] else {}),
+                         **({"leftover_temporary_file": os.path.basename(files[role][2])}
+                            if files[role][2] else {})}
+                  for role in ("main_csv", "notes_csv")},
+        "records": [public_entry(e) for e in entries],
+    }
+
+
+def print_record_summary(entries, limit=20):
+    """A short look at each exported record, up to `limit`."""
+    print_section("RECORDS")
+    for n, e in enumerate(entries[:limit], 1):
+        r = e["record"]
+        print(f"  {n}. {r.get('component_id') or '(no JPC_AV_xxxxx)'}  "
+              f"{r.get('level') or '(no level)'}  {r.get('title') or '(no title)'}")
+        placement = e["placement"]
+        if placement["status"] == "placed":
+            print(f"     ref ID: {r.get('ref_id') or '(none)'}   "
+                  f"parent ref ID: {placement['parent_ref_id'] or '(top level)'}")
+            print(f"     Path: {placement['path'] or '(top level)'}")
+        else:
+            print(f"     ref ID: {r.get('ref_id') or '(none)'}")
+            print(f"     Not placed: {placement['reason']}")
+        counts = defined_list_counts(r)
+        if counts is None:
+            print("     Notes: not in the expected shape - kept as returned in the JSON")
+        else:
+            lists, items = counts
+            notes = r.get("notes") or []
+            print(f"     Notes: {len(notes)} (Defined Lists: {lists}, "
+                  f"{items} item{'' if items == 1 else 's'})")
+    if len(entries) > limit:
+        print(f"  ... and {len(entries) - limit} more - see the files")
+
+
+def run_record_export(named, paths, source, mads_live=False):
+    """--record end to end. Returns the exit code: 0 when every named record
+    was exported, every check was complete and all three files were saved;
+    2 when the package was saved but something named is missing or
+    incomplete (or a MADS check failed); 1 when logging in failed or any
+    package file was not generated or not saved."""
+    print_run_header("Export named records in full from ArchivesSpace (read-only)", target=source,
+                     input=f"{len(named)} record(s) named with --record: "
+                           f"{', '.join(v for _, v, _ in named)}",
+                     mode="read ArchivesSpace, save a record package (JSON and two CSVs)")
+    try:
+        col.ensure_parent(paths["json"])   # values and -o accepted: the folder, before login
+    except OSError as e:
+        print_status("error", f"Could not create the output folder: {e} - nothing was written")
+        return 1
+    client = ASpaceClient()
+    print_status("info", f"Connecting to {aspace_client.ASPACE_URL}...")
+    if not client.login():
+        print_status("error", f"Could not log in: {client.login_problem}")
+        return 1
+    print_status("success", "Authenticated")
+    try:
+        print_status("info", f"Looking up {len(named)} record(s) named with --record...")
+        requested, entries, notes = export_by_record(client, named)
+    finally:
+        client.logout()
+
+    rows = [e["row"] for e in entries if e["row"] is not None]
+    extra_headers = ["MADS live"] if mads_live else []
+    mads_incomplete = 0
+    if mads_live and rows:
+        mads_incomplete = mark_mads_live(rows)
+        for e in entries:
+            if e["row"] is not None:
+                e["mads_live"] = e["row"]["MADS live"]
+
+    # Each CSV is built and published on its own; the JSON is attempted
+    # last, always, so it can say what really happened to each CSV. Its
+    # existence means the JSON was saved - not that everything was.
+    provenance = (f"{RUN_COMMAND} | target: {aspace_client.ACTIVE_ENV} | "
+                  f"{datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    files = {}
+    for role, build in (("main_csv", lambda: csv_text(export_fieldnames(extra_headers), rows,
+                                                      provenance)),
+                        ("notes_csv", lambda: csv_text(NOTES_COLUMNS, notes_csv_rows(entries),
+                                                       provenance))):
+        try:
+            text = build()
+        except Exception as e:   # noqa: BLE001 - that CSV is lost, never the JSON
+            files[role] = ("not generated", f"{type(e).__name__} while building it", None)
+            continue
+        files[role] = publish_new(paths[role], text)
+    # Outcomes are worded only now, from what the CSVs really did; every
+    # claim below about the JSON waits for the JSON's own result.
+    notes = settle_outcomes(requested, entries, files)
+    try:
+        text = json.dumps(record_package_document(requested, entries, files, paths, RUN_COMMAND),
+                          ensure_ascii=False, indent=2) + "\n"
+    except Exception as e:       # noqa: BLE001
+        files["json"] = ("not generated", f"{type(e).__name__} while building it", None)
+    else:
+        files["json"] = publish_new(paths["json"], text)
+    complete = all(files[role][0] == "saved" for role, _ in PACKAGE_ROLES)
+    json_saved = files["json"][0] == "saved"
+
+    unplaced = [e for e in entries if e["row"] is None]
+    not_exported = [a for a in requested if a["result"] == "not exported"]
+    dup_incomplete = sum(1 for e in entries if e["catalog_number_check"]["status"] == "incomplete")
+    if complete:
+        print_result([("Exported", len(rows), "ok", True),
+                      ("Saved, incomplete (in the JSON, no main CSV row)", len(unplaced),
+                       "attention"),
+                      ("Not item-level (for reference, not re-import)",
+                       sum(1 for r in rows if r.get("Level") != "item"), "neutral"),
+                      ("With warnings", sum(1 for r in rows if _row_warnings(r)), "attention"),
+                      ("Duplicate check incomplete", dup_incomplete, "unknown"),
+                      ("Not exported", len(not_exported), "bad"),
+                      ("MADS checks failed or invalid", mads_incomplete, "unknown")])
+        print_row_warnings(rows)
+        if entries:
+            print_record_summary(entries)
+    for line in notes:
+        print_status("info", line)
+    if unplaced:
+        print()
+        print_status("warning", f"{len(unplaced)} record(s) " + (
+            "saved in the JSON with no main CSV row:" if json_saved else
+            "with no main CSV row - their full records were for the JSON, which was NOT saved:"))
+        for e in unplaced:
+            print_status("warning", f"{e['requested_as'][0]}: {e['placement']['reason']}", indent=1)
+    if not_exported:
+        print()
+        print_status("error", f"{len(not_exported)} record(s) named with --record could NOT be "
+                              f"exported:")
+        for ask in not_exported:
+            print_status("error", f"{ask['value']}: {ask['outcome']}", indent=1)
+    print_saved([(label, paths[role]) for role, label in PACKAGE_ROLES if files[role][0] == "saved"],
+                failed=[(label, paths[role]) for role, label in PACKAGE_ROLES
+                        if files[role][0] != "saved"])
+    for role, label in PACKAGE_ROLES:
+        if files[role][0] != "saved":
+            print_status("error", f"{label} {files[role][0]}: {files[role][1]}")
+        if files[role][2]:
+            # best-effort cleanup failed: the outcome above stands, the leftover is named
+            print_status("warning", f"{label}: its temporary file could not be removed - "
+                                    f"delete it by hand: {files[role][2]}")
+    if not complete:
+        kept = [label for role, label in PACKAGE_ROLES if files[role][0] == "saved"]
+        where = (" (kept; the JSON's 'files' says what happened to each CSV)" if json_saved
+                 else " (kept; the JSON was NOT saved)")
+        print_status("error", "record package NOT complete - "
+                              + (f"saved: {', '.join(kept)}{where}" if kept else "nothing was saved")
+                              + "; run again with a new -o, or let it choose new names")
+        print()
+        return 1
+    print()
+    return 2 if (not_exported or unplaced or dup_incomplete or mads_incomplete) else 0
+
+
 CHECK_OPTIONS = [
     ("--check FILE", "", "Which of these catalog numbers ArchivesSpace has (text list or any CSV with"),
     ("", "", "CATALOG_NUMBER). Given an Airtable pull, also compares its ASpace Parent RefID and"),
@@ -1553,6 +2258,11 @@ SELECT_OPTIONS = [
     ("--level LEVEL", "", "Only records at this level: item (default), file, subseries, series... or all"),
     ("--parent REFID", "", "Only the direct children of this record (combines with --level)"),
     ("--list FILE", "", "Exactly these catalog numbers (text, one per line, or a CSV with CATALOG_NUMBER); list order kept"),
+    ("--record VALUE", "", "Exactly this record, at any level: a full"),
+    ("", "", "JPC_AV_xxxxx or its ref ID (case kept)."),
+    ("", "", "Repeat for more; the order given is kept."),
+    ("", "", "Saves the record package (see OUTPUT)."),
+    ("", "", "Not with --list, --parent or --level"),
 ]
 FILL_OPTIONS = [
     ("--fill-parents FILE", "", "Fill blank ASpace Parent RefID cells from EJS Episode + ASpace File Type"),
@@ -1564,6 +2274,8 @@ FILL_OPTIONS = [
 EXPORT_CLI_OPTIONS = [
     ("--mads-live", "", "Add a MADS live column: Yes / No / check failed / invalid catalog number"),
     ("-o, --output PATH", "", "Export CSV path (default: timestamped file in the reports folder)"),
+    ("", "", "With --record: the package's JSON path,"),
+    ("", "", "ending .json; its CSVs are saved beside it"),
     ("--env NAME", "", "Target environment from creds.py (required when several are configured)"),
     ("--no-color", "", "Disable colored output"),
 ]
@@ -1581,9 +2293,11 @@ def get_colored_help():
     {C.GREEN}1.{C.RESET} Exports records to an import-shaped CSV, in tree order, with Level, Depth and Path
     {C.GREEN}2.{C.RESET} Checks which catalog numbers are already in ArchivesSpace (--check)
     {C.GREEN}3.{C.RESET} Fills a sheet's blank ASpace Parent RefID column (--fill-parents)
-    {C.GREEN}4.{C.RESET} Checks whether exported records are live in MADS (--mads-live)"""),
+    {C.GREEN}4.{C.RESET} Checks whether exported records are live in MADS (--mads-live)
+    {C.GREEN}5.{C.RESET} Saves named records in full (--record): the JSON plus two CSVs"""),
         ("USAGE", f"""    {C.GREEN}${C.RESET} python3 data_import_export/aspace_csv_export.py [--level LEVEL] [--parent REFID] [options]
     {C.GREEN}${C.RESET} python3 data_import_export/aspace_csv_export.py --list FILE [options]
+    {C.GREEN}${C.RESET} python3 data_import_export/aspace_csv_export.py --record VALUE [--record VALUE ...] [options]
     {C.GREEN}${C.RESET} python3 data_import_export/aspace_csv_export.py --check FILE [-o PATH] [--env NAME]
     {C.GREEN}${C.RESET} python3 data_import_export/aspace_csv_export.py --fill-parents FILE [--env NAME]"""),
         ("OPTIONS", render_options(EXPORT_CLI_OPTIONS)),
@@ -1592,6 +2306,7 @@ def get_colored_help():
         ("FILL PARENTS", "instead of an export", render_options(FILL_OPTIONS)),
         ("EXAMPLES", f"""    {C.GREEN}${C.RESET} python3 data_import_export/aspace_csv_export.py --level all --env production
     {C.GREEN}${C.RESET} python3 data_import_export/aspace_csv_export.py --list batch.csv --env production
+    {C.GREEN}${C.RESET} python3 data_import_export/aspace_csv_export.py --record JPC_AV_00000 --env production
     {C.GREEN}${C.RESET} python3 data_import_export/aspace_csv_export.py --check batch.csv --env production
     {C.GREEN}${C.RESET} python3 data_import_export/aspace_csv_export.py --fill-parents batch.csv --env production"""),
         ("OUTPUT", f"""    Exports: {C.CYAN}{OUTPUT_DIR}/{C.RESET} (or -o)
@@ -1599,16 +2314,23 @@ def get_colored_help():
       jpc-fill_FILE_parent_ref-id_ready_for_ASpace_import.csv
       jpc-fill_FILE_needs_human_review.csv
     --check: on screen only (a CSV too with -o)
+    --record: three files in the reports folder (or beside -o FILE.json),
+    never replacing an existing file:
+      aspace_records_ENV_STAMP.json       the complete records, as returned
+      aspace_records_ENV_STAMP.csv        the usual export columns
+      aspace_records_ENV_STAMP_notes.csv  notes and Defined List items
     {C.DIM}The reports folder can be changed by setting logs_dir in creds.py{C.RESET}"""),
         ("EXIT", f"""    {C.GREEN}0{C.RESET}  done
     {C.YELLOW}2{C.RESET}  written but incomplete: rows for review (--fill-parents, expected), listed numbers
-       not found, or MADS checks failed; --check: something needs review (Airtable
-       disagrees or is incomplete, not an item, ambiguous) or could not be checked -
-       numbers simply not found are exit 0; also a bad argument or a creds.py
-       problem - then nothing is written
+       not found, or MADS checks failed; --record: a value not exported, a
+       record saved incomplete or a duplicate check incomplete; --check:
+       something needs review (Airtable disagrees or is incomplete, not an item,
+       ambiguous) or could not be checked - numbers simply not found are exit 0;
+       also a bad argument or a creds.py problem - then nothing is written
     {C.RED}1{C.RESET}  failed - nothing written (a fill whose ready file fails after its review file
        was written says so, and names the review file to delete); --check -o: the
-       check ran but its report could not be saved"""),
+       check ran but its report could not be saved; --record: a package file
+       was not generated or not saved (the screen names those that were saved)"""),
     ])
 
 
@@ -1617,6 +2339,7 @@ def build_parser():
     screen, and on a mistake the usage lines plus the option list."""
     parser = styled_parser(["[--level LEVEL] [--parent REFID] [options]",
                             "--list FILE [options]",
+                            "--record VALUE [--record VALUE ...] [options]",
                             "--check FILE [-o PATH] [--env NAME]",
                             "--fill-parents FILE [--env NAME]"],
                            get_colored_help,
@@ -1626,6 +2349,8 @@ def build_parser():
                         help=argparse.SUPPRESS)
     parser.add_argument("--parent", metavar="REFID", help=argparse.SUPPRESS)
     parser.add_argument("--list", metavar="FILE", dest="list_file", help=argparse.SUPPRESS)
+    parser.add_argument("--record", action="append", metavar="VALUE", dest="records",
+                        help=argparse.SUPPRESS)
     parser.add_argument("--check", metavar="FILE", dest="check_file", help=argparse.SUPPRESS)
     parser.add_argument("--fill-parents", metavar="FILE", dest="fill_file", help=argparse.SUPPRESS)
     parser.add_argument("--mads-live", action="store_true", help=argparse.SUPPRESS)
@@ -1645,17 +2370,31 @@ def main():
     if args.list_file and args.parent:
         parser.error("--list names the exact records to export - it cannot "
                      "be combined with --parent")
-    if args.fill_file and (args.list_file or args.parent or args.mads_live
+    if args.records and (args.list_file or args.parent or args.level != "item"):
+        parser.error("--record names the exact records to export - it cannot be "
+                     "combined with --list, --parent or --level")
+    if args.fill_file and (args.list_file or args.records or args.parent or args.mads_live
                            or args.level != "item"):
         parser.error("--fill-parents fills a sheet's parent column - it cannot be "
-                     "combined with --list, --parent, --level or --mads-live")
-    if args.check_file and (args.list_file or args.fill_file or args.parent
+                     "combined with --list, --record, --parent, --level or --mads-live")
+    if args.check_file and (args.list_file or args.records or args.fill_file or args.parent
                             or args.mads_live or args.level != "item"):
         parser.error("--check only looks catalog numbers up - it cannot be combined "
-                     "with --list, --fill-parents, --parent, --level or --mads-live")
+                     "with --list, --record, --fill-parents, --parent, --level or --mads-live")
     if args.fill_file and args.output:
         parser.error("--fill-parents always writes its ready and human-review CSVs "
                      "beside FILE - -o does not apply")
+    named = None
+    if args.records:
+        # Every value is classified before anything else happens: a reserved
+        # or malformed one refuses the run before login, folders or files.
+        named, problem = classify_record_values(args.records)
+        if problem:
+            parser.error(problem)
+        if args.output and not usable_package_json_path(args.output):
+            parser.error("with --record, -o names the record package's JSON file - it "
+                         "must end in .json (the two CSVs are saved beside it, with the "
+                         "same name); what was typed is not shown")
 
     # Environment selection: same contract as every other tool - auto with
     # one configured, explicit --env with several, no default.
@@ -1673,7 +2412,19 @@ def main():
                      or "no environments configured in creds.py (see creds_template.py)")
 
     stamp = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{os.getpid()}"
-    if args.fill_file:
+    package_paths = None
+    if args.records:
+        # The package's three names are checked now, before login, as fill
+        # checks its pair; publication itself never replaces a file either,
+        # so a name taken while the run is reading is still never overwritten.
+        package_paths = record_package_paths(args.output or os.path.join(
+            OUTPUT_DIR, f"aspace_records_{aspace_client.ACTIVE_ENV}_{stamp}.json"))
+        existing = [p for p in package_paths.values() if os.path.lexists(p)]  # a dangling link too
+        if existing:
+            parser.error(f"{' and '.join(existing)} already exist(s) - move or rename them, "
+                         f"or choose another -o (nothing was written)")
+        out_path = None
+    elif args.fill_file:
         # Both handoff files sit beside the pulled sheet and are never
         # overwritten: if either exists, nothing is written at all.
         fill_paths = fill_output_paths(args.fill_file)
@@ -1703,6 +2454,9 @@ def main():
 
     source = (f"{aspace_client.ACTIVE_ENV.upper()} ({aspace_client.ASPACE_URL}, "
               f"repo {aspace_client.REPO_ID}, resource {aspace_client.RESOURCE_ID}) - read-only")
+    if args.records:
+        # its own branch: never the whole-resource export below
+        sys.exit(run_record_export(named, package_paths, source, args.mads_live))
     if args.fill_file:
         print_run_header("Fill parents from ArchivesSpace (read-only)", target=source,
                          input=args.fill_file,
@@ -1746,48 +2500,20 @@ def main():
     extra_headers = ["MADS live"] if args.mads_live else []  # column present even when empty
     mads_incomplete = 0
     if args.mads_live and rows:
-        cats = [r.get(col.CATALOG, "") for r in rows]
-        print_status("info", f"Checking MADS liveness for "
-                             f"{len(set(c for c in cats if c))} catalog number(s)...")
-        mads = check_many(cats)
-        for r in rows:
-            # a row with no catalog number cannot be checked - say so in
-            # the cell, and count it as incomplete, rather than leaving a
-            # blank that reads like "not checked yet"
-            r["MADS live"] = mads.get(r.get(col.CATALOG, ""), "invalid catalog number")
-        mads = {**mads, **{f"(row {i})": "invalid catalog number"
-                           for i, r in enumerate(rows, 1) if not r.get(col.CATALOG)}}
-        live, not_live, check_failed = summarize(mads)
-        print_status("info", f"MADS: {live} live, {not_live} not in MADS")
-        if check_failed:
-            mads_incomplete = check_failed
-            print_status("warning", f"{check_failed} MADS check(s) failed or had an invalid "
-                                    f"catalog number - 'check failed' is not proof of absence; "
-                                    f"re-run --mads-live for those")
+        mads_incomplete = mark_mads_live(rows)
 
     provenance = (f"{RUN_COMMAND} | target: {aspace_client.ACTIVE_ENV} | "
                   f"{datetime.now().strftime('%Y-%m-%d %H:%M')}")
     write_export_csv(rows, out_path, extra_headers, provenance)
     non_items = sum(1 for r in rows if r.get("Level") != "item")
-    def _other_warnings(r):
-        return [w for w in r.get("Warnings", "").split("; ") if w]
-    flagged = sum(1 for r in rows if _other_warnings(r))
+    flagged = sum(1 for r in rows if _row_warnings(r))
     print_result([("Exported", len(rows), "ok", True),
                   ("Not item-level (for reference, not re-import)", non_items, "neutral"),
                   ("With warnings", flagged, "attention"),
                   ("Skipped: stale search-index entries", anomalies, "attention"),
                   ("Could not be exported", len(problems), "bad"),
                   ("MADS checks failed or invalid", mads_incomplete, "unknown")])
-    if flagged:
-        print()
-        print_status("warning", f"{flagged} record(s) have Warnings:")
-        for r in rows:
-            others = _other_warnings(r)
-            if others:
-                label = r.get(col.CATALOG) or f"(no catalog number) {r.get(col.TITLE) or '(no title)'}"
-                print_status("warning", f"{label}: {'; '.join(others)}", indent=1)
-                if r.get("ASpace Staff Link"):
-                    print(f"       {Colors.DIM}{r['ASpace Staff Link']}{Colors.RESET}")
+    print_row_warnings(rows)
     if anomalies:
         print()
         print_status("warning", f"{anomalies} record(s) skipped: the search index "

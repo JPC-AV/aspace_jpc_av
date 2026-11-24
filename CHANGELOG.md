@@ -19,6 +19,35 @@ show when it reached `main` or GitHub.
 
 ## Releases
 
+- **v5.1.0** (2026-11-24): the export saves named records in full
+  - New `--record` on `aspace_csv_export.py` (no new `jpc-` command): name
+    records one by one - a full JPC_AV_xxxxx or a ref ID, at any level,
+    subseries included - and repeat it for more. Only those records are
+    looked up, never the whole resource, and nothing is written to
+    ArchivesSpace
+  - Each run saves a record package of three files, none of which ever
+    replaces an existing file: the complete records as ArchivesSpace
+    returned them (JSON: every note, Defined List and other field, with run
+    details kept outside each record), the usual export CSV, and a notes
+    CSV with one row per note part and per Defined List item (label and
+    value apart, original order, each row pointing into the JSON). Defined
+    Lists - the rename tool's Duration, or a list entered by hand - appear
+    in no other export
+  - Ref IDs follow the importer's rule (letters, digits and `. _ : -`, up
+    to 255 characters), case kept. Bare digits and other JPC_AV-like text
+    are refused before login and never shown; a catalog number that finds
+    nothing is never retried as a ref ID
+  - A record found by ref ID gets the check for a shared JPC_AV_xxxxx that
+    a whole-resource export gives; a check the search cannot settle keeps
+    the record, flags it and exits 2. The JSON is saved even when a CSV
+    cannot be; exit 1 names the files that were saved
+  - `--list`, `--level`, `--parent`, `--check` and `--fill-parents` are
+    unchanged. jpc-check's next steps and the guide show
+    `--record JPC_AV_xxxxx` for one item beside `--list PULL` for a pull
+  - After pulling: existing editable installs (`python -m pip install -e .`)
+    need nothing reinstalled; reinstalling only refreshes the version
+    `python -m pip show jpc-av-tools` reports
+
 - **v5.0.2** (2026-11-10): create runs and `check_extent_types.py` load
   ArchivesSpace's extent types again
   - Since v3.6.9, every `jpc-import` create run, dry runs included, stopped

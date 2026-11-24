@@ -312,6 +312,75 @@ def save_via_temp(path, write, newline=None, encoding="utf-8"):
             _remove_owned(tmp, owned)
 
 
+def save_new_via_temp(path, write, newline=None, encoding="utf-8"):
+    """Save `path` only if nothing is there - never replacing anything.
+
+    Like save_via_temp, write(f) fills a new temporary file this call
+    creates exclusively in the same folder. Instead of os.replace, the file
+    is published with os.link, which fails with FileExistsError when the
+    name is taken - by a file, a folder or a link, even one another run
+    created a moment ago - and never follows, truncates or replaces it. A
+    folder whose filesystem cannot make hard links raises OSError: there is
+    no fallback to replacing. Used where a file must never overwrite
+    another (the export's --record package, T-166); save_via_temp keeps its
+    replacing behaviour for everything else.
+
+    Removing the temporary name is best effort and kept apart from the
+    result: it is tried on every outcome, but only while that name is still
+    the file this call created - a replaced or unowned entry is never
+    deleted. Once os.link has succeeded the file IS saved: the call returns
+    None, or the temporary path when it could not be removed, for the
+    caller to report as a leftover. On failure the original error is raised
+    - never replaced by a cleanup error - with .leftover set to the
+    temporary path when that, too, could not be removed."""
+    import os
+    import secrets
+    path = os.fspath(path)
+    folder, name = os.path.split(os.path.abspath(path))
+    tmp = os.path.join(folder, f"{name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                 0o666)
+    owned = None
+    try:
+        st = os.fstat(fd)
+        owned = (st.st_dev, st.st_ino)
+        with os.fdopen(fd, "w", newline=newline, encoding=encoding) as f:
+            fd = None
+            write(f)
+        os.link(tmp, path)                # fails on an existing name; never replaces
+    except BaseException as error:
+        if fd is not None:
+            os.close(fd)
+        if owned is not None and _remove_owned_checked(tmp, owned) is False:
+            error.leftover = tmp          # reported with the error, never instead of it
+        raise
+    return tmp if _remove_owned_checked(tmp, owned) is False else None
+
+
+def _remove_owned_checked(path, ident):
+    """Remove `path` only while it is still the file (device, inode) this
+    process created there. True: removed. None: nothing of ours is there
+    (gone, or replaced by another entry, which is left alone). False: ours,
+    or impossible to check, and not removed - a leftover to report."""
+    import os
+    import stat
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return False
+    if (st.st_dev, st.st_ino) != ident or stat.S_ISLNK(st.st_mode):
+        return None
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return False
+    return True
+
+
 def _remove_owned(path, ident):
     """Remove `path` only while it is still the file (device, inode) this
     process created there - never a link, never someone else's file."""

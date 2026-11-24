@@ -462,9 +462,10 @@ COMMANDS = {
            --output PATH: the CSV's "ArchivesSpace parent" column has it.
         3. Enter the item's own ref ID in ASpace Item RefID - never the
            parent's ref ID or the record URI. The check does not show it:
-           from the aspace_jpc_av folder, export the item and copy its
-           "ASpace Ref ID" column:
-             {command}python3 data_import_export/aspace_csv_export.py --list FILE --env production{reset}
+           from the aspace_jpc_av folder, export the item - or every item
+           in the pull - and copy its "ASpace Ref ID" column:
+             {command}python3 data_import_export/aspace_csv_export.py --record JPC_AV_xxxxx --env production{reset}
+             {command}python3 data_import_export/aspace_csv_export.py --list PULL --env production{reset}
         4. Set ASpace Item Record Created to Yes in the ((( ASpace_tracking )))
            table (it shows in <<< ASpace_import >>> as
            ((( ASpace Item Record Created )))).
