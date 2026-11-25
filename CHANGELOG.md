@@ -19,6 +19,30 @@ show when it reached `main` or GitHub.
 
 ## Releases
 
+- **v5.1.1** (2026-11-24): the documentation catches up with `--record`
+  - The guide's tables now list the record package: what the direct
+    export saves, and its three files and their folder among the saved
+    files
+  - The help, the guide and the `-o` error now give the package's names
+    with `-o FILE.json`: `FILE.json`, `FILE.csv` and `FILE_notes.csv`. The
+    error said the two CSVs had "the same name"
+  - The help no longer says every export is in tree order: `--list` and
+    `--record` keep the order given. The guide no longer says nothing else
+    is fetched: to place and check the named records, the tool also reads
+    their ancestors and the other records each search returns, and saves
+    none of those
+  - The guide now says that a JPC_AV_xxxxx shared by several records
+    exports none of them - name each by its ref ID instead - and that
+    package files are saved by hard link with no fallback, so in a folder
+    whose disk cannot make hard links no package file is saved (exit 1).
+    In a test of the saving step, exFAT and FAT disk images refused hard
+    links; real external drives and network shares have not been tested
+  - Only wording changes: options, behaviour, saved files and exit codes
+    are as in v5.1.0
+  - After pulling: existing editable installs (`python -m pip install -e .`)
+    need nothing reinstalled; reinstalling only refreshes the version
+    `python -m pip show jpc-av-tools` reports
+
 - **v5.1.0** (2026-11-24): the export saves named records in full
   - New `--record` on `aspace_csv_export.py` (no new `jpc-` command): name
     records one by one - a full JPC_AV_xxxxx or a ref ID, at any level,

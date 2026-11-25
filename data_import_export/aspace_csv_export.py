@@ -46,18 +46,19 @@ package of three files side by side - the complete records exactly as the
 API returned them (JSON, run details kept outside each unchanged record),
 the usual export CSV, and a notes CSV with every note part and every
 Defined List item on its own row (label and value apart, original order,
-each row pointing into the JSON). Linked records stay references; nothing
-beyond the named records and their ancestors is read. The JSON is not an
-import payload and not a backup. No package file ever replaces another.
+each row pointing into the JSON). Linked records stay references. Besides
+the named records, only their ancestors and the records each search
+returns are read, and none of those is saved. The JSON is not an import
+payload and not a backup. No package file ever replaces another.
 
 Hierarchy: rows come out in depth-first tree order - the order the staff
 interface shows - and every row carries Level, Depth (0 for a top-level
 series; an ephemera item under a tape is one deeper than the tape) and
 Path (its ancestors' display strings, joined with " > "). Path survives
 sorting and filtering where row order does not, and it says in words what
-the ASpace Parent RefID column says as a ref_id. A --list export keeps
-list order but carries the same three columns. Delete them if unwanted;
---update-only ignores them either way.
+the ASpace Parent RefID column says as a ref_id. A --list or --record
+export keeps the order given but carries the same three columns. Delete
+them if unwanted; --update-only ignores them either way.
 
 Read-only: this script makes no ArchivesSpace writes (its only output is
 the CSV file, or with --record the record package).
@@ -2274,8 +2275,9 @@ FILL_OPTIONS = [
 EXPORT_CLI_OPTIONS = [
     ("--mads-live", "", "Add a MADS live column: Yes / No / check failed / invalid catalog number"),
     ("-o, --output PATH", "", "Export CSV path (default: timestamped file in the reports folder)"),
-    ("", "", "With --record: the package's JSON path,"),
-    ("", "", "ending .json; its CSVs are saved beside it"),
+    ("", "", "With --record: -o FILE.json names the"),
+    ("", "", "package's JSON; its CSVs are saved beside"),
+    ("", "", "it as FILE.csv and FILE_notes.csv"),
     ("--env NAME", "", "Target environment from creds.py (required when several are configured)"),
     ("--no-color", "", "Disable colored output"),
 ]
@@ -2290,7 +2292,8 @@ def get_colored_help():
     C = Colors
     return help_screen(HELP_TITLE, [
         ("DESCRIPTION", f"""    Reads AV records from ArchivesSpace - never writes to it:
-    {C.GREEN}1.{C.RESET} Exports records to an import-shaped CSV, in tree order, with Level, Depth and Path
+    {C.GREEN}1.{C.RESET} Exports records to an import-shaped CSV with Level, Depth and Path,
+       in tree order (--list and --record: the order given)
     {C.GREEN}2.{C.RESET} Checks which catalog numbers are already in ArchivesSpace (--check)
     {C.GREEN}3.{C.RESET} Fills a sheet's blank ASpace Parent RefID column (--fill-parents)
     {C.GREEN}4.{C.RESET} Checks whether exported records are live in MADS (--mads-live)
@@ -2314,11 +2317,12 @@ def get_colored_help():
       jpc-fill_FILE_parent_ref-id_ready_for_ASpace_import.csv
       jpc-fill_FILE_needs_human_review.csv
     --check: on screen only (a CSV too with -o)
-    --record: three files in the reports folder (or beside -o FILE.json),
-    never replacing an existing file:
+    --record: three files in the reports folder, never replacing an
+    existing file:
       aspace_records_ENV_STAMP.json       the complete records, as returned
       aspace_records_ENV_STAMP.csv        the usual export columns
       aspace_records_ENV_STAMP_notes.csv  notes and Defined List items
+    or, with -o FILE.json: FILE.json, FILE.csv and FILE_notes.csv
     {C.DIM}The reports folder can be changed by setting logs_dir in creds.py{C.RESET}"""),
         ("EXIT", f"""    {C.GREEN}0{C.RESET}  done
     {C.YELLOW}2{C.RESET}  written but incomplete: rows for review (--fill-parents, expected), listed numbers
@@ -2392,9 +2396,9 @@ def main():
         if problem:
             parser.error(problem)
         if args.output and not usable_package_json_path(args.output):
-            parser.error("with --record, -o names the record package's JSON file - it "
-                         "must end in .json (the two CSVs are saved beside it, with the "
-                         "same name); what was typed is not shown")
+            parser.error("with --record, -o FILE.json names the record package's JSON "
+                         "file - it must end in .json (its CSVs are saved beside it as "
+                         "FILE.csv and FILE_notes.csv); what was typed is not shown")
 
     # Environment selection: same contract as every other tool - auto with
     # one configured, explicit --env with several, no default.

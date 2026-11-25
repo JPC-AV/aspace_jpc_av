@@ -46,7 +46,7 @@ Below, replace `NAME` with the Airtable view's exact name; `PULL`, `READY` and `
 | `jpc-writeback` | import report and records file, Airtable | **Airtable** (`--run`, after `yes`); outcomes CSV |
 | `jpc-mads` | public MADS | MADS report |
 | `jpc-rename` | ArchivesSpace, media files | **ArchivesSpace and folder names**, after `yes`; log |
-| direct export | ArchivesSpace (MADS with `--mads-live`) | export CSV |
+| direct export | ArchivesSpace (MADS with `--mads-live`) | export CSV; with `--record`, a record package (JSON and two CSVs) |
 
 Only the writing steps change anything outside your computer, and each shows its changes and asks for `yes` first.
 
@@ -359,7 +359,8 @@ Each saved file's full path follows "Saved ...:"; a file that could not be saved
 | `csv_import_<stamp>.log` | run log | as above | real runs, even cancelled ones |
 | `airtable_writeback_<stamp>.csv` | write-back outcomes, one line per created row: `CATALOG_NUMBER`, `ASpace Parent RefID`, `ASpace Item RefID`, outcome, note | beside the import report | `jpc-writeback --run`, past `yes` or with nothing left to write |
 | `mads_check_<stamp>.csv` | MADS answers | `~/aspace_mads_reports/`, or `mads_reports/` in `logs_dir` | `jpc-mads` |
-| `aspace_export_<env>_<stamp>.csv` | records as stored | `~/aspace_import_reports/`, or `export_reports/` in `logs_dir` | direct export |
+| `aspace_export_<env>_<stamp>.csv` | records as stored | `~/aspace_import_reports/`, or `export_reports/` in `logs_dir` | direct export, without `--record` |
+| `aspace_records_<env>_<stamp>.json`, `.csv` and `_notes.csv` | record package: the complete records, the usual export columns, the notes | as above; with `-o FILE.json`, as `FILE.json`, `FILE.csv` and `FILE_notes.csv` | direct export with `--record` |
 
 `<stamp>` is the run's date, time and process ID. `logs_dir` is an optional `creds.py` setting. A `.tmp` file is never a finished file.
 
@@ -509,21 +510,23 @@ python3 data_import_export/aspace_csv_export.py --record JPC_AV_xxxxx --record R
 - `--level LEVEL` - `item` (default), `file`, `subseries`, `series` and others, or `all`.
 - `--parent REFID` - only this record's direct children; combines with `--level`.
 - `--mads-live` - adds a `MADS live` column.
-- `-o PATH` - save at `PATH` (with `--record`: the package's JSON file, ending `.json`).
+- `-o PATH` - save at `PATH` (with `--record`: `-o FILE.json` names the package's JSON file, which must end in `.json`; its CSVs are saved beside it as `FILE.csv` and `FILE_notes.csv`).
 
 Exit 2 means the file was written but is incomplete: listed items not found, or MADS checks failed; with `--record`, also a value not exported, a record saved incomplete or a duplicate check incomplete.
 
 #### Records in full
 
-`--record` looks up exactly the records named - never the whole resource - and saves a **record package**: three files side by side in the reports folder (or beside `-o FILE.json`), never replacing an existing file:
+`--record` looks up exactly the records named - never the whole resource - and saves a **record package**: three files side by side in the reports folder, never replacing an existing file (with `-o FILE.json`, they are `FILE.json`, `FILE.csv` and `FILE_notes.csv`):
 
-- `aspace_records_ENV_STAMP.json` - **the complete records** exactly as ArchivesSpace's API returned them: every note and subnote, every Defined List with its labels, values and order, every extent, date and instance, linked agent and subject references, and fields the tools don't otherwise use. What the tool adds - the command, target, requests and outcomes, each record's place in the tree, file statuses - sits beside each record, never inside it. Linked records stay references (nothing else is fetched). The JSON is not an import-ready update payload and not a backup.
+- `aspace_records_ENV_STAMP.json` - **the complete records** exactly as ArchivesSpace's API returned them: every note and subnote, every Defined List with its labels, values and order, every extent, date and instance, linked agent and subject references, and fields the tools don't otherwise use. What the tool adds - the command, target, requests and outcomes, each record's place in the tree, file statuses - sits beside each record, never inside it. Linked records - agents, subjects, containers - stay references and are not fetched. Besides the named records, the tool reads their ancestors, to place them, and the records each search returns, to confirm a match and check for a shared JPC_AV_xxxxx; none of those is saved. The JSON is not an import-ready update payload and not a backup.
 - `aspace_records_ENV_STAMP.csv` - the usual export columns, as above.
 - `aspace_records_ENV_STAMP_notes.csv` - one row per piece of note content, in the record's own order: each text subnote, each Defined List item (Label and Value in separate cells), each list item, chronology event and content string, plus a row for an empty note or list and an `unmapped` row for any structure ArchivesSpace's schemas don't define. Note #, Part #, Item # and Entry # number the rows; `JSON Pointer` gives each row's exact place in the JSON record; `Not Shown` names the fields the row leaves out (they are in the JSON). Text is kept exactly - markup such as `<emph>` stays literal and line breaks stay inside the cell. A spreadsheet may cut very long cells or read a cell starting with `=` as a formula; the JSON is the complete copy.
 
-A value is read by its shape alone: a full JPC_AV_xxxxx is looked up as a catalog number; bare digits and other JPC_AV-like text (`jpc_av_01561`, `JPC-AV-01561`, a `JPC_AV_xxxxx_refid_...` folder name) are refused; anything else made of letters, digits and `. _ : -` (up to 255 characters) is looked up as a ref ID, case kept. A catalog number that finds nothing is never retried as a ref ID. A refused value stops the run before login and is never shown; values that pass are shown and saved like any other input. A record named twice - by JPC_AV_xxxxx and by ref ID - is exported once. A record found by ref ID that carries a JPC_AV_xxxxx gets the same check for other records sharing it as a whole-resource export; when the search cannot settle it, the record is kept, flagged "duplicate check incomplete", and the run exits 2.
+A value is read by its shape alone: a full JPC_AV_xxxxx is looked up as a catalog number; bare digits and other JPC_AV-like text (`jpc_av_01561`, `JPC-AV-01561`, a `JPC_AV_xxxxx_refid_...` folder name) are refused; anything else made of letters, digits and `. _ : -` (up to 255 characters) is looked up as a ref ID, case kept. A catalog number that finds nothing is never retried as a ref ID. A refused value stops the run before login and is never shown; values that pass are shown and saved like any other input. A record named twice - by JPC_AV_xxxxx and by ref ID - is exported once. A record found by ref ID that carries a JPC_AV_xxxxx gets the same check for other records sharing it as a whole-resource export; when the search cannot settle it, the record is kept, flagged "duplicate check incomplete", and the run exits 2. A JPC_AV_xxxxx that several records share exports none of them - the value is reported as "N records share this JPC_AV_xxxxx" (exit 2) - so name each of those records by its ref ID; each is then exported with the shared-number warning.
 
 The JSON is saved even when a CSV cannot be built or saved; its `files` entry says what happened to each CSV. A record whose place in the tree cannot be established stays in the JSON with the reason and gets no main CSV row (exit 2). Exit 1 means a package file was not saved - the screen names the files that were.
+
+Package files are saved by hard link - that is what keeps them from replacing anything - and there is no fallback: in a folder whose disk cannot make hard links, each file is "not saved" and the run exits 1, after logging in and looking the records up. The Mac's own disk (APFS) supports hard links. In a test of the saving step on macOS, exFAT- and FAT-formatted disk images refused them ("Operation not supported"); real external drives and network shares have not been tested. If every package file comes back "not saved" with that message, save to the Mac's disk and copy the files. A `.tmp` file left in that folder is not a finished file; delete it once the run has ended.
 
 ### List extent types
 
