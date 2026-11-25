@@ -19,7 +19,7 @@ show when it reached `main` or GitHub.
 
 ## Releases
 
-- **v5.1.1** (2026-11-24): the documentation catches up with `--record`
+- **v5.1.1** (2026-11-25): the documentation catches up with `--record`
   - The guide's tables now list the record package: what the direct
     export saves, and its three files and their folder among the saved
     files
