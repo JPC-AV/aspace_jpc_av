@@ -259,6 +259,21 @@ def started_by(*commands):
     return marker if marker in commands else None
 
 
+def typed_path(path):
+    """`path` as the operator would type it in a next-step hint: relative to
+    the current folder when that folder can be found, else absolute. The
+    terminal's folder can vanish while a tool runs (renamed, moved, a share
+    remounted); os.getcwd() then fails, and a finished run must not end in
+    a traceback over a hint (T-159). Every caller passes an absolute path,
+    so the fallback needs no current folder. Presentation only."""
+    import os
+    try:
+        here = os.getcwd()
+    except OSError:
+        return os.path.abspath(path)
+    return os.path.relpath(path, here)
+
+
 def print_next_step(lines, title="NEXT STEP"):
     """What to do next - the caller decides whether there is one."""
     print_section(title)

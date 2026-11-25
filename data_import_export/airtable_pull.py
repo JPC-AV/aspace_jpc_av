@@ -28,7 +28,7 @@ import sheet_rules as col  # single source of truth for CSV header names
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from console import (Colors, print_status, print_header,  # shared display helpers
                      print_run_header, print_result, print_saved, print_next_step,
-                     render_options, help_screen, styled_parser, started_by)
+                     render_options, help_screen, styled_parser, started_by, typed_path)
 
 # ==============================
 # CONFIGURATION
@@ -355,7 +355,7 @@ def write_csv(path, columns, records, provenance):
 
 def _script(name):
     """A sibling script's path as the operator would type it from here."""
-    return os.path.relpath(Path(__file__).resolve().parent / name)
+    return typed_path(Path(__file__).resolve().parent / name)
 
 
 def build_parser():
@@ -435,7 +435,7 @@ def main():
                                 f"fine for --update-only (it changes only the columns present); "
                                 f"--create-records needs all of them")
     print_saved([("pulled CSV", out_path)])
-    print_next_step(next_step_lines(os.path.relpath(out_path)))
+    print_next_step(next_step_lines(typed_path(out_path)))
 
 
 def next_step_lines(pulled):

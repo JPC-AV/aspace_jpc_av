@@ -19,6 +19,21 @@ show when it reached `main` or GitHub.
 
 ## Releases
 
+- **v5.1.2** (2026-11-25): next-step hints and dry-run diagnostics stay
+  useful
+  - Run from a folder that no longer exists (renamed, moved, or a share
+    remounted), `jpc-pull` and a production create no longer end in a
+    traceback after saving: their next-step commands give absolute paths
+    instead. From a folder that exists, the paths stay relative as before
+  - An import or update dry run now shows why a request or lookup failed -
+    the shared client's status and safe detail, and the extent vocabulary's
+    reason - as indented `[log]` lines, as the read-only tools already do;
+    client warnings such as a failed logout appear there too. Dry runs
+    still save no files, and real runs log exactly as before
+  - After pulling: existing editable installs (`python -m pip install -e .`)
+    need nothing reinstalled; reinstalling only refreshes the version
+    `python -m pip show jpc-av-tools` reports
+
 - **v5.1.1** (2026-11-25): the documentation catches up with `--record`
   - The guide's tables now list the record package: what the direct
     export saves, and its three files and their folder among the saved

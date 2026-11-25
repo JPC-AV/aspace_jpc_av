@@ -22,7 +22,7 @@ from console import (Colors, print_status, print_header,  # shared display helpe
                      print_section, render_options, print_run_header, print_result,
                      print_saved, help_screen, styled_parser)
 from console import print_next_step as show_next_step
-from console import started_by
+from console import started_by, typed_path
 
 # ==============================
 # TERMINAL COLORS
@@ -320,14 +320,34 @@ def log_failure_line(problem: str) -> str:
     return f"Writing the log failed ({problem}). {LOG_INCOMPLETE}"
 
 
+def _dry_run_detail(record: logging.LogRecord) -> bool:
+    """The log lines a dry run shows on screen: the shared client's request
+    and lookup detail (aspace_client - written to be shown: statuses, error
+    kinds, "server text not shown"), less its login line, which repeats the
+    "Could not log in" reason already printed; and the extent-vocabulary
+    loader's reason. Row problems and the rest are printed by the importer
+    itself."""
+    if record.module == "aspace_client":
+        return record.funcName != "_login_failed"
+    return record.module == "aspace_csv_import" and record.funcName == "get_extent_types"
+
+
 def setup_environment(dry_run: bool = False, csv_file: str = None) -> Optional[str]:
     """Create output directories and configure logging. -> None, or (a real
     run only) why its log could not be started - the run must stop then."""
     global RUN_LOG, _LOG_FINISHED, _LOG_REPORTED, _STOPPED_BEFORE_YES
     # A dry run writes no files at all - not even a log; the terminal is
     # its whole output. Real runs log to a file (the console uses print).
+    # The dry run's screen still gets the reason behind a failed request or
+    # lookup (T-160), in the read-only tools' "[log]" form (see
+    # aspace_client.console_logging) - only those lines, so nothing the
+    # importer prints itself appears twice.
     if dry_run:
-        logging.basicConfig(level=logging.INFO, handlers=[logging.NullHandler()])
+        detail = logging.StreamHandler()
+        detail.setLevel(logging.WARNING)
+        detail.setFormatter(logging.Formatter("      [log] %(message)s"))
+        detail.addFilter(_dry_run_detail)
+        logging.basicConfig(level=logging.INFO, handlers=[detail])
     else:
         try:
             os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -2877,8 +2897,8 @@ def print_next_step(summary: Dict, results: List[Dict] = None) -> None:
     failed = sum(1 for r in results if error_kind(r) == "failed")
     not_reached = (max(summary.get("total_rows", 0) - len(results), 0)
                    + sum(1 for r in results if r.get("status") == "aborted"))
-    script = os.path.relpath(os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                          "airtable_writeback.py"))
+    script = typed_path(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                     "airtable_writeback.py"))
     lines = []
     if unknown or failed or held or not_reached or summary.get("interrupted"):
         parts = [f"{created} created"]
