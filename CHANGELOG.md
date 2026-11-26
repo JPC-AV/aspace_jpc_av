@@ -19,6 +19,23 @@ show when it reached `main` or GitHub.
 
 ## Releases
 
+- **v5.2.0** (2026-11-26): new tape records need a file-level parent
+  - `jpc-import` create runs now refuse a row whose ASpace Parent RefID
+    names a record that is not at file level - an episode, subseries,
+    series or another item, or a record whose level is missing or
+    unrecognized. Any file-level grouping passes, in any series, a set's
+    own file record included. The check runs in the preflight and again
+    just before a container or item is created for the row
+  - A strict create stops before writing anything; `--keep-going` refuses
+    just that row and creates the rest. If a parent changes during a run,
+    that row is refused and rows already created stay created, as with
+    other failures during writing
+  - This checks the parent's level, not that it is the right episode or
+    grouping. `--update-only` never re-parents and is unchanged
+  - After pulling: existing editable installs (`python -m pip install -e .`)
+    need nothing reinstalled; reinstalling only refreshes the version
+    `python -m pip show jpc-av-tools` reports
+
 - **v5.1.2** (2026-11-25): next-step hints and dry-run diagnostics stay
   useful
   - Run from a folder that no longer exists (renamed, moved, or a share

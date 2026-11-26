@@ -669,7 +669,7 @@ COMMANDS = {
       Then each row is checked against live ArchivesSpace:
 
         • The JPC_AV_xxxxx is not already in ArchivesSpace.
-        • The parent exists in this resource.
+        • The parent exists in this resource and is a file-level record.
         • Original Format is a term in ArchivesSpace's extent list.
         • The item's AV Case container is not ambiguous.
         • The item is not on hold (ASpace Hold).

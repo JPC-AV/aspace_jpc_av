@@ -31,7 +31,7 @@ accepts a narrow sheet: `CATALOG_NUMBER` plus any of the columns marked
 | Original Format | `extents[0].extent_type` | Must be a live term in the extent-type vocabulary. Blank creates the record with **no extent**. | Mutable. Only the type changes; every other extent field is kept. Blank leaves the extent alone. An unchanged stored term round-trips even if the term has since been retired. A record with two or more extents is left alone unless the cell would change the first extent's type, which is refused. |
 | ASpace Scope and Contents Note | `scopecontent` note | Multipart note with one text subnote. Blank writes no note. | Mutable; see *Notes*. |
 | ASpace PhysTech Note | `phystech` note | Same. | Same. |
-| ASpace Parent RefID | `parent.ref` | **Required.** Resolved by ref_id lookup; exactly one archival object in the resource must match. | Ignored. Update-only never re-parents. |
+| ASpace Parent RefID | `parent.ref` | **Required.** Resolved by ref_id lookup; exactly one archival object in the resource must match, and it must be a file-level record (level `file`) - any other or missing level is refused. Only the level is checked, not which episode or grouping it belongs to. | Ignored. Update-only never re-parents. |
 
 ### Dates
 

@@ -131,7 +131,7 @@ The one record here that processing staff may create is a **multi-tape unit's ow
 jpc-import --file READY --env production --dry-run
 ```
 
-The dry run checks the CSV, then every row against live ArchivesSpace (not already there, parent exists, valid format, unambiguous container, not on hold). It writes and saves nothing. If every row passes, it shows the PLAN:
+The dry run checks the CSV, then every row against live ArchivesSpace (not already there, parent exists and is a file-level record, valid format, unambiguous container, not on hold). It writes and saves nothing. If every row passes, it shows the PLAN:
 
 ```text
 PLAN - what this run will do (nothing written yet)

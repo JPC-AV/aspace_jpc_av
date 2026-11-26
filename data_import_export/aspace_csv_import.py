@@ -1662,6 +1662,20 @@ def record_row_outcome(result: Dict, summary: Dict, echo: bool = True):
             print_status("info", f"{field}: {old} --> {new}", indent=1)
 
 
+def parent_level_problem(parent_ref_id: str, record) -> Optional[str]:
+    """Why a found parent may not receive a new item, or None (T-162). Items
+    go under a file-level record - an episode's Edited, Raw or Promo, a
+    set's own file record, or any other series' file-level grouping - so
+    the level must be exactly "file". A missing, malformed or differently
+    spelled level is refused the same way, never assumed. A level gate
+    only: whether the grouping belongs to the item's episode is not checked.
+    The reason is fixed text; nothing from the server is quoted."""
+    level = record.get("level") if isinstance(record, dict) else None
+    if level == "file":
+        return None
+    return f"Parent {parent_ref_id} is not a file-level record"
+
+
 def process_csv_row(row: Dict, row_num: int, client: ArchivesSpaceClient,
                    dry_run: bool = False, duplicate_mode: str = 'skip') -> Dict:
     """Process a single CSV row and return result."""
@@ -1747,6 +1761,14 @@ def process_csv_row(row: Dict, row_num: int, client: ArchivesSpaceClient,
         # missing (they might waste time "fixing" it, or create a duplicate).
         parent_lookup = client.find_parent(parent_ref_id)
         if parent_lookup.status == "found":
+            # checked again here, before anything - container or item - is
+            # created for this row: the parent may have changed since the plan
+            problem = parent_level_problem(parent_ref_id, parent_lookup.record)
+            if problem:
+                result["status"] = "error"
+                result["message"] = f"{problem} - row not processed"
+                logging.error(f"{problem} (row {row_num})")
+                return result
             parent_uri = parent_lookup.uri
         elif parent_lookup.status == "none":
             result["status"] = "error"
@@ -2245,9 +2267,10 @@ def _preflight_create_row(row_num: int, row: Dict, client: ArchivesSpaceClient,
                           path_cache: Dict = None):
     """Phase-1 check for ONE strict-create row. Every PREDICTABLE failure is
     caught here so an abort means nothing was written: the catalog number
-    must be verifiably new, the parent must exist, the extent type must be
-    in the live vocabulary, and the top-container indicator must not be
-    ambiguous. Appends to `problems` on any issue. No writes happen here.
+    must be verifiably new, the parent must exist at file level, the
+    extent type must be in the live vocabulary, and the top-container
+    indicator must not be ambiguous. Appends to `problems` on any issue. No
+    writes happen here.
 
     Mirror image of _preflight_update_only_row: update-only aborts when a
     number is missing, strict create aborts when a number exists. Both treat
@@ -2313,6 +2336,10 @@ def _preflight_create_row(row_num: int, row: Dict, client: ArchivesSpaceClient,
             issues.append(f"Parent not found: {parent_ref_id}")
         elif lookup.status != "found":
             issues.append(f"Parent lookup failed for {parent_ref_id} ({lookup.problem})")
+        else:
+            problem = parent_level_problem(parent_ref_id, lookup.record)
+            if problem:
+                issues.append(problem)
 
     container = client.find_top_container(catalog_number)
     if container == "ERROR":
@@ -2398,7 +2425,7 @@ def process_csv_file(filename: str, client: ArchivesSpaceClient,
     # Mirror of --update-only's resolve phase. Strict create aborts on any
     # problem; --keep-going refuses just those rows.
     print_status("info", f"Checking {len(rows)} row(s) before writing anything "
-                         f"(catalog number new, parent exists, format valid, "
+                         f"(catalog number new, parent exists at file level, format valid, "
                          f"container unambiguous)...")
     problems = []
     plan = {}
