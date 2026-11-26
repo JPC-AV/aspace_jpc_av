@@ -528,6 +528,14 @@ The JSON is saved even when a CSV cannot be built or saved; its `files` entry sa
 
 Package files are saved by hard link - that is what keeps them from replacing anything - and there is no fallback: in a folder whose disk cannot make hard links, each file is "not saved" and the run exits 1, after logging in and looking the records up. The Mac's own disk (APFS) supports hard links. In a test of the saving step on macOS, exFAT- and FAT-formatted disk images refused them ("Operation not supported"); real external drives and network shares have not been tested. If every package file comes back "not saved" with that message, save to the Mac's disk and copy the files. A `.tmp` file left in that folder is not a finished file; delete it once the run has ended.
 
+#### On screen
+
+```bash
+python3 data_import_export/aspace_csv_export.py --record JPC_AV_xxxxx --screen --env production
+```
+
+`--screen` shows each record named with `--record` in full in the terminal and saves nothing - no package, report, folder or log. It uses the same lookups as the package, at any level, in the order given, a record named twice shown once. Each record is laid out like the staff interface: Title, Level, dates and notes with each one's own metadata beside it, every note part and Defined List entry in order, then agent links with each agent's preferred name, subjects and containers by name, the hierarchy and the system metadata. A field the view doesn't know is shown as `(unmapped)` with its value, never dropped; markup such as `<emph>` stays literal; a control or direction-changing character is shown as an escape such as `\x1b`. Nothing is cut or wrapped by the tool - the terminal wraps long lines - so copied text is close to the stored text but not guaranteed exact: the package's JSON is the exact copy. The records go to the screen's normal output and the progress and problems to its error output, so `> file` saves just the records. Exit 2 means something could not be shown - a value not found, a Path, a linked name or a duplicate check not available - and says what; the records found are still shown. Not with `-o` or `--mads-live`.
+
 ### List extent types
 
 ```bash

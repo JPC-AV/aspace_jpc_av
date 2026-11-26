@@ -19,6 +19,26 @@ show when it reached `main` or GitHub.
 
 ## Releases
 
+- **v5.3.0** (2026-11-26): named records can be read in full on screen
+  - New `--screen` with `--record` on `aspace_csv_export.py` (no new `jpc-`
+    command): each named record, at any level, is shown in full in the
+    terminal - every note and subnote, every Defined List entry in order,
+    each date's and note's own metadata beside it - and nothing is saved:
+    no package, report, folder or log
+  - Linked agents are shown by their preferred name, and subjects and
+    containers by their labels, with every reference kept; one read per
+    linked record, nothing followed further. A name that cannot be read is
+    marked and the run ends partial (exit 2), the record still shown
+  - Anything unfamiliar is shown as `(unmapped)` rather than dropped;
+    markup stays literal and control or direction-changing characters are
+    shown as escapes. Records go to standard output, progress and problems
+    to standard error. Not with `-o` or `--mads-live`
+  - `--record` without `--screen`, and every other export mode, are
+    unchanged
+  - After pulling: existing editable installs (`python -m pip install -e .`)
+    need nothing reinstalled; reinstalling only refreshes the version
+    `python -m pip show jpc-av-tools` reports
+
 - **v5.2.0** (2026-11-26): new tape records need a file-level parent
   - `jpc-import` create runs now refuse a row whose ASpace Parent RefID
     names a record that is not at file level - an episode, subseries,

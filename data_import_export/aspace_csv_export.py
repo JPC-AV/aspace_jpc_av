@@ -65,6 +65,7 @@ the CSV file, or with --record the record package).
 """
 
 import argparse
+import contextlib
 import copy
 import csv
 import io
@@ -72,12 +73,15 @@ import json
 import logging
 import re
 import os
+import shutil
 import sys
 from datetime import datetime
 from pathlib import Path
 
 import sheet_rules as col  # single source of truth for CSV header names
 from sheet_rules import read_catalog_list  # noqa: E402,F401 - shared with check_mads
+import note_models  # the note models shown, shared with record_screen (T-174)
+import record_screen  # --record --screen's renderer: pure, no network or files
 
 # Add parent directory to path for the shared client and creds.py import
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -1646,14 +1650,8 @@ NOTES_COLUMNS = ["ASpace Ref ID", "ASpace URI", col.CATALOG, "Note #", "Note Typ
 # The fields each note and subnote model from ArchivesSpace's published
 # schemas shows in its own columns; any other field present is named in Not
 # Shown (jsonmodel_type aside), and an unknown model gets an 'unmapped' row.
-_NOTE_SHOWN = {"note_multipart": {"type", "label", "publish", "subnotes"},
-               "note_singlepart": {"type", "label", "publish", "content"},
-               "note_bibliography": {"type", "label", "publish", "content", "items"},
-               "note_index": {"type", "label", "publish", "content", "items"}}
-_PART_SHOWN = {"note_text": {"content"},
-               "note_definedlist": {"title", "items"},
-               "note_orderedlist": {"title", "items"},
-               "note_chronology": {"title", "items"}}
+# The tables live in note_models.py, shared with the on-screen view (T-174).
+_NOTE_SHOWN, _PART_SHOWN = note_models.NOTE_SHOWN, note_models.PART_SHOWN
 
 PACKAGE_ROLES = (("json", "record JSON"), ("main_csv", "main CSV"), ("notes_csv", "notes CSV"))
 
@@ -2250,6 +2248,242 @@ def run_record_export(named, paths, source, mads_live=False):
     return 2 if (not_exported or unplaced or dup_incomplete or mads_incomplete) else 0
 
 
+# --- --record VALUE --screen (T-174): the named records, in full, on screen ---
+#
+# Read-only and nothing is saved - no package, report, folder, log or cache
+# file. Catalog-data requests are GETs (login and logout are the client's
+# usual POSTs): each value's verified lookup, a record found by ref ID's
+# duplicate check, its ancestors for Path, and one GET per distinct agent,
+# subject and top container it links to. Nothing those replies link to is
+# followed. The package export (export_by_record) is untouched.
+
+_SCREEN_LINKS = {
+    "agent": re.compile(r"/agents/(?:people|corporate_entities|families|software)/[0-9]+"),
+    "subject": re.compile(r"/subjects/[0-9]+"),
+}
+
+
+def screen_link_refs(record):
+    """(kind, ref) for every agent, subject and top-container reference in
+    `record` that has the canonical shape for where it sits. Anything else
+    is never requested - the view shows it as not usable."""
+    refs = []
+    if not isinstance(record, dict):
+        return refs
+    for kind, key in (("agent", "linked_agents"), ("subject", "subjects")):
+        links = record.get(key)
+        for link in links if isinstance(links, list) else []:
+            ref = link.get("ref") if isinstance(link, dict) else None
+            if isinstance(ref, str) and _SCREEN_LINKS[kind].fullmatch(ref):
+                refs.append((kind, ref))
+    instances = record.get("instances")
+    for inst in instances if isinstance(instances, list) else []:
+        sub = inst.get("sub_container") if isinstance(inst, dict) else None
+        top = sub.get("top_container") if isinstance(sub, dict) else None
+        ref = top.get("ref") if isinstance(top, dict) else None
+        if isinstance(ref, str) and _repo_pinned("top_containers").fullmatch(ref):
+            refs.append(("container", ref))
+    return refs
+
+
+def _screen_link_label(kind, reply):
+    """(label, None) or (None, reason) from a linked record's reply. An
+    agent's preferred name is display_name.sort_name - names[0] can be an
+    alternative form - and is never guessed from the other names."""
+    if kind == "agent":
+        name = reply.get("display_name")
+        name = name.get("sort_name") if isinstance(name, dict) else None
+        if isinstance(name, str) and name.strip():
+            return name, None
+        return None, "the agent record has no preferred name"
+    if kind == "subject":
+        title = reply.get("title")
+        if isinstance(title, str) and title.strip():
+            return title, None
+        return None, "the subject record has no title"
+    shown = reply.get("display_string")
+    if isinstance(shown, str) and shown.strip():
+        return shown, None
+    kind_, indicator = reply.get("type"), reply.get("indicator")
+    if isinstance(indicator, str) and indicator.strip():
+        return (f"{kind_} {indicator}" if isinstance(kind_, str) and kind_ else indicator), None
+    return None, "the container record has no display string or indicator"
+
+
+def resolve_screen_links(client, record, cache):
+    """Fill `cache` (reference -> (label, None) or (None, reason)) for the
+    links in `record`: one GET per distinct reference for the whole run,
+    failures cached like successes. A reply is used only when it identifies
+    as the very reference requested; nothing in it is followed (one hop).
+    The record is not changed - the labels stay beside it."""
+    for kind, ref in screen_link_refs(record):
+        if ref in cache:
+            continue
+        reply = client.get(ref)
+        if not isinstance(reply, dict):
+            cache[ref] = (None, "could not be read - retry later")
+        elif reply.get("uri") != ref:
+            cache[ref] = (None, "the reply was for a different record")
+        else:
+            cache[ref] = _screen_link_label(kind, reply)
+
+
+def _hierarchy_problem(record):
+    """What makes `record` unusable for walking up the tree, or None. Only
+    what the walk reads is checked - the resource and parent links and the
+    texts a Path or Parent Ref ID takes - not the export's CSV fields: a
+    malformed note must not hide an otherwise sound Path."""
+    if not isinstance(record, dict):
+        return "not a record"
+    resource = record.get("resource")
+    if (not isinstance(resource, dict) or not isinstance(resource.get("ref"), str)
+            or not _repo_pinned("resources").fullmatch(resource["ref"])):
+        return "resource link"
+    parent = record.get("parent")
+    if parent is not None and (not isinstance(parent, dict)
+                               or not isinstance(parent.get("ref"), str)
+                               or not _repo_pinned("archival_objects").fullmatch(parent["ref"])):
+        return "parent link"
+    for field in ("display_string", "title", "component_id", "ref_id"):
+        value = record.get(field)
+        if value is not None and not isinstance(value, str):
+            return field
+    return None
+
+
+def _screen_ancestor(client, uri, cache):
+    """One ancestor for the screen's Path, fetched once per run: (record,
+    None) or (None, reason) - as fetch_linked, with the walk's own checks."""
+    if uri not in cache:
+        linked = client.get(uri)
+        if (not isinstance(linked, dict) or linked.get("uri") != uri
+                or _hierarchy_problem(linked)):
+            cache[uri] = (None, "could not be read - retry later")
+        elif linked["resource"]["ref"] != aspace_client.RESOURCE_URI:
+            cache[uri] = (None, "belongs to another resource - fix the record in ArchivesSpace")
+        else:
+            cache[uri] = (linked, None)
+    return cache[uri]
+
+
+def screen_placement(client, record, cache):
+    """{"status": "placed", "depth", "path", "parent_ref_id"} or {"status":
+    "failed", "reason"} - where `record` sits, for the screen only."""
+    problem = _hierarchy_problem(record)
+    if problem:
+        return {"status": "failed", "reason": f"the record's {problem} is not usable"}
+    chain, reason = ancestor_chain(record, lambda uri: _screen_ancestor(client, uri, cache))
+    if chain is None:
+        return {"status": "failed", "reason": reason}
+    refid = parent_refid(chain)
+    if refid is None:
+        return {"status": "failed",
+                "reason": f"linked parent {chain[-1].get('uri')} has no usable ref_id"}
+    return {"status": "placed", "depth": len(chain), "parent_ref_id": refid,
+            "path": " > ".join(display_of(a) for a in chain)}
+
+
+def screen_lookup(client, named):
+    """Each --record value through the same verified lookups as the package
+    export. Returns (requested, entries): `requested`, one dict per value in
+    the order given ("shown" True or False, and why); `entries`, one per
+    distinct record (by verified uri), in the order first found, with the
+    record as returned and its duplicate check - the existing check, which
+    needs a component ID, not a particular level."""
+    requested, entries, by_uri, cid_cache = [], [], {}, {}
+    try:
+        for i, (_, value, kind) in enumerate(named, 1):
+            ask = {"value": value}
+            requested.append(ask)
+            if kind == "catalog":
+                if value not in cid_cache:
+                    cid_cache[value] = client.find_archival_object(value)
+                lookup = cid_cache[value]
+            else:
+                lookup = client.find_parent(value)
+            progress("Looked up", i, len(named))
+            if lookup.status != "found":
+                what = "JPC_AV_xxxxx" if kind == "catalog" else "ref ID"
+                ask["shown"], ask["outcome"] = False, (
+                    ("not found in the resource" if kind == "catalog" else REFID_NOT_FOUND)
+                    if lookup.status == "none" else
+                    f"{lookup.count} records share this {what}" if lookup.status == "multiple"
+                    else "lookup failed - retry later")
+                continue
+            ask["shown"] = True
+            first = by_uri.get(lookup.uri)
+            if first is not None:
+                first["requested_as"].append(value)
+                ask["outcome"] = f"same record as {first['requested_as'][0]} - shown once"
+                continue
+            if kind == "catalog":
+                check = {"status": "not shared"}       # that lookup found exactly one
+            else:
+                check, _ = catalog_number_check(client, lookup.record, lookup.uri, cid_cache)
+            entry = {"requested_as": [value], "uri": lookup.uri, "record": lookup.record,
+                     "check": check}
+            by_uri[lookup.uri] = entry
+            entries.append(entry)
+    finally:
+        close_progress()
+    return requested, entries
+
+
+def run_record_screen(named, source):
+    """--record --screen end to end. Returns the exit code: 0 when every
+    value's record was shown complete; 2 when anything is missing - a value
+    not shown (0 shown included), a Path not built, a linked name not
+    resolved, a duplicate check incomplete; 1 when logging in failed. The
+    records go to stdout; the run header, progress and every diagnostic to
+    stderr, so a redirected stdout holds the records alone."""
+    out = sys.stdout
+    with contextlib.redirect_stdout(sys.stderr):
+        print_run_header("Show named records on screen (read-only)", target=source,
+                         input=f"{len(named)} record(s) named with --record: "
+                               f"{', '.join(v for _, v, _ in named)}",
+                         mode="read ArchivesSpace, show each record in full - nothing is saved")
+        client = ASpaceClient()
+        print_status("info", f"Connecting to {aspace_client.ASPACE_URL}...")
+        if not client.login():
+            print_status("error", f"Could not log in: {client.login_problem}")
+            return 1
+        print_status("success", "Authenticated")
+        try:
+            print_status("info", f"Looking up {len(named)} record(s) named with --record...")
+            requested, entries = screen_lookup(client, named)
+            places, links = {}, {}
+            for entry in entries:
+                entry["placement"] = screen_placement(client, entry["record"], places)
+                resolve_screen_links(client, entry["record"], links)
+        finally:
+            client.logout()
+    read_at = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+    narrow = out.isatty() and shutil.get_terminal_size().columns < 64
+    for i, entry in enumerate(entries, 1):
+        lines, entry["limitations"] = record_screen.render_record(
+            entry["record"], placement=entry["placement"], check=entry["check"], links=links,
+            requested_as=entry["requested_as"], target=aspace_client.ACTIVE_ENV.upper(),
+            read_at=read_at, colors=Colors, narrow=narrow, index=i, total=len(entries))
+        if i > 1:
+            print(file=out)
+        for line in lines:
+            print(line, file=out)
+    shown = sum(1 for ask in requested if ask["shown"])
+    with contextlib.redirect_stdout(sys.stderr):
+        print()
+        for ask in requested:
+            if not ask["shown"]:
+                print_status("error", f"{ask['value']}: {ask['outcome']}")
+        for entry in entries:
+            for limitation in entry["limitations"]:
+                print_status("warning", f"{entry['requested_as'][0]}: {limitation}")
+        complete = shown == len(named) and not any(e["limitations"] for e in entries)
+        print_status("success" if complete else "warning",
+                     f"{shown} of {len(named)} records shown"
+                     + ("" if complete else " - incomplete, see above"))
+    return 0 if complete else 2
+
+
 CHECK_OPTIONS = [
     ("--check FILE", "", "Which of these catalog numbers ArchivesSpace has (text list or any CSV with"),
     ("", "", "CATALOG_NUMBER). Given an Airtable pull, also compares its ASpace Parent RefID and"),
@@ -2264,6 +2498,9 @@ SELECT_OPTIONS = [
     ("", "", "Repeat for more; the order given is kept."),
     ("", "", "Saves the record package (see OUTPUT)."),
     ("", "", "Not with --list, --parent or --level"),
+    ("--screen", "", "With --record: show each record in full"),
+    ("", "", "on screen and save nothing."),
+    ("", "", "Not with -o or --mads-live"),
 ]
 FILL_OPTIONS = [
     ("--fill-parents FILE", "", "Fill blank ASpace Parent RefID cells from EJS Episode + ASpace File Type"),
@@ -2297,10 +2534,12 @@ def get_colored_help():
     {C.GREEN}2.{C.RESET} Checks which catalog numbers are already in ArchivesSpace (--check)
     {C.GREEN}3.{C.RESET} Fills a sheet's blank ASpace Parent RefID column (--fill-parents)
     {C.GREEN}4.{C.RESET} Checks whether exported records are live in MADS (--mads-live)
-    {C.GREEN}5.{C.RESET} Saves named records in full (--record): the JSON plus two CSVs"""),
+    {C.GREEN}5.{C.RESET} Saves named records in full (--record): the JSON plus two CSVs
+    {C.GREEN}6.{C.RESET} Shows named records in full on screen, saving nothing (--screen)"""),
         ("USAGE", f"""    {C.GREEN}${C.RESET} python3 data_import_export/aspace_csv_export.py [--level LEVEL] [--parent REFID] [options]
     {C.GREEN}${C.RESET} python3 data_import_export/aspace_csv_export.py --list FILE [options]
     {C.GREEN}${C.RESET} python3 data_import_export/aspace_csv_export.py --record VALUE [--record VALUE ...] [options]
+    {C.GREEN}${C.RESET} python3 data_import_export/aspace_csv_export.py --record VALUE [--record VALUE ...] --screen [--env NAME]
     {C.GREEN}${C.RESET} python3 data_import_export/aspace_csv_export.py --check FILE [-o PATH] [--env NAME]
     {C.GREEN}${C.RESET} python3 data_import_export/aspace_csv_export.py --fill-parents FILE [--env NAME]"""),
         ("OPTIONS", render_options(EXPORT_CLI_OPTIONS)),
@@ -2310,6 +2549,7 @@ def get_colored_help():
         ("EXAMPLES", f"""    {C.GREEN}${C.RESET} python3 data_import_export/aspace_csv_export.py --level all --env production
     {C.GREEN}${C.RESET} python3 data_import_export/aspace_csv_export.py --list batch.csv --env production
     {C.GREEN}${C.RESET} python3 data_import_export/aspace_csv_export.py --record JPC_AV_00000 --env production
+    {C.GREEN}${C.RESET} python3 data_import_export/aspace_csv_export.py --record JPC_AV_00000 --screen --env production
     {C.GREEN}${C.RESET} python3 data_import_export/aspace_csv_export.py --check batch.csv --env production
     {C.GREEN}${C.RESET} python3 data_import_export/aspace_csv_export.py --fill-parents batch.csv --env production"""),
         ("OUTPUT", f"""    Exports: {C.CYAN}{OUTPUT_DIR}/{C.RESET} (or -o)
@@ -2323,11 +2563,15 @@ def get_colored_help():
       aspace_records_ENV_STAMP.csv        the usual export columns
       aspace_records_ENV_STAMP_notes.csv  notes and Defined List items
     or, with -o FILE.json: FILE.json, FILE.csv and FILE_notes.csv
+    --record --screen: on screen only - nothing is saved; the records go to
+    stdout, progress and problems to stderr
     {C.DIM}The reports folder can be changed by setting logs_dir in creds.py{C.RESET}"""),
         ("EXIT", f"""    {C.GREEN}0{C.RESET}  done
     {C.YELLOW}2{C.RESET}  written but incomplete: rows for review (--fill-parents, expected), listed numbers
        not found, or MADS checks failed; --record: a value not exported, a
-       record saved incomplete or a duplicate check incomplete; --check:
+       record saved incomplete or a duplicate check incomplete; --screen: a
+       record not shown, a Path or linked name not available, or a duplicate
+       check incomplete - the records found are still shown; --check:
        something needs review (Airtable disagrees or is incomplete, not an item,
        ambiguous) or could not be checked - numbers simply not found are exit 0;
        also a bad argument or a creds.py problem - then nothing is written
@@ -2344,6 +2588,7 @@ def build_parser():
     parser = styled_parser(["[--level LEVEL] [--parent REFID] [options]",
                             "--list FILE [options]",
                             "--record VALUE [--record VALUE ...] [options]",
+                            "--record VALUE [--record VALUE ...] --screen [--env NAME]",
                             "--check FILE [-o PATH] [--env NAME]",
                             "--fill-parents FILE [--env NAME]"],
                            get_colored_help,
@@ -2355,6 +2600,7 @@ def build_parser():
     parser.add_argument("--list", metavar="FILE", dest="list_file", help=argparse.SUPPRESS)
     parser.add_argument("--record", action="append", metavar="VALUE", dest="records",
                         help=argparse.SUPPRESS)
+    parser.add_argument("--screen", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--check", metavar="FILE", dest="check_file", help=argparse.SUPPRESS)
     parser.add_argument("--fill-parents", metavar="FILE", dest="fill_file", help=argparse.SUPPRESS)
     parser.add_argument("--mads-live", action="store_true", help=argparse.SUPPRESS)
@@ -2377,6 +2623,12 @@ def main():
     if args.records and (args.list_file or args.parent or args.level != "item"):
         parser.error("--record names the exact records to export - it cannot be "
                      "combined with --list, --parent or --level")
+    if args.screen and not args.records:
+        parser.error("--screen shows the records named with --record - give at least "
+                     "one --record VALUE")
+    if args.screen and (args.output or args.mads_live):
+        parser.error("--record --screen shows records and saves nothing - it cannot be "
+                     "combined with -o or --mads-live")
     if args.fill_file and (args.list_file or args.records or args.parent or args.mads_live
                            or args.level != "item"):
         parser.error("--fill-parents fills a sheet's parent column - it cannot be "
@@ -2417,7 +2669,9 @@ def main():
 
     stamp = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{os.getpid()}"
     package_paths = None
-    if args.records:
+    if args.screen:
+        out_path = None   # on screen only: no package, folder or file
+    elif args.records:
         # The package's three names are checked now, before login, as fill
         # checks its pair; publication itself never replaces a file either,
         # so a name taken while the run is reading is still never overwritten.
@@ -2458,6 +2712,8 @@ def main():
 
     source = (f"{aspace_client.ACTIVE_ENV.upper()} ({aspace_client.ASPACE_URL}, "
               f"repo {aspace_client.REPO_ID}, resource {aspace_client.RESOURCE_ID}) - read-only")
+    if args.screen:
+        sys.exit(run_record_screen(named, source))
     if args.records:
         # its own branch: never the whole-resource export below
         sys.exit(run_record_export(named, package_paths, source, args.mads_live))
